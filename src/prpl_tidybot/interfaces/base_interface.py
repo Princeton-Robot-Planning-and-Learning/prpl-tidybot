@@ -37,3 +37,26 @@ class FakeBaseInterface(BaseInterface):
     def execute_action(self, action: SE2) -> None:
         self.base_state = action
         self.map_base_state = action
+
+
+class RealBaseInterface(BaseInterface):
+    """Skeleton real base interface. Every method is a placeholder that
+    raises until the hardware driver and marker detector get wired up."""
+
+    def get_base_state(self) -> SE2:
+        raise NotImplementedError(
+            "RealBaseInterface.get_base_state: read the current odom-frame "
+            "SE2 pose from the TidyBot base controller."
+        )
+
+    def get_map_base_state(self) -> SE2:
+        raise NotImplementedError(
+            "RealBaseInterface.get_map_base_state: read the current "
+            "map-frame SE2 pose from the marker detector."
+        )
+
+    def execute_action(self, action: SE2) -> None:
+        raise NotImplementedError(
+            "RealBaseInterface.execute_action: command the base to "
+            "absolute pose `action` (in odom frame)."
+        )

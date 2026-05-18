@@ -9,9 +9,18 @@ import abc
 import spatialmath
 from prpl_utils.structs import Image
 
-from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
-from prpl_tidybot.interfaces.base_interface import FakeBaseInterface
-from prpl_tidybot.interfaces.camera_interface import FakeCameraInterface
+from prpl_tidybot.interfaces.arm_interface import (
+    FakeArmInterface,
+    RealArmInterface,
+)
+from prpl_tidybot.interfaces.base_interface import (
+    FakeBaseInterface,
+    RealBaseInterface,
+)
+from prpl_tidybot.interfaces.camera_interface import (
+    FakeCameraInterface,
+    RealCameraInterface,
+)
 from prpl_tidybot.structs import TidyBotAction, TidyBotObservation
 
 
@@ -65,6 +74,44 @@ class FakeInterface(Interface):
         self.arm_interface = FakeArmInterface()
         self.base_interface = FakeBaseInterface()
         self.camera_interface = FakeCameraInterface()
+
+    def get_base_state(self) -> spatialmath.SE2:
+        return self.base_interface.get_base_state()
+
+    def get_map_base_state(self) -> spatialmath.SE2:
+        return self.base_interface.get_map_base_state()
+
+    def get_arm_state(self) -> list[float]:
+        return self.arm_interface.get_arm_state()
+
+    def get_gripper_state(self) -> float:
+        return self.arm_interface.get_gripper_state()
+
+    def get_wrist_image(self) -> Image:
+        return self.camera_interface.get_wrist_image()
+
+    def get_base_image(self) -> Image:
+        return self.camera_interface.get_base_image()
+
+    def execute_action(self, action: TidyBotAction) -> None:
+        self.base_interface.execute_action(action.base_local_goal)
+        self.arm_interface.execute_action(action.arm_goal)
+        self.arm_interface.execute_gripper_action(action.gripper_goal)
+
+
+class RealInterface(Interface):
+    """The real and sole interface to the TidyBot++ robot.
+
+    Each component (arm, base, camera) is a skeleton whose methods raise
+    `NotImplementedError`. Implement them piece-by-piece against the real
+    hardware drivers; the demo at `scripts/demo_real_to_sim_to_real.py
+    --mode real` will surface the next unimplemented method on each run.
+    """
+
+    def __init__(self) -> None:
+        self.arm_interface = RealArmInterface()
+        self.base_interface = RealBaseInterface()
+        self.camera_interface = RealCameraInterface()
 
     def get_base_state(self) -> spatialmath.SE2:
         return self.base_interface.get_base_state()
