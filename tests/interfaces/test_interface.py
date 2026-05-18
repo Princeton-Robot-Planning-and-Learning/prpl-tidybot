@@ -23,8 +23,8 @@ def test_fake_interface_get_observation():
     assert np.allclose(obs.map_base_pose.A, SE2(x=3.0, y=4.0, theta=0.5).A)
 
 
-def test_fake_interface_execute_actions():
-    """execute_*_action() routes each TidyBotAction component to the right fake."""
+def test_fake_interface_execute_action():
+    """execute_action() routes each TidyBotAction component to the right fake."""
     interface = FakeInterface()
     arm_goal = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
     base_goal = SE2(x=2.0, y=-1.0, theta=0.4)
@@ -34,9 +34,7 @@ def test_fake_interface_execute_actions():
         gripper_goal=0.8,
     )
 
-    interface.execute_arm_action(action)
-    interface.execute_base_action(action)
-    interface.execute_gripper_action(action)
+    interface.execute_action(action)
 
     assert np.allclose(interface.get_arm_state(), arm_goal)
     assert np.allclose(interface.get_base_state().A, base_goal.A)

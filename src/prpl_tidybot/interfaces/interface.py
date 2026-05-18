@@ -43,16 +43,8 @@ class Interface(abc.ABC):
         """Get the current base image."""
 
     @abc.abstractmethod
-    def execute_base_action(self, action: TidyBotAction) -> None:
-        """Execute the base component of a TidyBotAction in the local frame."""
-
-    @abc.abstractmethod
-    def execute_arm_action(self, action: TidyBotAction) -> None:
-        """Execute the arm component of a TidyBotAction."""
-
-    @abc.abstractmethod
-    def execute_gripper_action(self, action: TidyBotAction) -> None:
-        """Execute the gripper component of a TidyBotAction."""
+    def execute_action(self, action: TidyBotAction) -> None:
+        """Execute a full TidyBotAction (base, arm, and gripper components)."""
 
     def get_observation(self) -> TidyBotObservation:
         """Build a full TidyBotObservation from the component getters."""
@@ -92,11 +84,7 @@ class FakeInterface(Interface):
     def get_base_image(self) -> Image:
         return self.camera_interface.get_base_image()
 
-    def execute_base_action(self, action: TidyBotAction) -> None:
+    def execute_action(self, action: TidyBotAction) -> None:
         self.base_interface.execute_action(action.base_local_goal)
-
-    def execute_arm_action(self, action: TidyBotAction) -> None:
         self.arm_interface.execute_action(action.arm_goal)
-
-    def execute_gripper_action(self, action: TidyBotAction) -> None:
         self.arm_interface.execute_gripper_action(action.gripper_goal)
