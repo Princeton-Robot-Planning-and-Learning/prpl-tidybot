@@ -33,3 +33,20 @@ class FakeCameraInterface(CameraInterface):
 
     def get_base_image(self) -> Image:
         return self.base_image
+
+
+class RealCameraInterface(CameraInterface):
+    """Skeleton real camera interface. Methods raise until the wrist
+    (Kinova) and base (Logitech) cameras get wired up."""
+
+    def get_wrist_image(self) -> Image:
+        raise NotImplementedError(
+            "RealCameraInterface.get_wrist_image: capture a frame from the "
+            f"wrist camera (Kinova). Expected shape {WRIST_CAMERA_DIMS}."
+        )
+
+    def get_base_image(self) -> Image:
+        raise NotImplementedError(
+            "RealCameraInterface.get_base_image: capture a frame from the "
+            f"base camera (Logitech). Expected shape {BASE_CAMERA_DIMS}."
+        )
