@@ -6,7 +6,7 @@ Wires:
                      ^                          PrplLab3DPerceiver
                      |                                  |
                      |                                  v
-            PrplLab3DActionGrounder <- Agent <- ObjectCentricState
+            Kinematic3DActionGrounder <- Agent <- ObjectCentricState
 
 through `prpl_utils.real_sim.Runner` and asserts that the FakeInterface
 ends up at the cumulative absolute target after several steps of canned
@@ -23,7 +23,7 @@ from relational_structs import ObjectCentricState
 
 from prpl_tidybot.interfaces.interface import FakeInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
-from prpl_tidybot.real_sim import PrplLab3DActionGrounder, PrplLab3DPerceiver
+from prpl_tidybot.real_sim import Kinematic3DActionGrounder, PrplLab3DPerceiver
 
 
 class _CannedActionAgent(Agent[ObjectCentricState, NDArray[np.floating]]):
@@ -53,7 +53,7 @@ def _build_runner(
         real_env=env,
         perceiver=PrplLab3DPerceiver(),
         agent=_CannedActionAgent(actions),
-        action_grounder=PrplLab3DActionGrounder(),
+        action_grounder=Kinematic3DActionGrounder(),
     )
     return runner, interface
 

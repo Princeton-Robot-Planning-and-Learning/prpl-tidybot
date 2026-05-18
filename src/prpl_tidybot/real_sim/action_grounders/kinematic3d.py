@@ -1,4 +1,9 @@
-"""Action grounder for the kinder/PrplLab3D-o{1,2}-v0 (kinematic3d) env."""
+"""Action grounder for kinder kinematic3d envs (PrplLab3D, BaseMotion3D, …).
+
+The 11-d action layout is shared across kinematic3d envs (they all use
+`Kinematic3DRobotActionSpace`), so a single grounder works for any of
+them — pick this class regardless of which kinematic3d env you're driving.
+"""
 
 import numpy as np
 from numpy.typing import NDArray
@@ -9,7 +14,7 @@ from spatialmath import SE2
 from prpl_tidybot.structs import TidyBotAction
 
 
-class PrplLab3DActionGrounder(
+class Kinematic3DActionGrounder(
     ActionGrounder[NDArray[np.floating], TidyBotAction, ObjectCentricState]
 ):
     """Map a kinematic3d 11-d sim action to an absolute TidyBotAction.
