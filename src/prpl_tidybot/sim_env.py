@@ -20,23 +20,33 @@ from relational_structs import ObjectCentricState
 from relational_structs.spaces import ObjectCentricBoxSpace
 
 
-class PrplLab3DSimEnv(
+class KinderSimEnv(
     gymnasium.Env[ObjectCentricState, NDArray]  # type: ignore[type-arg]
 ):
-    """A thin wrapper that devectorizes obs from the underlying kinder env.
+    """Thin wrapper that devectorizes obs from any kinematic3d kinder env.
 
-    Defaults to `kinder/PrplLab3D-o1-v0`; override `env_id` for other
-    variants. The wrapped env owns the kinder state; this class just
-    forwards `reset` / `step` / `render` and unwraps the observation.
+    Pass the gymnasium id (e.g. `"kinder/BaseMotion3D-v0"`). The wrapped
+    env owns the kinder state; this class just forwards `reset` / `step`
+    / `render` and exchanges the raw vectorized obs for an
+    `ObjectCentricState`.
     """
 
-    def __init__(self, env_id: str = "kinder/PrplLab3D-o1-v0") -> None:
+    def __init__(self, env_id: str) -> None:
         kinder.register_all_environments()
         self._env = gymnasium.make(env_id, render_mode="rgb_array")
-        # kinder envs serialize ObjectCentricState through ObjectCentricBoxSpace;
-        # we devectorize back to the structured state in reset/step.
+        # kinder envs serialize ObjectCentricState through
+        # ObjectCentricBoxSpace; we devectorize back to the structured
+        # state in reset/step.
         assert isinstance(self._env.observation_space, ObjectCentricBoxSpace)
         self._obs_space: ObjectCentricBoxSpace = self._env.observation_space
+        # Expose the inner env's spaces so callers that introspect
+        # `env.observation_space` / `env.action_space` see something
+        # meaningful (gymnasium.Env's class-level defaults would otherwise
+        # be unset). The observation_space is the *vectorized* box space
+        # even though `step` returns a devectorized ObjectCentricState —
+        # the env-model factory in kinder-baselines reads box dimensions
+        # off this space.
+        self.observation_space = self._env.observation_space  # type: ignore[assignment]
         self.action_space = self._env.action_space
 
     def reset(

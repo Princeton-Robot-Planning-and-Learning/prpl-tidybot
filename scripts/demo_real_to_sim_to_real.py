@@ -2,10 +2,10 @@
 
 In `fake` mode the pipeline is the production one: a `FakeInterface`
 (stand-in for real hardware) backs a `RealTidyBotEnv`, observations are
-`TidyBotObservation`, and the `PrplLab3DPerceiver` / `PrplLab3DActionGrounder`
+`TidyBotObservation`, and the `PrplLab3DPerceiver` / `Kinematic3DActionGrounder`
 do the conversions to and from the kinder state/action space.
 
-In `sim` mode the kinder env is driven directly via `PrplLab3DSimEnv`;
+In `sim` mode the kinder env is driven directly via `KinderSimEnv`;
 observations are already `ObjectCentricState`, so the perceiver and
 action grounder are pass-throughs.
 
@@ -36,12 +36,12 @@ from relational_structs import ObjectCentricState
 from prpl_tidybot.interfaces.interface import FakeInterface, RealInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
 from prpl_tidybot.real_sim import (
+    Kinematic3DActionGrounder,
     PassThroughActionGrounder,
     PassThroughPerceiver,
-    PrplLab3DActionGrounder,
     PrplLab3DPerceiver,
 )
-from prpl_tidybot.sim_env import PrplLab3DSimEnv
+from prpl_tidybot.sim_env import KinderSimEnv
 
 
 class _RandomActionAgent(Agent[ObjectCentricState, NDArray[np.floating]]):
@@ -59,18 +59,18 @@ def _build_pipeline(
     if mode == "fake":
         env: gymnasium.Env = RealTidyBotEnv(FakeInterface())
         perceiver: Perceiver = PrplLab3DPerceiver()
-        grounder: ActionGrounder = PrplLab3DActionGrounder()
+        grounder: ActionGrounder = Kinematic3DActionGrounder()
         return env, perceiver, grounder
     if mode == "sim":
         return (
-            PrplLab3DSimEnv(),
+            KinderSimEnv("kinder/PrplLab3D-o1-v0"),
             PassThroughPerceiver[ObjectCentricState](),
             PassThroughActionGrounder[NDArray[np.floating]](),
         )
     if mode == "real":
         env = RealTidyBotEnv(RealInterface())
         perceiver = PrplLab3DPerceiver()
-        grounder = PrplLab3DActionGrounder()
+        grounder = Kinematic3DActionGrounder()
         return env, perceiver, grounder
     raise ValueError(f"unknown mode: {mode!r}")
 

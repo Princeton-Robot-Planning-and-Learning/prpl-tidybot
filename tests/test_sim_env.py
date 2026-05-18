@@ -3,12 +3,12 @@
 import numpy as np
 import pytest
 
-from prpl_tidybot.sim_env import PrplLab3DSimEnv
+from prpl_tidybot.sim_env import KinderSimEnv
 
 
 @pytest.fixture(name="env")
 def _env():
-    env = PrplLab3DSimEnv()
+    env = KinderSimEnv("kinder/PrplLab3D-o1-v0")
     yield env
     env.close()
 

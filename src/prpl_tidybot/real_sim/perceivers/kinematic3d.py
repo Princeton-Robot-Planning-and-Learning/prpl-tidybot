@@ -1,10 +1,19 @@
-"""Perceiver for the kinder/PrplLab3D-o{1,2}-v0 (kinematic3d) env."""
+"""Perceivers for kinematic3d kinder envs.
 
-from typing import Any
+Each subclass turns a `TidyBotObservation` into an `ObjectCentricState`
+that matches a particular kinder env's type schema. The robot
+proprioception is identical across kinematic3d envs (same
+`Kinematic3DRobotType` features), so it lives on the base class; only
+the non-robot object detection differs per env.
+"""
+
+import abc
+from typing import Any, Sequence
 
 from kinder.envs.kinematic3d.object_types import (
     Kinematic3DCuboidType,
     Kinematic3DEnvTypeFeatures,
+    Kinematic3DPointType,
     Kinematic3DRobotType,
 )
 from kinder.envs.kinematic3d.prpl3d import PrplLab3DEnvConfig
@@ -17,19 +26,28 @@ from prpl_tidybot.structs import TidyBotObservation
 _DEFAULT_CUBE_HALF_EXTENTS = PrplLab3DEnvConfig().block_half_extents
 
 
-class PrplLab3DPerceiver(Perceiver[TidyBotObservation, ObjectCentricState]):
-    """Build a PrplLab3D ObjectCentricState from a TidyBotObservation.
+class KinematicRobotPerceiverBase(
+    Perceiver[TidyBotObservation, ObjectCentricState], abc.ABC
+):
+    """Build a kinematic3d ObjectCentricState from a TidyBotObservation.
 
-    Uses the Kinematic3DEnvTypeFeatures schema. No velocity fields (the env
-    is kinematic); a `grasp_active` / `grasp_tf_*` block tracks an
-    optionally-grasped object — reported as "nothing grasped" here.
-    Non-robot detection currently returns placeholder cube(s) at the
-    origin; replace when real perception lands.
+    Subclasses implement `_detect_objects` to add non-robot scene content
+    (placeholder cubes, target points, etc.) on top of the shared robot
+    proprioception this class writes.
     """
 
-    def __init__(self, robot_name: str = "robot", num_cubes: int = 1) -> None:
+    def __init__(self, robot_name: str = "robot") -> None:
         self._robot_name = robot_name
-        self._num_cubes = num_cubes
+
+    @abc.abstractmethod
+    def _detect_objects(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> dict[Object, dict[str, float]]:
+        """Return the non-robot objects in the scene with their features.
+
+        Currently returns hardcoded placeholders; replace when real
+        perception lands.
+        """
 
     def reset(
         self, obs: TidyBotObservation, info: dict[str, Any]
@@ -42,10 +60,16 @@ class PrplLab3DPerceiver(Perceiver[TidyBotObservation, ObjectCentricState]):
     def _build_state(
         self, obs: TidyBotObservation, info: dict[str, Any]
     ) -> ObjectCentricState:
-        del info  # currently unused
         state_dict: dict[Object, dict[str, float]] = {}
         robot = Object(self._robot_name, Kinematic3DRobotType)
-        state_dict[robot] = {
+        state_dict[robot] = self._build_robot_features(obs)
+        state_dict.update(self._detect_objects(obs, info))
+        return create_state_from_dict(state_dict, Kinematic3DEnvTypeFeatures)
+
+    def _build_robot_features(self, obs: TidyBotObservation) -> dict[str, float]:
+        # Real-side grasp tracking lands with real perception; report
+        # "nothing grasped" for now.
+        return {
             "pos_base_x": obs.map_base_pose.x,
             "pos_base_y": obs.map_base_pose.y,
             "pos_base_rot": obs.map_base_pose.theta(),
@@ -66,10 +90,26 @@ class PrplLab3DPerceiver(Perceiver[TidyBotObservation, ObjectCentricState]):
             "grasp_tf_qz": 0.0,
             "grasp_tf_qw": 1.0,
         }
+
+
+class PrplLab3DPerceiver(KinematicRobotPerceiverBase):
+    """Perceiver for kinder/PrplLab3D-o{1,2}-v0.
+
+    Non-robot detection currently emits placeholder cubes at the origin
+    with the env's default half-extents.
+    """
+
+    def __init__(self, robot_name: str = "robot", num_cubes: int = 1) -> None:
+        super().__init__(robot_name=robot_name)
+        self._num_cubes = num_cubes
+
+    def _detect_objects(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> dict[Object, dict[str, float]]:
+        del obs, info
         hx, hy, hz = _DEFAULT_CUBE_HALF_EXTENTS
-        for i in range(self._num_cubes):
-            cube = Object(f"cube{i}", Kinematic3DCuboidType)
-            state_dict[cube] = {
+        return {
+            Object(f"cube{i}", Kinematic3DCuboidType): {
                 "pose_x": 0.0,
                 "pose_y": 0.0,
                 "pose_z": 0.0,
@@ -83,4 +123,43 @@ class PrplLab3DPerceiver(Perceiver[TidyBotObservation, ObjectCentricState]):
                 "half_extent_y": hy,
                 "half_extent_z": hz,
             }
-        return create_state_from_dict(state_dict, Kinematic3DEnvTypeFeatures)
+            for i in range(self._num_cubes)
+        }
+
+
+class BaseMotion3DPerceiver(KinematicRobotPerceiverBase):
+    """Perceiver for kinder/BaseMotion3D-v0.
+
+    Emits a single placeholder `target` of `Kinematic3DPointType` at the
+    `target_pose` provided to the constructor (in env world frame). When
+    real perception lands, this gets replaced with a real target detection.
+    """
+
+    def __init__(
+        self,
+        target_pose: Sequence[float],
+        robot_name: str = "robot",
+    ) -> None:
+        super().__init__(robot_name=robot_name)
+        if len(target_pose) != 3:
+            raise ValueError(
+                f"target_pose must be (x, y, z); got {tuple(target_pose)!r}"
+            )
+        self._target_pose: tuple[float, float, float] = (
+            float(target_pose[0]),
+            float(target_pose[1]),
+            float(target_pose[2]),
+        )
+
+    def _detect_objects(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> dict[Object, dict[str, float]]:
+        del obs, info
+        x, y, z = self._target_pose
+        return {
+            Object("target", Kinematic3DPointType): {
+                "x": x,
+                "y": y,
+                "z": z,
+            }
+        }

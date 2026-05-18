@@ -6,7 +6,7 @@ from spatialmath import SE2
 
 from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
 from prpl_tidybot.real_sim.action_grounders.kinematic3d import (
-    PrplLab3DActionGrounder,
+    Kinematic3DActionGrounder,
 )
 from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
 from prpl_tidybot.structs import TidyBotObservation
@@ -38,7 +38,7 @@ def test_base_delta_becomes_absolute_target():
     action[1] = -0.2
     action[2] = 0.05
 
-    real_action = PrplLab3DActionGrounder()(action, state)
+    real_action = Kinematic3DActionGrounder()(action, state)
 
     assert real_action.base_local_goal.x == pytest.approx(1.1)
     assert real_action.base_local_goal.y == pytest.approx(1.8)
@@ -51,7 +51,7 @@ def test_arm_delta_summed_with_current_joints():
     action = np.zeros(11)
     action[3:10] = [0.01, 0.02, 0.03, -0.01, -0.02, -0.03, 0.04]
 
-    real_action = PrplLab3DActionGrounder()(action, state)
+    real_action = Kinematic3DActionGrounder()(action, state)
 
     expected = [0.11, 0.22, 0.33, 0.39, 0.48, 0.57, 0.74]
     assert real_action.arm_goal == pytest.approx(expected)
@@ -62,7 +62,7 @@ def test_gripper_close_command():
     state = _make_state(gripper=0.4)
     action = np.zeros(11)
     action[10] = -1.0
-    real_action = PrplLab3DActionGrounder()(action, state)
+    real_action = Kinematic3DActionGrounder()(action, state)
     assert real_action.gripper_goal == 1.0
 
 
@@ -71,7 +71,7 @@ def test_gripper_open_command():
     state = _make_state(gripper=0.4)
     action = np.zeros(11)
     action[10] = 1.0
-    real_action = PrplLab3DActionGrounder()(action, state)
+    real_action = Kinematic3DActionGrounder()(action, state)
     assert real_action.gripper_goal == 0.0
 
 
@@ -80,5 +80,5 @@ def test_gripper_no_change_passes_through_current():
     state = _make_state(gripper=0.4)
     action = np.zeros(11)
     action[10] = 0.0
-    real_action = PrplLab3DActionGrounder()(action, state)
+    real_action = Kinematic3DActionGrounder()(action, state)
     assert real_action.gripper_goal == pytest.approx(0.4)
