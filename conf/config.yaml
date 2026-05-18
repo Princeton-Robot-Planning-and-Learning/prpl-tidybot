@@ -1,0 +1,27 @@
+# Top-level demo config. Pick an env via Hydra group:
+#   python scripts/demo.py env=base_motion3d mode=sim
+#
+# `mode` is a plain string field rather than its own group — each env
+# yaml exposes `pipelines.{fake,sim,real}` and the demo selects the
+# right one with `cfg.env.pipelines[cfg.mode]`. Adding a new env is one
+# new file under conf/env/; no code changes.
+
+defaults:
+  - _self_
+  - env: ???
+
+hydra:
+  run:
+    dir: ./logs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+mode: fake
+seed: 0
+max_eval_steps: 100
+
+# BilevelPlanningAgent knobs (per-env overrides allowed inside env yamls).
+agent:
+  max_abstract_plans: 10
+  samples_per_step: 3
+  max_skill_horizon: 100
+  heuristic_name: hff
+  planning_timeout: 60

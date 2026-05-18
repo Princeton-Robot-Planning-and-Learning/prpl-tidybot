@@ -124,11 +124,11 @@ celerybeat.pid
 # Environments
 .env
 .venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+/env/
+/venv/
+/ENV/
+/env.bak/
+/venv.bak/
 
 # Spyder project settings
 .spyderproject
@@ -162,3 +162,7 @@ cython_debug/
 #.idea/
 
 uv.lock
+
+# Hydra run / sweep outputs.
+logs/
+outputs/
