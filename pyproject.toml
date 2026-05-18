@@ -13,7 +13,7 @@ dependencies = [
    "matplotlib",
    "gymnasium",
    "spatialmath-python",
-   "prpl_utils>=0.0.5",
+   "prpl_utils>=0.0.6",
    "relational_structs>=0.0.1",
    "kindergarden>=0.1.3",
 ]
