@@ -49,8 +49,16 @@ uv sync --all-extras --dev
 ## Try it
 
 ```bash
-python scripts/demo_real_to_sim_to_real.py --steps 10 --seed 0
+python scripts/demo_real_to_sim_to_real.py --mode fake --steps 10 --seed 0
+python scripts/demo_real_to_sim_to_real.py --mode sim --steps 10 --seed 0
 ```
+
+The `fake` and `sim` modes share the same agent loop (kinder state in,
+11-d kinder action out); `fake` wraps a `FakeInterface` and goes through
+the `RealTidyBotEnv` / `PrplLab3DPerceiver` / `PrplLab3DActionGrounder`
+chain, while `sim` drives a `PrplLab3DSimEnv` (a thin kinder wrapper)
+with pass-through perceiver / action grounder. A future `real` mode
+slots in alongside `fake`.
 
 ## Develop
 
