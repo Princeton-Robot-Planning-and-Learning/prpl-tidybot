@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
+from prpl_tidybot.constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
 from prpl_tidybot.interfaces.camera_interface import FakeCameraInterface
 
 

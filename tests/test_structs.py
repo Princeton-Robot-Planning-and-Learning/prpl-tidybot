@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import spatialmath
 
-from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
+from prpl_tidybot.constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
 from prpl_tidybot.structs import TidyBotAction, TidyBotObservation
 
 
