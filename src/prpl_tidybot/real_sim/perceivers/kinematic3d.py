@@ -10,13 +10,17 @@ the non-robot object detection differs per env.
 import abc
 from typing import Any, Sequence
 
+from kinder.envs.kinematic3d.base_motion3d import BaseMotion3DObjectCentricState
 from kinder.envs.kinematic3d.object_types import (
     Kinematic3DCuboidType,
     Kinematic3DEnvTypeFeatures,
     Kinematic3DPointType,
     Kinematic3DRobotType,
 )
-from kinder.envs.kinematic3d.prpl3d import PrplLab3DEnvConfig
+from kinder.envs.kinematic3d.prpl3d import (
+    PrplLab3DEnvConfig,
+    PrplLab3DObjectCentricState,
+)
 from prpl_utils.real_sim import Perceiver
 from relational_structs import Object, ObjectCentricState
 from relational_structs.utils import create_state_from_dict
@@ -38,6 +42,17 @@ class KinematicRobotPerceiverBase(
 
     def __init__(self, robot_name: str = "robot") -> None:
         self._robot_name = robot_name
+
+    @property
+    @abc.abstractmethod
+    def _state_cls(self) -> type[ObjectCentricState]:
+        """Env-specific ObjectCentricState subclass to construct.
+
+        Bilevel-planning env models for each kinder env assert that the
+        state is an instance of the env's specific state class (e.g.
+        `BaseMotion3DObjectCentricState`), so we have to construct that
+        same subclass here rather than a plain ObjectCentricState.
+        """
 
     @abc.abstractmethod
     def _detect_objects(
@@ -64,7 +79,9 @@ class KinematicRobotPerceiverBase(
         robot = Object(self._robot_name, Kinematic3DRobotType)
         state_dict[robot] = self._build_robot_features(obs)
         state_dict.update(self._detect_objects(obs, info))
-        return create_state_from_dict(state_dict, Kinematic3DEnvTypeFeatures)
+        return create_state_from_dict(
+            state_dict, Kinematic3DEnvTypeFeatures, state_cls=self._state_cls
+        )
 
     def _build_robot_features(self, obs: TidyBotObservation) -> dict[str, float]:
         # Real-side grasp tracking lands with real perception; report
@@ -102,6 +119,10 @@ class PrplLab3DPerceiver(KinematicRobotPerceiverBase):
     def __init__(self, robot_name: str = "robot", num_cubes: int = 1) -> None:
         super().__init__(robot_name=robot_name)
         self._num_cubes = num_cubes
+
+    @property
+    def _state_cls(self) -> type[ObjectCentricState]:
+        return PrplLab3DObjectCentricState
 
     def _detect_objects(
         self, obs: TidyBotObservation, info: dict[str, Any]
@@ -150,6 +171,10 @@ class BaseMotion3DPerceiver(KinematicRobotPerceiverBase):
             float(target_pose[1]),
             float(target_pose[2]),
         )
+
+    @property
+    def _state_cls(self) -> type[ObjectCentricState]:
+        return BaseMotion3DObjectCentricState
 
     def _detect_objects(
         self, obs: TidyBotObservation, info: dict[str, Any]

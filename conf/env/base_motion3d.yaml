@@ -1,0 +1,39 @@
+# kinder/BaseMotion3D-v0 — the robot reaches a target base pose.
+# Bilevel-planning env model lives in
+# kinder_bilevel_planning.env_models.kinematic3d.base_motion3d.
+
+env_name: base_motion3d
+make_kwargs:
+  id: kinder/BaseMotion3D-v0
+env_model_kwargs: {}
+
+# Used by the fake/real perceiver: where the agent thinks the target is.
+# (Sim mode reads the target from the kinder env directly, ignoring this.)
+target_pose: [1.0, 1.0, 0.2]
+
+pipelines:
+  fake:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.FakeInterface
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.BaseMotion3DPerceiver
+      target_pose: ${env.target_pose}
+    action_grounder:
+      _target_: prpl_tidybot.real_sim.action_grounders.kinematic3d.Kinematic3DActionGrounder
+  sim:
+    real_env:
+      _target_: prpl_tidybot.sim_env.KinderSimEnv
+      env_id: ${env.make_kwargs.id}
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.passthrough.PassThroughPerceiver
+    action_grounder:
+      _target_: prpl_tidybot.real_sim.action_grounders.passthrough.PassThroughActionGrounder
+  real:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.RealInterface
+    perceiver: ${env.pipelines.fake.perceiver}
+    action_grounder: ${env.pipelines.fake.action_grounder}

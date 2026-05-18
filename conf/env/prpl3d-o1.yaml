@@ -1,0 +1,36 @@
+# kinder/PrplLab3D-o1-v0 — pick/place one cube in the lab.
+# Bilevel-planning env model lives in
+# kinder_bilevel_planning.env_models.kinematic3d.prpl3d.
+
+env_name: prpl3d
+make_kwargs:
+  id: kinder/PrplLab3D-o1-v0
+env_model_kwargs:
+  num_objects: 1
+
+pipelines:
+  fake:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.FakeInterface
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.PrplLab3DPerceiver
+      num_cubes: 1
+    action_grounder:
+      _target_: prpl_tidybot.real_sim.action_grounders.kinematic3d.Kinematic3DActionGrounder
+  sim:
+    real_env:
+      _target_: prpl_tidybot.sim_env.KinderSimEnv
+      env_id: ${env.make_kwargs.id}
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.passthrough.PassThroughPerceiver
+    action_grounder:
+      _target_: prpl_tidybot.real_sim.action_grounders.passthrough.PassThroughActionGrounder
+  real:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.RealInterface
+    perceiver: ${env.pipelines.fake.perceiver}
+    action_grounder: ${env.pipelines.fake.action_grounder}
