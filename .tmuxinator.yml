@@ -1,0 +1,21 @@
+name: prpl-tidybot
+root: <%= ENV['PRPL_REPO_DIR'] || '~/prpl-tidybot' %>
+
+# Override the SSH targets and remote repo path via env vars before
+# launching, e.g.
+#
+#   PRPL_NUC_HOST=tidybot@my-nuc tmuxinator local
+#
+# See README.md for prerequisites (passwordless SSH, tmuxinator install).
+
+windows:
+  - prpl-tidybot:
+      # `tiled` gives a 2-up grid with the wide bottom pane (the planner)
+      # taking the full width — handy for typing.
+      layout: tiled
+      panes:
+        - ./scripts/run_remote.sh "${PRPL_NUC_HOST:-tidybot@tidybot-nuc}"
+          python -m prpl_tidybot.third_party.base_server
+        - ./scripts/run_remote.sh "${PRPL_PERCEPTION_HOST:-yixuan@tidybot-laptop}"
+          python scripts/run_marker_detector_server.py
+        - ./scripts/run_remote.sh "${PRPL_NUC_HOST:-tidybot@tidybot-nuc}" bash
