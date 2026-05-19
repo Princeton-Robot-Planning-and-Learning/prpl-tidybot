@@ -101,23 +101,19 @@ connection per remote.
 
 ```bash
 cd prpl-tidybot
-tmuxinator local            # alias: mux local
+./scripts/launch.sh                          # use whatever's already checked out remotely
+./scripts/launch.sh my-feature-branch        # sync every remote pane to <branch> first
 ```
 
-To also sync every remote checkout to a specific branch before the
-servers start, use the wrapper script. Each pane runs
+When a branch is given, each pane runs
 `git fetch origin <branch> && git checkout <branch> && git merge --ff-only FETCH_HEAD`
-on the remote — non-fast-forward state (local commits on the NUC, dirty
-tree) aborts the pane instead of silently running stale code:
+on the remote before starting its server — non-fast-forward state (local
+commits on the NUC, dirty tree) aborts the pane instead of silently
+running stale code.
 
-```bash
-./scripts/launch.sh my-feature-branch
-```
-
-`tmuxinator local` itself doesn't forward positional args, so the
-wrapper just calls `tmuxinator start ./.tmuxinator.yml <branch>` for
-you. Run it with no argument and it behaves like plain `tmuxinator
-local`.
+The wrapper is a thin shim around `tmuxinator start ./.tmuxinator.yml`,
+which (unlike `tmuxinator local`) forwards positional args to the
+project ERB.
 
 One window opens with three tiled panes:
 
