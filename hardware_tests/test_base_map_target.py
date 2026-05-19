@@ -18,6 +18,7 @@ import time
 from spatialmath import SE2
 
 from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
+from prpl_tidybot.interfaces.camera_interface import FakeCameraInterface
 from prpl_tidybot.interfaces.interface import RealInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
 from prpl_tidybot.structs import TidyBotAction
@@ -33,8 +34,11 @@ DWELL_BETWEEN_WAYPOINTS_S = 1.0
 def main() -> int:
     """Drive the base to each map-frame waypoint in turn, printing the tracking error at
     each stop."""
-    print("Connecting to the real base interface (arm is faked)...")
-    interface = RealInterface(arm_interface=FakeArmInterface())
+    print("Connecting to the real base interface (arm and cameras are faked)...")
+    interface = RealInterface(
+        arm_interface=FakeArmInterface(),
+        camera_interface=FakeCameraInterface(),
+    )
     env = RealTidyBotEnv(interface)
     try:
         obs, _ = env.reset()

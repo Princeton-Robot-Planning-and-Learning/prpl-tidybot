@@ -40,9 +40,12 @@ pipelines:
       _target_: prpl_tidybot.real_env.RealTidyBotEnv
       interface:
         _target_: prpl_tidybot.interfaces.interface.RealInterface
-        # This rollout doesn't read or move the arm, so swap in the
-        # fake arm interface and skip the real-hardware path entirely.
+        # This rollout doesn't read or move the arm and doesn't look at images,
+        # so swap in the fake arm and camera interfaces; get_observation()
+        # otherwise hits the real wrist/base cameras which aren't wired up yet.
         arm_interface:
           _target_: prpl_tidybot.interfaces.arm_interface.FakeArmInterface
+        camera_interface:
+          _target_: prpl_tidybot.interfaces.camera_interface.FakeCameraInterface
     perceiver: ${env.pipelines.fake.perceiver}
     action_grounder: ${env.pipelines.fake.action_grounder}
