@@ -30,14 +30,14 @@ def test_real_tidybot_env_step_executes_action():
     base_goal = SE2(x=2.0, y=-1.0, theta=0.4)
     action = TidyBotAction(
         arm_goal=arm_goal,
-        base_local_goal=base_goal,
+        base_pose_target_map=base_goal,
         gripper_goal=0.8,
     )
 
     obs, reward, terminated, truncated, info = env.step(action)
 
     assert np.allclose(obs.arm_conf, arm_goal)
-    assert np.allclose(obs.base_pose.A, base_goal.A)
+    assert np.allclose(obs.map_base_pose.A, base_goal.A)
     assert obs.gripper == 0.8
     assert reward == 0.0
     assert terminated is False

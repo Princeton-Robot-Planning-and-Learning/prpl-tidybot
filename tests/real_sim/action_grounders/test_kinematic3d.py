@@ -40,9 +40,9 @@ def test_base_delta_becomes_absolute_target():
 
     real_action = Kinematic3DActionGrounder()(action, state)
 
-    assert real_action.base_local_goal.x == pytest.approx(1.1)
-    assert real_action.base_local_goal.y == pytest.approx(1.8)
-    assert real_action.base_local_goal.theta() == pytest.approx(0.55)
+    assert real_action.base_pose_target_map.x == pytest.approx(1.1)
+    assert real_action.base_pose_target_map.y == pytest.approx(1.8)
+    assert real_action.base_pose_target_map.theta() == pytest.approx(0.55)
 
 
 def test_arm_delta_summed_with_current_joints():

@@ -30,12 +30,12 @@ def test_fake_interface_execute_action():
     base_goal = SE2(x=2.0, y=-1.0, theta=0.4)
     action = TidyBotAction(
         arm_goal=arm_goal,
-        base_local_goal=base_goal,
+        base_pose_target_map=base_goal,
         gripper_goal=0.8,
     )
 
     interface.execute_action(action)
 
     assert np.allclose(interface.get_arm_state(), arm_goal)
-    assert np.allclose(interface.get_base_state().A, base_goal.A)
+    assert np.allclose(interface.get_map_base_state().A, base_goal.A)
     assert interface.get_gripper_state() == 0.8

@@ -70,6 +70,6 @@ class Kinematic3DActionGrounder(
 
         return TidyBotAction(
             arm_goal=arm_goal,
-            base_local_goal=base_goal,
+            base_pose_target_map=base_goal,
             gripper_goal=gripper_goal,
         )
