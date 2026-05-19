@@ -26,6 +26,9 @@ pipelines:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv
       env_id: ${env.make_kwargs.id}
+      # Enable inner-env `set_state` so this same pipeline can serve as
+      # a shadow sim for the side-by-side video recorder.
+      allow_state_access: true
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.passthrough.PassThroughPerceiver
     action_grounder:
