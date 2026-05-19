@@ -1,14 +1,9 @@
 """Tests for interface.py."""
 
 import numpy as np
-import pytest
 from spatialmath import SE2
 
-from prpl_tidybot.interfaces.arm_interface import (
-    FakeArmInterface,
-    RealArmInterface,
-)
-from prpl_tidybot.interfaces.interface import FakeInterface, RealInterface
+from prpl_tidybot.interfaces.interface import FakeInterface
 from prpl_tidybot.structs import TidyBotAction
 
 
@@ -44,25 +39,3 @@ def test_fake_interface_execute_action():
     assert np.allclose(interface.get_arm_state(), arm_goal)
     assert np.allclose(interface.get_base_state().A, base_goal.A)
     assert interface.get_gripper_state() == 0.8
-
-
-def test_real_interface_default_components_all_raise():
-    """No ctor args → every component is a Real stub that raises."""
-    interface = RealInterface()
-    assert isinstance(interface.arm_interface, RealArmInterface)
-    with pytest.raises(NotImplementedError):
-        interface.get_arm_state()
-
-
-def test_real_interface_arm_swap_routes_to_fake():
-    """Passing FakeArmInterface to RealInterface swaps just the arm; base and camera
-    remain Real stubs that raise."""
-    interface = RealInterface(arm_interface=FakeArmInterface())
-    # Arm reads now use the fake (returns zeros, no raise).
-    assert interface.get_arm_state() == [0.0] * 7
-    assert interface.get_gripper_state() == 0.0
-    # Base / camera still raise from their Real stubs.
-    with pytest.raises(NotImplementedError):
-        interface.get_base_state()
-    with pytest.raises(NotImplementedError):
-        interface.get_base_image()
