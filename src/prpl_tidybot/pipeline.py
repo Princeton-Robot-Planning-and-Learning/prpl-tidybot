@@ -1,43 +1,41 @@
-"""Demo the prpl_tidybot pipeline against an arbitrary kinder env.
+"""Glue that wires a Hydra config into a Runner rollout.
 
-Wires `prpl_utils.real_sim.Runner` to:
-  - the env yaml's pipeline (env wrapper + perceiver + action grounder),
-  - a `BilevelPlanningAgent` constructed via
-    `prpl_tidybot.real_sim.build_planner_env_models`.
-
-Each env yaml under `conf/env/` declares all three pipelines
-(`fake` / `sim` / `real`); pick one with `mode=...`. There's no env
-switch in the script — adding a new env means dropping a new yaml file.
-
-Examples:
-    python scripts/demo.py env=base_motion3d mode=sim
-    python scripts/demo.py env=base_motion3d mode=fake max_eval_steps=20
-    python scripts/demo.py env=prpl3d-o1 mode=sim seed=42
-    python scripts/demo.py env=base_motion3d mode=real    # raises
-                                                          # NotImplementedError
-                                                          # from the first
-                                                          # RealInterface
-                                                          # hardware read
+The `scripts/run_planner.py` entry point delegates to `run_planner` here;
+tests in `tests/` compose configs with `hydra.compose` and call
+`run_planner` directly, without going through the Hydra `@main` decorator.
 """
 
-from pathlib import Path
+from dataclasses import dataclass
 
 import hydra
 import kinder
 from kinder_bilevel_planning.agent import AgentFailure, BilevelPlanningAgent
 from omegaconf import DictConfig
 from prpl_utils.real_sim import Runner
+from relational_structs import ObjectCentricState
 
 from prpl_tidybot.real_sim import build_planner_env_models
 
 
-@hydra.main(
-    config_name="config",
-    config_path=str(Path(__file__).parent.parent / "conf"),
-    version_base=None,
-)
-def main(cfg: DictConfig) -> None:
-    """Build the pipeline from `cfg`, run a rollout, print the final state."""
+@dataclass(frozen=True)
+class RolloutSummary:
+    """Result of one rollout — handy for assertions in tests."""
+
+    env_name: str
+    mode: str
+    seed: int
+    steps: int
+    finish_reason: str
+    total_reward: float
+    final_state: ObjectCentricState
+
+
+def run_planner(cfg: DictConfig) -> RolloutSummary:
+    """Build the pipeline from `cfg`, run a rollout, return a summary.
+
+    Mode and env are picked from `cfg.mode` and `cfg.env.pipelines[mode]`
+    respectively; there's no env-specific branching here.
+    """
     # Kinder env registrations are imported lazily; bilevel-planning calls
     # this internally too but a duplicate call is harmless.
     kinder.register_all_environments()
@@ -72,6 +70,7 @@ def main(cfg: DictConfig) -> None:
 
     state = runner.reset(seed=cfg.seed)
     total_reward = 0.0
+    steps = 0
     finish_reason = "max_steps_reached"
     for _ in range(cfg.max_eval_steps):
         try:
@@ -83,6 +82,7 @@ def main(cfg: DictConfig) -> None:
             # terminate the env).
             finish_reason = f"agent_failure: {e}"
             break
+        steps += 1
         total_reward += float(reward)
         if terminated:
             finish_reason = "terminated"
@@ -91,16 +91,12 @@ def main(cfg: DictConfig) -> None:
             finish_reason = "truncated"
             break
 
-    robot = state.get_object_from_name("robot")
-    bx = state.get(robot, "pos_base_x")
-    by = state.get(robot, "pos_base_y")
-    bt = state.get(robot, "pos_base_rot")
-    print(
-        f"env={cfg.env.env_name}, mode={cfg.mode}, seed={cfg.seed}: "
-        f"finish={finish_reason}, total_reward={total_reward:.3f}, "
-        f"final base=({bx:.3f}, {by:.3f}, {bt:.3f})"
+    return RolloutSummary(
+        env_name=cfg.env.env_name,
+        mode=cfg.mode,
+        seed=cfg.seed,
+        steps=steps,
+        finish_reason=finish_reason,
+        total_reward=total_reward,
+        final_state=state,
     )
-
-
-if __name__ == "__main__":
-    main()  # pylint: disable=no-value-for-parameter
