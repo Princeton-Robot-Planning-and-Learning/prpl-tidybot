@@ -296,9 +296,16 @@ def _start_camera_server(serial: str, port: int) -> None:
 
 
 def main(
-    top_only: bool = False, debug: bool = False, inverse_heading: bool = False
+    host: str = "0.0.0.0",
+    top_only: bool = False,
+    debug: bool = False,
+    inverse_heading: bool = False,
 ) -> None:
-    """Spawn the camera-server subprocesses, then run the detector publisher."""
+    """Spawn the camera-server subprocesses, then run the detector publisher.
+
+    `host` controls only the marker-detector publisher socket. The camera
+    servers stay on localhost since they're consumed in-process.
+    """
     for serial, port in [
         (CAMERA_SERIALS[0], CAMERA_SERVER_PORTS[0]),
         (CAMERA_SERIALS[1], CAMERA_SERVER_PORTS[1]),
@@ -310,13 +317,21 @@ def main(
     time.sleep(1.5)  # let camera servers bind their sockets
 
     MarkerDetectorServer(
-        top_only=top_only, debug=debug, inverse_heading=inverse_heading
+        hostname=host,
+        top_only=top_only,
+        debug=debug,
+        inverse_heading=inverse_heading,
     ).run()
 
 
 def cli() -> None:
     """Argparse entrypoint shared by `python -m ...server` and `scripts/`."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Bind address for the marker-detector socket (default: 0.0.0.0).",
+    )
     parser.add_argument("--top-only", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
@@ -325,7 +340,12 @@ def cli() -> None:
         help="Rotate every reported heading by 180 degrees.",
     )
     args = parser.parse_args()
-    main(top_only=args.top_only, debug=args.debug, inverse_heading=args.inverse_heading)
+    main(
+        host=args.host,
+        top_only=args.top_only,
+        debug=args.debug,
+        inverse_heading=args.inverse_heading,
+    )
 
 
 if __name__ == "__main__":
