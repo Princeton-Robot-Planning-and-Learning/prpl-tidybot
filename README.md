@@ -101,8 +101,19 @@ connection per remote.
 
 ```bash
 cd prpl-tidybot
-tmuxinator local            # alias: mux local
+./scripts/launch.sh                          # use whatever's already checked out remotely
+./scripts/launch.sh my-feature-branch        # sync every remote pane to <branch> first
 ```
+
+When a branch is given, each pane runs
+`git fetch origin <branch> && git checkout <branch> && git merge --ff-only FETCH_HEAD`
+on the remote before starting its server — non-fast-forward state (local
+commits on the NUC, dirty tree) aborts the pane instead of silently
+running stale code.
+
+The wrapper is a thin shim around `tmuxinator start ./.tmuxinator.yml`,
+which (unlike `tmuxinator local`) forwards positional args to the
+project ERB.
 
 One window opens with three tiled panes:
 
