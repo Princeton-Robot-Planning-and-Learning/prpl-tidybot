@@ -1,9 +1,12 @@
 """Hardware integration test: drive the real base to three map-frame waypoints.
 
 Run on the robot (the base controller and marker detector servers must already be up).
-Before any motion is commanded, the test opens a top-down plot of the robot's current
-map pose and the planned waypoints and waits for the operator to confirm the plan
-visually — this catches map-frame misregistration before the robot drives.
+Before any motion is commanded, the test writes a top-down PNG of the robot's current
+map pose and the planned waypoints into the project tree, prints the absolute path, and
+waits for the operator to confirm the plan looks right — this catches map-frame
+misregistration before the robot drives. The PNG is the workaround for running inside
+tmux (no interactive matplotlib window); open it from VS Code Remote (or similar) on the
+project tree. The file is deleted once the operator answers the prompt.
 
 Before running, confirm ~1.5 m of clear floor in every direction from the robot.
 
@@ -13,10 +16,15 @@ python hardware_tests/test_base_map_target.py
 import math
 import sys
 import time
+from pathlib import Path
 
-import matplotlib.pyplot as plt
-from matplotlib.axes import Axes
-from spatialmath import SE2
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.axes import Axes  # noqa: E402
+from spatialmath import SE2  # noqa: E402
 
 from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
 from prpl_tidybot.interfaces.camera_interface import FakeCameraInterface
@@ -31,6 +39,8 @@ TARGETS_MAP = [
 ]
 DWELL_BETWEEN_WAYPOINTS_S = 1.0
 HEADING_ARROW_LEN_M = 0.15
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+PLAN_PNG_PATH = _REPO_ROOT / "test_base_map_target_plan.png"
 
 
 def _draw_pose(ax: Axes, pose: SE2, label: str, color: str) -> None:
@@ -57,14 +67,11 @@ def _draw_pose(ax: Axes, pose: SE2, label: str, color: str) -> None:
     )
 
 
-def _show_plan(start: SE2, targets: list[SE2]) -> None:
-    """Open a non-blocking top-down plot of the start pose, target waypoints, and the
-    planned traversal order.
-
-    Lets the operator visually verify map alignment before any motion is commanded.
-    """
-    plt.ion()
-    _, ax = plt.subplots(figsize=(7, 7))
+def _save_plan_png(start: SE2, targets: list[SE2], path: Path) -> None:
+    """Render a top-down view of the start pose, target waypoints, and planned traversal
+    order to a PNG so the operator can open it from outside the tmux pane before
+    confirming."""
+    fig, ax = plt.subplots(figsize=(7, 7))
     _draw_pose(ax, start, "start", "tab:blue")
     for i, target in enumerate(targets, start=1):
         _draw_pose(ax, target, f"target {i}", "tab:red")
@@ -82,9 +89,9 @@ def _show_plan(start: SE2, targets: list[SE2]) -> None:
     ax.set_ylabel("map y (m)")
     ax.set_title("Robot start pose and planned waypoints (map frame)")
     ax.legend(loc="upper right")
-    plt.tight_layout()
-    plt.draw()
-    plt.pause(0.001)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def main() -> int:
@@ -104,11 +111,22 @@ def main() -> int:
             f"theta={start.theta():+.3f}"
         )
 
-        _show_plan(start, TARGETS_MAP)
-        answer = input(
-            "Does the plot match the robot's actual position and the intended "
-            "targets? [y/N] "
-        )
+        print("Planned waypoints (map frame):")
+        for i, target in enumerate(TARGETS_MAP, start=1):
+            print(
+                f"  target {i}: x={target.x:+.3f} y={target.y:+.3f} "
+                f"theta={target.theta():+.3f} ({math.degrees(target.theta()):+.0f}°)"
+            )
+
+        _save_plan_png(start, TARGETS_MAP, PLAN_PNG_PATH)
+        try:
+            print(f"Saved plan visualization to {PLAN_PNG_PATH}")
+            answer = input(
+                "Open the PNG and confirm the start pose and targets are correct "
+                "relative to the robot's actual position. Proceed with motion? [y/N] "
+            )
+        finally:
+            PLAN_PNG_PATH.unlink(missing_ok=True)
         if answer.strip().lower() != "y":
             print("Aborted by user before motion.")
             return 1
