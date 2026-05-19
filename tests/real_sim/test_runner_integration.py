@@ -48,7 +48,7 @@ def _build_runner(
     actions: list[NDArray[np.floating]],
 ) -> tuple[Runner, FakeInterface]:
     interface = FakeInterface()
-    env = RealTidyBotEnv(interface)
+    env = RealTidyBotEnv(interface, control_period=0.0)
     runner: Runner = Runner(
         real_env=env,
         perceiver=PrplLab3DPerceiver(),

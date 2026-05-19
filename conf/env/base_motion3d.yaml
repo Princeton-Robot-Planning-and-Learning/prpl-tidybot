@@ -15,6 +15,8 @@ pipelines:
   fake:
     real_env:
       _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      # FakeInterface converges in one inner iteration; skip the sleep.
+      control_period: 0.0
       interface:
         _target_: prpl_tidybot.interfaces.interface.FakeInterface
     perceiver:
