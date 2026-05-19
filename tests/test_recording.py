@@ -122,10 +122,10 @@ def test_recorder_skips_when_real_renders_none(tmp_path: Path) -> None:
     assert not recorder.frames
 
 
-def test_recorder_pads_heights_for_hstack(tmp_path: Path) -> None:
-    """Frames of different heights get zero-padded so hstack succeeds."""
+def test_recorder_resizes_heights_for_hstack(tmp_path: Path) -> None:
+    """Frames of different heights get resized (preserving aspect ratio) so hstack
+    succeeds without black padding bands on the shorter panel."""
     real = _StubRealEnv(color=10, shape=(4, 4))
-    shadow = _StubShadowSim(color=20)
 
     class _TallerShadow(_StubShadowSim):
         def render(self) -> np.ndarray:  # type: ignore[override]
@@ -135,12 +135,13 @@ def test_recorder_pads_heights_for_hstack(tmp_path: Path) -> None:
     recorder = Recorder(real, shadow, tmp_path / "out.mp4")
     recorder.capture(state=None)  # type: ignore[arg-type]
     frame = recorder.frames[0]
-    assert frame.shape == (6, 8, 3)
-    # Real panel rows 0-3 are color 10; rows 4-5 are pad (zero).
-    assert (frame[:4, :4] == 10).all()
-    assert (frame[4:, :4] == 0).all()
-    # Sim panel is full color 20.
-    assert (frame[:, 4:] == 20).all()
+    # Real (4x4) is resized to height 6 -> width round(4 * 6 / 4) = 6, so the
+    # composite is height 6, width 6 (real) + 4 (sim) = 10.
+    assert frame.shape == (6, 10, 3)
+    # Real panel stays uniform color 10 after resize.
+    assert (frame[:, :6] == 10).all()
+    # Sim panel keeps its original uniform color 20.
+    assert (frame[:, 6:] == 20).all()
 
 
 @pytest.mark.usefixtures()

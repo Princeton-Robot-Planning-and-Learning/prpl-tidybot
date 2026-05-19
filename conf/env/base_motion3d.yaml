@@ -58,6 +58,11 @@ pipelines:
           _target_: prpl_tidybot.interfaces.arm_interface.FakeArmInterface
         camera_interface:
           _target_: prpl_tidybot.interfaces.camera_interface.FakeCameraInterface
+      # Off-host render source: subscribes to the JPEG image publisher running
+      # inside the marker-detector daemon. Lets `record.video_path=...` work
+      # on the real pipeline without the on-robot base camera being wired up.
+      renderer:
+        _target_: prpl_tidybot.rendering.CeilingCameraRenderer
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.BaseMotion3DPerceiver
       target_source:

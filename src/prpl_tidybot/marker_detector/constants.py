@@ -9,6 +9,9 @@ import cv2 as cv
 # Network ports for the publisher sockets.
 MARKER_DETECTOR_PORT = 6002
 CAMERA_SERVER_PORTS = (6000, 6001)
+# JPEG-encoded frames from the top ceiling camera, for off-host renderers
+# (e.g. the video recorder on the NUC).
+CEILING_IMAGE_PORT = 6003
 
 # ArUco markers used to label the robot. Four stickers, one on each top corner of
 # the chassis, in the order assumed by the multi-marker pose fusion (top-left,

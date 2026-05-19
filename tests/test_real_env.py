@@ -80,3 +80,35 @@ def test_step_returns_after_max_iter_when_target_unreachable():
     obs, _, _, _, _ = env.step(action)
 
     assert obs.map_base_pose.x == 0.0
+
+
+def test_render_routes_through_renderer_when_provided():
+    """When a renderer is supplied, render() returns its frame instead of the base
+    camera image; without one, it falls back to interface.get_base_image()."""
+
+    class _StubRenderer:
+        """Returns a constant frame; tracks no state besides the stored buffer."""
+
+        def __init__(self) -> None:
+            self.frame = np.full((4, 4, 3), 7, dtype=np.uint8)
+
+        def render(self) -> np.ndarray:
+            """Return the stored frame."""
+            return self.frame
+
+        def close(self) -> None:
+            """No resources to release."""
+
+    renderer = _StubRenderer()
+    env = RealTidyBotEnv(
+        FakeInterface(),
+        control_period=0.0,
+        renderer=renderer,
+    )
+    frame = env.render()
+    assert frame is renderer.frame
+
+    # No renderer -> fall back to the (fake) base camera image.
+    fallback = RealTidyBotEnv(FakeInterface(), control_period=0.0).render()
+    assert isinstance(fallback, np.ndarray)
+    assert fallback.shape == (360, 640, 3)  # BASE_CAMERA_DIMS

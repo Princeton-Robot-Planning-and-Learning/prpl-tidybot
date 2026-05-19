@@ -21,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
+import cv2 as cv
 import gymnasium
 import numpy as np
 from moviepy import ImageSequenceClip
@@ -97,17 +98,17 @@ class Recorder:
 
 
 def _hstack_frames(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """Pad shorter frame with black to match heights, then concat horizontally."""
+    """Resize the shorter frame to match heights (preserving aspect ratio), then
+    concat horizontally."""
     if left.shape[0] != right.shape[0]:
         target_h = max(left.shape[0], right.shape[0])
-        left = _pad_to_height(left, target_h)
-        right = _pad_to_height(right, target_h)
+        left = _resize_to_height(left, target_h)
+        right = _resize_to_height(right, target_h)
     return np.concatenate([left, right], axis=1)
 
 
-def _pad_to_height(frame: np.ndarray, target_h: int) -> np.ndarray:
-    pad_h = target_h - frame.shape[0]
-    if pad_h == 0:
+def _resize_to_height(frame: np.ndarray, target_h: int) -> np.ndarray:
+    if frame.shape[0] == target_h:
         return frame
-    pad = np.zeros((pad_h, frame.shape[1], frame.shape[2]), dtype=frame.dtype)
-    return np.concatenate([frame, pad], axis=0)
+    new_w = max(1, int(round(frame.shape[1] * target_h / frame.shape[0])))
+    return cv.resize(frame, (new_w, target_h))

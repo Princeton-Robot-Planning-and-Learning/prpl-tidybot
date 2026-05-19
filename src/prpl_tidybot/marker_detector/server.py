@@ -13,6 +13,7 @@ import argparse
 import math
 import time
 from multiprocessing import Process
+from threading import Thread
 from typing import Any
 
 import cv2 as cv
@@ -20,6 +21,7 @@ import numpy as np
 
 from prpl_tidybot.marker_detector.camera_client import CameraClient
 from prpl_tidybot.marker_detector.camera_server import CameraServer
+from prpl_tidybot.marker_detector.ceiling_image_publisher import CeilingImagePublisher
 from prpl_tidybot.marker_detector.constants import (
     CAMERA_HEIGHT,
     CAMERA_SERIALS,
@@ -344,6 +346,17 @@ def main(
             break
 
     time.sleep(1.5)  # let camera servers bind their sockets
+
+    # JPEG frame publisher for off-host renderers. Same process as the marker
+    # detector, but a separate socket so robot-pose subscribers don't pay the
+    # image bytes on every poll. Runs in a daemon thread so the detector loop
+    # below stays the main control path. Honours `top_only` so the publisher
+    # only subscribes to camera servers that were actually started.
+    ceiling_camera_ports = CAMERA_SERVER_PORTS[:1] if top_only else CAMERA_SERVER_PORTS
+    ceiling_publisher = CeilingImagePublisher(
+        hostname=host, camera_ports=ceiling_camera_ports
+    )
+    Thread(target=ceiling_publisher.run, daemon=True).start()
 
     MarkerDetectorServer(
         hostname=host,
