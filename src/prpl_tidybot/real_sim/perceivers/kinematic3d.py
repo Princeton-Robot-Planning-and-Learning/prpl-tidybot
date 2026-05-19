@@ -8,7 +8,7 @@ the non-robot object detection differs per env.
 """
 
 import abc
-from typing import Any, Sequence
+from typing import Any
 
 from kinder.envs.kinematic3d.base_motion3d import BaseMotion3DObjectCentricState
 from kinder.envs.kinematic3d.object_types import (
@@ -25,6 +25,7 @@ from prpl_utils.real_sim import Perceiver
 from relational_structs import Object, ObjectCentricState
 from relational_structs.utils import create_state_from_dict
 
+from prpl_tidybot.real_sim.perceivers.target_source import TargetSource
 from prpl_tidybot.structs import TidyBotObservation
 
 _DEFAULT_CUBE_HALF_EXTENTS = PrplLab3DEnvConfig().block_half_extents
@@ -151,26 +152,20 @@ class PrplLab3DPerceiver(KinematicRobotPerceiverBase):
 class BaseMotion3DPerceiver(KinematicRobotPerceiverBase):
     """Perceiver for kinder/BaseMotion3D-v0.
 
-    Emits a single placeholder `target` of `Kinematic3DPointType` at the
-    `target_pose` provided to the constructor (in env world frame). When
-    real perception lands, this gets replaced with a real target detection.
+    Emits a single `target` of `Kinematic3DPointType` whose `(x, y, z)` comes
+    from the supplied `TargetSource`. In fake / sim modes the source is a
+    `ConstantTargetSource` threaded in from the env yaml; in real mode it's a
+    `MarkerDetectorTargetSource` that subscribes to the marker-detector
+    publisher.
     """
 
     def __init__(
         self,
-        target_pose: Sequence[float],
+        target_source: TargetSource,
         robot_name: str = "robot",
     ) -> None:
         super().__init__(robot_name=robot_name)
-        if len(target_pose) != 3:
-            raise ValueError(
-                f"target_pose must be (x, y, z); got {tuple(target_pose)!r}"
-            )
-        self._target_pose: tuple[float, float, float] = (
-            float(target_pose[0]),
-            float(target_pose[1]),
-            float(target_pose[2]),
-        )
+        self._target_source = target_source
 
     @property
     def _state_cls(self) -> type[ObjectCentricState]:
@@ -180,7 +175,7 @@ class BaseMotion3DPerceiver(KinematicRobotPerceiverBase):
         self, obs: TidyBotObservation, info: dict[str, Any]
     ) -> dict[Object, dict[str, float]]:
         del obs, info
-        x, y, z = self._target_pose
+        x, y, z = self._target_source.get_target()
         return {
             Object("target", Kinematic3DPointType): {
                 "x": x,

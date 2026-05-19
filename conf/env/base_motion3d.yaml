@@ -7,9 +7,16 @@ make_kwargs:
   id: kinder/BaseMotion3D-v0
 env_model_kwargs: {}
 
-# Used by the fake/real perceiver: where the agent thinks the target is.
-# (Sim mode reads the target from the kinder env directly, ignoring this.)
+# Used by the fake-mode target source: where the agent thinks the target is.
+# (Sim mode reads the target from the kinder env directly; real mode pulls it
+# from the marker detector and ignores this constant.)
 target_pose: [1.0, 1.0, 0.2]
+
+# ArUco marker (and its z value in the env frame) that the real-mode perceiver
+# reads as the target. The marker detector must be configured to publish
+# this ID — see `prpl_tidybot.marker_detector.constants.TARGET_MARKER_IDS`.
+target_marker_id: 23
+target_marker_z: 0.0
 
 pipelines:
   fake:
@@ -21,7 +28,11 @@ pipelines:
         _target_: prpl_tidybot.interfaces.interface.FakeInterface
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.BaseMotion3DPerceiver
-      target_pose: ${env.target_pose}
+      target_source:
+        _target_: prpl_tidybot.real_sim.perceivers.target_source.ConstantTargetSource
+        x: ${env.target_pose.0}
+        y: ${env.target_pose.1}
+        z: ${env.target_pose.2}
     action_grounder:
       _target_: prpl_tidybot.real_sim.action_grounders.kinematic3d.Kinematic3DActionGrounder
   sim:
@@ -47,5 +58,10 @@ pipelines:
           _target_: prpl_tidybot.interfaces.arm_interface.FakeArmInterface
         camera_interface:
           _target_: prpl_tidybot.interfaces.camera_interface.FakeCameraInterface
-    perceiver: ${env.pipelines.fake.perceiver}
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.BaseMotion3DPerceiver
+      target_source:
+        _target_: prpl_tidybot.real_sim.perceivers.target_source.MarkerDetectorTargetSource
+        marker_id: ${env.target_marker_id}
+        target_z: ${env.target_marker_z}
     action_grounder: ${env.pipelines.fake.action_grounder}
