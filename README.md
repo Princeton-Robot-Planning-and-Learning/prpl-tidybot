@@ -104,6 +104,21 @@ cd prpl-tidybot
 tmuxinator local            # alias: mux local
 ```
 
+To also sync every remote checkout to a specific branch before the
+servers start, use the wrapper script. Each pane runs
+`git fetch origin <branch> && git checkout <branch> && git merge --ff-only FETCH_HEAD`
+on the remote — non-fast-forward state (local commits on the NUC, dirty
+tree) aborts the pane instead of silently running stale code:
+
+```bash
+./scripts/launch.sh my-feature-branch
+```
+
+`tmuxinator local` itself doesn't forward positional args, so the
+wrapper just calls `tmuxinator start ./.tmuxinator.yml <branch>` for
+you. Run it with no argument and it behaves like plain `tmuxinator
+local`.
+
 One window opens with three tiled panes:
 
 ```
