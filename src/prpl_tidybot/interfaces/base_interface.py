@@ -73,7 +73,10 @@ class RealBaseInterface(BaseInterface):
         return SE2(base_pose[0], base_pose[1], base_pose[2])
 
     def get_map_base_state(self) -> SE2:
-        if self.marker_detector_conn.poll():
+        # poll() returns as soon as data is ready, so the timeout only adds
+        # latency on the first call (before the detector has published) or if
+        # the detector stalls.
+        if self.marker_detector_conn.poll(timeout=1.0):
             detector_data = self.marker_detector_conn.recv()
             self.marker_detector_conn.send(None)
             robot_idx = 0
