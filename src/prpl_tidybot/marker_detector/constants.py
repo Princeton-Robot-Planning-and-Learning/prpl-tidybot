@@ -1,8 +1,6 @@
 """Constants for the marker-detector pipeline.
 
-Adapted from `yixuanhuang98/tidybot_server/server/constants.py`; only the
-subset reachable from the marker-detector server is kept here. Connection
-constants shared with the rest of the codebase (`CONN_AUTHKEY`,
+Connection constants shared with the rest of the codebase (`CONN_AUTHKEY`,
 `SERVER_HOSTNAME`) live in `prpl_tidybot.third_party.constants`.
 """
 
@@ -12,13 +10,24 @@ import cv2 as cv
 MARKER_DETECTOR_PORT = 6002
 CAMERA_SERVER_PORTS = (6000, 6001)
 
-# ArUco markers used to label the robots.
+# ArUco markers used to label the robot. Four stickers, one on each top corner of
+# the chassis, in the order assumed by the multi-marker pose fusion (top-left,
+# top-right, bottom-right, bottom-left of the sticker quad).
 MARKER_PARAMS = {
     "marker_length": 0.09,  # 90 mm
     "sticker_length": 0.12,  # 120 mm
 }
 MARKER_DICT_ID = cv.aruco.DICT_4X4_50
-MARKER_IDS = [10, 13, 17, 21, 23, 30, 37, 41, 42, 45, 48, 49]
+MARKER_IDS = (10, 13, 17, 21)
+
+# ArUco markers placed in the scene as task targets (currently a single point
+# target used by base_motion3d). Disjoint from MARKER_IDS so detector slots map
+# cleanly to "robot sticker" vs "target".
+TARGET_MARKER_IDS = (23,)
+
+# Flat ordered list of every ID the detector should be configured to recognise.
+# Robot stickers occupy slots 0..len(MARKER_IDS)-1; targets follow.
+DETECTED_MARKER_IDS = MARKER_IDS + TARGET_MARKER_IDS
 
 # Ceiling cameras. Order is (top, bottom); top precedes except for single-marker
 # pose estimates where bottom wins. Different physical cameras than the wrist
@@ -41,6 +50,5 @@ FLOOR_LENGTH = NUM_FLOOR_TILES_Y * FLOOR_TILE_SIZE
 FLOOR_WIDTH = NUM_FLOOR_TILES_X * FLOOR_TILE_SIZE
 
 # Robot geometry used by the marker-center → robot-center correction.
-NUM_ROBOTS = 3
 ROBOT_HEIGHT = 0.378  # m
 ROBOT_DIAG = 0.665  # m

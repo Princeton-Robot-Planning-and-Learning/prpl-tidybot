@@ -1,11 +1,12 @@
 """Marker-detector server.
 
 Spawns one camera-server process per ceiling camera, then runs an in-process
-detector that fuses ArUco detections from each into a `{robot_idx: (x, y, theta)}`
-map-frame pose dict. Clients consume the dict over the publisher socket on
-`MARKER_DETECTOR_PORT` — see `RealBaseInterface.get_map_base_state`.
-
-Adapted from `yixuanhuang98/tidybot_server/server/marker_detector_server.py`.
+detector that fuses ArUco detections from each into a payload of the shape
+`{"poses": {robot_idx: (x, y, theta)}, "targets": {aruco_id: (x, y)}}`.
+Robot stickers (`MARKER_IDS`) fuse into a single robot pose; standalone scene
+markers (`TARGET_MARKER_IDS`) are reported individually at their world-frame
+centre. Clients consume the payload over the publisher socket on
+`MARKER_DETECTOR_PORT` — see `MarkerDetectorClient`.
 """
 
 import argparse
@@ -23,6 +24,7 @@ from prpl_tidybot.marker_detector.constants import (
     CAMERA_HEIGHT,
     CAMERA_SERIALS,
     CAMERA_SERVER_PORTS,
+    DETECTED_MARKER_IDS,
     FLOOR_LENGTH,
     FLOOR_WIDTH,
     MARKER_DETECTOR_PORT,
@@ -66,7 +68,14 @@ class Detector:
         # mypy treat these calls as Any until we port to the new API.
         aruco: Any = cv.aruco
         self.marker_dict = aruco.Dictionary_get(MARKER_DICT_ID)
-        self.marker_dict.bytesList = self.marker_dict.bytesList[MARKER_IDS]
+        self.marker_dict.bytesList = self.marker_dict.bytesList[
+            list(DETECTED_MARKER_IDS)
+        ]
+        # detectMarkers returns slot indices into the sliced bytesList; this
+        # array maps slot -> actual ArUco ID so we can split robot stickers
+        # from scene targets after detection.
+        self._slot_to_aruco_id = np.array(DETECTED_MARKER_IDS, dtype=np.int32)
+        self._num_robot_slots = len(MARKER_IDS)
 
         # Tightened to reduce false positives.
         self.detector_params = aruco.DetectorParameters_create()
@@ -121,8 +130,12 @@ class Detector:
     def get_poses_from_markers(
         self, corners: Any, indices: Any, debug: bool = False
     ) -> dict:
-        """Fuse detected marker corners into per-robot (x, y, theta) poses."""
-        data: dict[str, Any] = {"poses": {}, "single_marker_robots": set()}
+        """Split detections into robot-sticker fusions and standalone scene targets."""
+        data: dict[str, Any] = {
+            "poses": {},
+            "targets": {},
+            "single_marker_robots": set(),
+        }
         if indices is None:
             return data
 
@@ -135,70 +148,81 @@ class Detector:
         corners = (corners[:, :2] / corners[:, 2:]).reshape(-1, 4, 2)
 
         centers = corners.mean(axis=1)
-
-        # Per-marker headings, dealing with wraparound by comparing the std
-        # of two unwrappings and keeping the more consistent one.
-        diffs = (corners - centers.reshape(-1, 1, 2)).reshape(-1, 2)
-        angles = np.arctan2(diffs[:, 1], diffs[:, 0]).reshape(-1, 4) + np.radians(
-            [-135, -45, 45, 135], dtype=np.float32
-        )
-        angles1 = np.mod(angles + math.pi, 2 * math.pi) - math.pi
-        angles2 = np.mod(angles, 2 * math.pi)
-        headings = np.where(
-            angles1.std(axis=1) < angles2.std(axis=1),
-            angles1.mean(axis=1),
-            np.mod(angles2.mean(axis=1) + math.pi, 2 * math.pi) - math.pi,
-        )
-
-        positions = centers.copy()
         indices = indices.squeeze(1)
-        robot_indices = np.floor_divide(indices, 4)
-        for robot_idx in np.unique(robot_indices):
-            robot_idx = robot_idx.item()
-            robot_mask = robot_indices == robot_idx
-            indices_robot = np.mod(indices[robot_mask], 4)
-            centers_robot = centers[robot_mask]
-            positions_robot = centers_robot.copy()
+        positions = centers.copy()
 
-            single_marker = robot_mask.sum() == 1
+        # Split detections into robot-sticker slots and scene-target slots.
+        robot_mask = indices < self._num_robot_slots
+
+        # Standalone targets: report each detected target marker's centre as-is.
+        for slot_idx, center in zip(indices[~robot_mask], centers[~robot_mask]):
+            aruco_id = int(self._slot_to_aruco_id[slot_idx])
+            data["targets"][aruco_id] = (float(center[0]), float(center[1]))
+
+        if robot_mask.any():
+            robot_corners = corners[robot_mask]
+            sticker_indices = indices[robot_mask]
+            sticker_centers = centers[robot_mask]
+            positions_robot = sticker_centers.copy()
+
+            # Per-marker headings, dealing with wraparound by comparing the std
+            # of two unwrappings and keeping the more consistent one.
+            diffs = (robot_corners - sticker_centers.reshape(-1, 1, 2)).reshape(-1, 2)
+            angles = np.arctan2(diffs[:, 1], diffs[:, 0]).reshape(-1, 4) + np.radians(
+                [-135, -45, 45, 135], dtype=np.float32
+            )
+            angles1 = np.mod(angles + math.pi, 2 * math.pi) - math.pi
+            angles2 = np.mod(angles, 2 * math.pi)
+            headings = np.where(
+                angles1.std(axis=1) < angles2.std(axis=1),
+                angles1.mean(axis=1),
+                np.mod(angles2.mean(axis=1) + math.pi, 2 * math.pi) - math.pi,
+            )
+
+            robot_idx = 0  # the only robot in the scene
+            single_marker = sticker_indices.size == 1
+            heading: float | None
             if single_marker:
-                heading = headings[robot_mask].item()
+                heading = float(headings.item())
             else:
                 # Pairwise heading estimates between this robot's visible markers.
-                headings_robot = []
-                for i, idx1 in enumerate(indices_robot):
-                    for j, idx2 in enumerate(indices_robot):
-                        if j <= i:
+                headings_pairs: list[float] = []
+                for i, idx1 in enumerate(sticker_indices):
+                    for j, idx2 in enumerate(sticker_indices):
+                        if j <= i or idx1 == idx2:
                             continue
-                        if idx1 == idx2:  # false positive: same sticker twice
-                            continue
-                        dx = centers_robot[j][0] - centers_robot[i][0]
-                        dy = centers_robot[j][1] - centers_robot[i][1]
-                        heading = math.atan2(dy, dx) + self.angle_offsets[(idx1, idx2)]
-                        heading = (heading + math.pi) % (2 * math.pi) - math.pi
-                        headings_robot.append(heading)
-                if len(headings_robot) == 0:  # all-false-positive degenerate case
-                    continue
-                heading = float(np.array(headings_robot, dtype=np.float32).mean())
+                        dx = sticker_centers[j][0] - sticker_centers[i][0]
+                        dy = sticker_centers[j][1] - sticker_centers[i][1]
+                        h = math.atan2(dy, dx) + self.angle_offsets[(idx1, idx2)]
+                        h = (h + math.pi) % (2 * math.pi) - math.pi
+                        headings_pairs.append(h)
+                heading = (
+                    float(np.array(headings_pairs, dtype=np.float32).mean())
+                    if headings_pairs
+                    else None
+                )
 
-            # Project each marker's center to the robot center using its corner offset.
-            angles_robot = (
-                heading
-                + np.radians([-45, -135, 135, 45], dtype=np.float32)[indices_robot]
-            )
-            positions_robot[:, 0] += self.position_offset * np.cos(angles_robot)
-            positions_robot[:, 1] += self.position_offset * np.sin(angles_robot)
-            position = positions_robot.mean(axis=0)
-            positions[robot_mask] = positions_robot
+            if heading is not None:
+                # Project each marker's center to the robot center via its corner offset.
+                angles_robot = (
+                    heading
+                    + np.radians([-45, -135, 135, 45], dtype=np.float32)[
+                        sticker_indices
+                    ]
+                )
+                positions_robot[:, 0] += self.position_offset * np.cos(angles_robot)
+                positions_robot[:, 1] += self.position_offset * np.sin(angles_robot)
+                position = positions_robot.mean(axis=0)
+                positions[robot_mask] = positions_robot
 
-            if self.inverse_heading:
-                heading = (heading + math.pi) % (2 * math.pi)
-                if heading > math.pi:
-                    heading -= 2 * math.pi
+                if self.inverse_heading:
+                    heading = (heading + math.pi) % (2 * math.pi)
+                    if heading > math.pi:
+                        heading -= 2 * math.pi
 
-            data["poses"][robot_idx] = (position[0], position[1], heading)
-            if single_marker:
-                data["single_marker_robots"].add(robot_idx)
+                data["poses"][robot_idx] = (position[0], position[1], heading)
+                if single_marker:
+                    data["single_marker_robots"].add(robot_idx)
 
         if debug:
             data["debug_data"] = list(
@@ -226,7 +250,9 @@ class Detector:
 
 
 class MarkerDetectorServer(Publisher):
-    """Fuses per-camera detectors and publishes `{robot_idx: (x, y, theta)}`."""
+    """Fuses per-camera detectors and publishes
+    `{"poses": {robot_idx: (x, y, theta)}, "targets": {aruco_id: (x, y)}}`.
+    """
 
     def __init__(
         self,
@@ -264,7 +290,7 @@ class MarkerDetectorServer(Publisher):
             ]
 
     def get_data(self) -> dict:
-        data: dict[str, Any] = {"poses": {}}
+        data: dict[str, Any] = {"poses": {}, "targets": {}}
         if self.debug:
             data["debug_data"] = []
         for detector in self.detectors:
@@ -279,6 +305,9 @@ class MarkerDetectorServer(Publisher):
                     continue
                 # Bottom detector takes precedence by virtue of being second.
                 data["poses"][robot_idx] = pose
+            # Targets: bottom detector wins by virtue of being second (matches
+            # the robot-pose precedence).
+            data["targets"].update(new_data["targets"])
             if "debug_data" in new_data:
                 data["debug_data"].extend(new_data["debug_data"])
         if self.debug:
