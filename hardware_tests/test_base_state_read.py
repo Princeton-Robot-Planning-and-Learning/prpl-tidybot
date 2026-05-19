@@ -13,6 +13,7 @@ from prpl_tidybot.interfaces.base_interface import RealBaseInterface
 
 
 def main() -> int:
+    """Read odom- and map-frame base poses and ask the operator to confirm."""
     print("Connecting to the real base interface...")
     base = RealBaseInterface()
     try:

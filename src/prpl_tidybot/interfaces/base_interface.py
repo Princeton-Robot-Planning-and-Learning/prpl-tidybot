@@ -90,4 +90,5 @@ class RealBaseInterface(BaseInterface):
         )
 
     def close(self) -> None:
+        """Stop the low-level base control loop."""
         self.base.close()
