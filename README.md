@@ -4,41 +4,40 @@
 
 Code for the real TidyBot++ robot and a real-to-sim-to-real pipeline that
 lets agents written against a kinder simulator drive the real environment
-(or, for development, a `FakeInterface`).
+(or, for development, a `FakeInterface` or sim shadow).
 
 ## Pipeline shape
 
 ```
                   ┌────────────────────────────┐
-                  │      RealTidyBotEnv        │
-                  │ (gymnasium.Env wrapping    │
-                  │      an Interface)         │
+                  │   real_env (gymnasium.Env) │
+                  │ wrapping an Interface or   │
+                  │ a kinder env directly      │
                   └────────────┬───────────────┘
-                               │ TidyBotObservation
+                               │ obs
                                ▼
                   ┌────────────────────────────┐
-                  │    PrplLab3DPerceiver      │
+                  │         Perceiver          │
                   └────────────┬───────────────┘
                                │ ObjectCentricState
                                ▼
                   ┌────────────────────────────┐
-                  │       Agent                │
-                  │ (anything implementing     │
-                  │  prpl_utils.gym_agent)     │
+                  │           Agent            │
+                  │ (e.g. BilevelPlanningAgent)│
                   └────────────┬───────────────┘
-                               │ 11-d kinematic3d action
+                               │ 11-d kinder action
                                ▼
                   ┌────────────────────────────┐
-                  │  PrplLab3DActionGrounder   │
+                  │      ActionGrounder        │
                   └────────────┬───────────────┘
-                               │ TidyBotAction
+                               │ real_action
                                ▼
-                       (back to RealTidyBotEnv)
+                       (back to real_env)
 ```
 
 `prpl_utils.real_sim.Runner` glues these together. The base `Interface`
-abstracts the underlying world; `FakeInterface` is the development
-default. Real hardware support lands later.
+abstracts the underlying world; `FakeInterface` is the dev default and
+`RealInterface` stubs hardware until it gets wired up.
 
 ## Install
 
@@ -49,20 +48,23 @@ uv sync --all-extras --dev
 ## Try it
 
 ```bash
-python scripts/demo_real_to_sim_to_real.py --mode fake --steps 10 --seed 0
-python scripts/demo_real_to_sim_to_real.py --mode sim --steps 10 --seed 0
+python scripts/run_planner.py env=base_motion3d mode=sim
+python scripts/run_planner.py env=base_motion3d mode=fake max_eval_steps=200
+python scripts/run_planner.py env=prpl3d-o1 mode=sim seed=42
+python scripts/run_planner.py env=base_motion3d mode=real     # raises NotImplementedError
+                                                              # from the first
+                                                              # RealInterface read
 ```
 
-The `fake` and `sim` modes share the same agent loop (kinder state in,
-11-d kinder action out); `fake` wraps a `FakeInterface` and goes through
-the `RealTidyBotEnv` / `PrplLab3DPerceiver` / `PrplLab3DActionGrounder`
-chain, while `sim` drives a `PrplLab3DSimEnv` (a thin kinder wrapper)
-with pass-through perceiver / action grounder. A future `real` mode
-slots in alongside `fake`.
+Each env yaml under `conf/env/` declares all three pipelines
+(`fake` / `sim` / `real`); pick one with `mode=...`. **Adding a new env
+is one new yaml file** — there is no env switch in code. Hydra composes
+the perceiver, action grounder, and env wrapper from the yaml's
+`_target_` references.
 
 ## Develop
 
 ```bash
-./run_ci_checks.sh          # autoformat, mypy, pylint, pytest
-black --check . && isort --check-only .   # mirrors the CI autoformat job
+./run_ci_checks.sh                              # autoformat, mypy, pylint, pytest
+pytest tests/test_pipeline.py                   # smoke-test the planner pipeline
 ```
