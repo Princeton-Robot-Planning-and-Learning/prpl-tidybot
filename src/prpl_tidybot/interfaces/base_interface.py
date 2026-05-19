@@ -32,6 +32,9 @@ class BaseInterface(abc.ABC):
     def execute_action(self, action: SE2) -> None:
         """Execute a local-frame base action."""
 
+    def close(self) -> None:
+        """Tear down hardware connections; real-resource subclasses override."""
+
 
 class FakeBaseInterface(BaseInterface):
     """Fake base interface that stores commanded poses in memory."""
