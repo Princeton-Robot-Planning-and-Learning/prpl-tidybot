@@ -34,7 +34,9 @@ def get_video_cap(serial: str, frame_width: int, frame_height: int) -> cv.VideoC
     cap = cv.VideoCapture(  # type: ignore[unreachable]
         f"/dev/v4l/by-id/usb-046d_Logitech_Webcam_C930e_{serial}-video-index0"
     )
-    cap.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc("M", "J", "P", "G"))
+    # `VideoWriter_fourcc` is absent from the cv2 4.6 stubs but present at runtime.
+    fourcc = getattr(cv, "VideoWriter_fourcc")
+    cap.set(cv.CAP_PROP_FOURCC, fourcc("M", "J", "P", "G"))
     cap.set(cv.CAP_PROP_FRAME_WIDTH, frame_width)
     cap.set(cv.CAP_PROP_FRAME_HEIGHT, frame_height)
     cap.set(cv.CAP_PROP_BUFFERSIZE, 1)  # much better latency
