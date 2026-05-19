@@ -5,7 +5,11 @@ import pytest
 from spatialmath import SE2
 
 from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
-from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
+from prpl_tidybot.real_sim.perceivers.kinematic3d import (
+    BaseMotion3DPerceiver,
+    PrplLab3DPerceiver,
+)
+from prpl_tidybot.real_sim.perceivers.target_source import ConstantTargetSource
 from prpl_tidybot.structs import TidyBotObservation
 
 
@@ -43,3 +47,16 @@ def test_reset_matches_step():
     perceiver = PrplLab3DPerceiver()
     obs = _make_obs()
     assert perceiver.reset(obs, {}) == perceiver.step(obs, {})
+
+
+def test_base_motion3d_perceiver_emits_target_from_source():
+    """`BaseMotion3DPerceiver` puts the TargetSource's (x, y, z) into the target
+    object's features verbatim."""
+    perceiver = BaseMotion3DPerceiver(
+        target_source=ConstantTargetSource(1.5, -0.5, 0.2)
+    )
+    state = perceiver.step(_make_obs(), {})
+    target = state.get_object_from_name("target")
+    assert state.get(target, "x") == pytest.approx(1.5)
+    assert state.get(target, "y") == pytest.approx(-0.5)
+    assert state.get(target, "z") == pytest.approx(0.2)

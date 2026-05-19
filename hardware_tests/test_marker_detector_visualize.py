@@ -1,10 +1,10 @@
 """Hardware integration test: visualise the marker-detector's view of the scene.
 
-Run on the robot (the marker-detector server must already be up). Subscribes to
-the marker detector, pulls the latest payload, and writes a top-down PNG of
-the robot pose plus every detected target marker into the project tree. The
-operator opens the PNG (e.g. from VS Code Remote attached to the project) and
-confirms that the rendered geometry matches the actual scene before continuing.
+Run on the robot (the marker-detector server must already be up). Subscribes to the
+marker detector, pulls the latest payload, and writes a top-down PNG of the robot pose
+plus every detected target marker into the project tree. The operator opens the PNG
+(e.g. from VS Code Remote attached to the project) and confirms that the rendered
+geometry matches the actual scene before continuing.
 
 python hardware_tests/test_marker_detector_visualize.py
 """
@@ -98,7 +98,8 @@ def _save_snapshot_png(payload: dict, path: Path) -> None:
 
 
 def main() -> int:
-    """Pull one payload from the detector, render it, and ask the operator to confirm."""
+    """Pull one payload from the detector, render it, and ask the operator to
+    confirm."""
     print("Connecting to the marker detector...")
     client = MarkerDetectorClient()
     try:
