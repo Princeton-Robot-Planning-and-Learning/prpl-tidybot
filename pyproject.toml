@@ -22,6 +22,7 @@ dependencies = [
    "phoenix6",
    "ruckig",
    "threadpoolctl",
+   "opencv-contrib-python==4.6.0.66",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 prpl_tidybot = ["py.typed"]
+"prpl_tidybot.marker_detector" = ["99-webcam.rules"]
+"prpl_tidybot.marker_detector.camera_params" = ["*.yml", "*.json"]
 
 [tool.black]
 line-length = 88
@@ -70,3 +73,4 @@ module = [
     "moviepy.*",
 ]
 ignore_missing_imports = true
+

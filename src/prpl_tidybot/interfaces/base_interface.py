@@ -5,6 +5,7 @@ from multiprocessing.connection import Client
 
 from spatialmath import SE2
 
+from prpl_tidybot.marker_detector.constants import MARKER_DETECTOR_PORT
 from prpl_tidybot.third_party.base_server import BaseManager
 from prpl_tidybot.third_party.constants import (
     BASE_RPC_HOST,
@@ -63,7 +64,7 @@ class RealBaseInterface(BaseInterface):
         self.base.reset()
 
         self.marker_detector_conn = Client(
-            (SERVER_HOSTNAME, 6002), authkey=CONN_AUTHKEY
+            (SERVER_HOSTNAME, MARKER_DETECTOR_PORT), authkey=CONN_AUTHKEY
         )
         self.marker_detector_conn.send(None)
         self.last_pose_map = SE2(0, 0, 0)
