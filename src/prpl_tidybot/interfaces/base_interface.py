@@ -1,8 +1,18 @@
 """Base interface."""
 
 import abc
+from multiprocessing.connection import Client
 
 from spatialmath import SE2
+
+from prpl_tidybot.third_party.base_server import BaseManager
+from prpl_tidybot.third_party.constants import (
+    BASE_RPC_HOST,
+    BASE_RPC_PORT,
+    CONN_AUTHKEY,
+    RPC_AUTHKEY,
+    SERVER_HOSTNAME,
+)
 
 
 class BaseInterface(abc.ABC):
@@ -40,23 +50,44 @@ class FakeBaseInterface(BaseInterface):
 
 
 class RealBaseInterface(BaseInterface):
-    """Skeleton real base interface. Every method is a placeholder that
-    raises until the hardware driver and marker detector get wired up."""
+    """Real base interface. State reading is wired to the TidyBot base
+    controller (odom frame) and the marker detector (map frame).
+    Action execution is not yet implemented."""
+
+    def __init__(self) -> None:
+        self.base_manager = BaseManager(
+            address=(BASE_RPC_HOST, BASE_RPC_PORT), authkey=RPC_AUTHKEY
+        )
+        self.base_manager.connect()
+        self.base = self.base_manager.Base()  # type: ignore # pylint: disable=no-member
+        self.base.reset()
+
+        self.marker_detector_conn = Client(
+            (SERVER_HOSTNAME, 6002), authkey=CONN_AUTHKEY
+        )
+        self.marker_detector_conn.send(None)
+        self.last_pose_map = SE2(0, 0, 0)
 
     def get_base_state(self) -> SE2:
-        raise NotImplementedError(
-            "RealBaseInterface.get_base_state: read the current odom-frame "
-            "SE2 pose from the TidyBot base controller."
-        )
+        base_pose = self.base.get_state()["base_pose"]
+        return SE2(base_pose[0], base_pose[1], base_pose[2])
 
     def get_map_base_state(self) -> SE2:
-        raise NotImplementedError(
-            "RealBaseInterface.get_map_base_state: read the current "
-            "map-frame SE2 pose from the marker detector."
-        )
+        if self.marker_detector_conn.poll():
+            detector_data = self.marker_detector_conn.recv()
+            self.marker_detector_conn.send(None)
+            robot_idx = 0
+            pose_map = detector_data["poses"][robot_idx]
+            self.last_pose_map = SE2(pose_map[0], pose_map[1], pose_map[2])
+            return self.last_pose_map
+        print("warning: no marker detector data received")
+        return self.last_pose_map
 
     def execute_action(self, action: SE2) -> None:
         raise NotImplementedError(
             "RealBaseInterface.execute_action: command the base to "
             "absolute pose `action` (in odom frame)."
         )
+
+    def close(self) -> None:
+        self.base.close()
