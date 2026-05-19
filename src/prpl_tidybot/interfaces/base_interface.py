@@ -33,7 +33,7 @@ class BaseInterface(abc.ABC):
         """Execute a local-frame base action."""
 
     def close(self) -> None:
-        """Tear down any hardware connections; subclasses with real resources override."""
+        """Tear down hardware connections; real-resource subclasses override."""
 
 
 class FakeBaseInterface(BaseInterface):

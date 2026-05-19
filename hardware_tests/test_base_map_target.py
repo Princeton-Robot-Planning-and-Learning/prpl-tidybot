@@ -18,13 +18,9 @@ import sys
 import time
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.axes import Axes  # noqa: E402
-from spatialmath import SE2  # noqa: E402
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from spatialmath import SE2
 
 from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
 from prpl_tidybot.interfaces.camera_interface import FakeCameraInterface
