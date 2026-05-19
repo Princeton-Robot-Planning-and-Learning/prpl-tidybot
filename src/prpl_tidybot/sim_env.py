@@ -31,9 +31,9 @@ class KinderSimEnv(
     `ObjectCentricState`.
     """
 
-    def __init__(self, env_id: str) -> None:
+    def __init__(self, env_id: str, **make_kwargs: Any) -> None:
         kinder.register_all_environments()
-        self._env = gymnasium.make(env_id, render_mode="rgb_array")
+        self._env = gymnasium.make(env_id, render_mode="rgb_array", **make_kwargs)
         # kinder envs serialize ObjectCentricState through
         # ObjectCentricBoxSpace; we devectorize back to the structured
         # state in reset/step.
@@ -73,6 +73,17 @@ class KinderSimEnv(
 
     def render(self) -> RenderFrame | list[RenderFrame] | None:
         return self._env.render()
+
+    def set_state(self, state: ObjectCentricState) -> None:
+        """Teleport the inner kinder env to `state`.
+
+        Requires the env to be constructed with `allow_state_access=True`
+        (see the sim pipeline yaml). Used by the recording layer to
+        render the agent's perceived state on a shadow sim.
+        """
+        self._env.unwrapped._object_centric_env.set_state(  # type: ignore[attr-defined]  # pylint: disable=protected-access
+            state
+        )
 
     def close(self) -> None:
         self._env.close()

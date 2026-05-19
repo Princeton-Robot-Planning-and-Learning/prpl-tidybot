@@ -1,5 +1,5 @@
 # Top-level demo config. Pick an env via Hydra group:
-#   python scripts/demo.py env=base_motion3d mode=sim
+#   python scripts/run_planner.py env=base_motion3d mode=sim
 #
 # `mode` is a plain string field rather than its own group — each env
 # yaml exposes `pipelines.{fake,sim,real}` and the demo selects the
@@ -25,3 +25,11 @@ agent:
   max_skill_horizon: 100
   heuristic_name: hff
   planning_timeout: 60
+
+# Optional side-by-side (real | shadow-sim) video recording. Set
+# `record.video_path` to enable. The shadow sim is the env's own sim
+# pipeline (`cfg.env.pipelines.sim.real_env`), re-instantiated alongside
+# the active real_env regardless of which mode the run is in.
+record:
+  video_path: null
+  fps: 10

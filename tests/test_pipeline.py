@@ -53,3 +53,29 @@ def test_run_planner_smoke(env: str, mode: str) -> None:
     assert result.finish_reason
     # The final state always exposes a "robot" object.
     assert result.final_state.get_object_from_name("robot") is not None
+    # Recording was not enabled, so no video should be produced.
+    assert result.video_path is None
+
+
+def test_run_planner_writes_video_when_record_video_path_set(
+    tmp_path: Path,
+) -> None:
+    """End-to-end smoke: with `record.video_path` set, the pipeline writes a side-by-
+    side mp4 alongside the rollout."""
+    video_path = tmp_path / "rollout.mp4"
+    with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
+        cfg = compose(
+            config_name="config",
+            overrides=[
+                "env=base_motion3d",
+                "mode=fake",
+                "max_eval_steps=10",
+                "seed=0",
+                f"record.video_path={video_path}",
+                "record.fps=5",
+            ],
+        )
+    result = run_planner(cfg)
+    assert result.video_path == video_path
+    assert video_path.exists()
+    assert video_path.stat().st_size > 0

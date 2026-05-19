@@ -39,4 +39,8 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         return self._interface.get_observation(), 0.0, False, False, {}
 
     def render(self) -> RenderFrame | list[RenderFrame] | None:
-        return None
+        # The base camera (Logitech, 360x640x3) is the most natural single
+        # frame for the real env's render output; the wrist camera is
+        # accessed separately when callers want it. In fake mode this is
+        # all-zero until the real camera lands.
+        return self._interface.get_base_image()
