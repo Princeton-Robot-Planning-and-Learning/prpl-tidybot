@@ -10,6 +10,7 @@ from gymnasium.core import RenderFrame
 
 from prpl_tidybot.coord_converter import CoordFrameConverter
 from prpl_tidybot.interfaces.interface import Interface
+from prpl_tidybot.rendering import Renderer
 from prpl_tidybot.structs import TidyBotAction, TidyBotObservation
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD
 
@@ -39,6 +40,7 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         gripper_tolerance: float = 0.05,
         max_iter: int = 100,
         control_period: float = POLICY_CONTROL_PERIOD,
+        renderer: Renderer | None = None,
     ) -> None:
         self._interface = interface
         self._position_tolerance = position_tolerance
@@ -48,6 +50,7 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         self._max_iter = max_iter
         self._control_period = control_period
         self._converter: CoordFrameConverter | None = None
+        self._renderer = renderer
 
     def reset(
         self,
@@ -103,6 +106,8 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         return True
 
     def render(self) -> RenderFrame | list[RenderFrame] | None:
+        if self._renderer is not None:
+            return self._renderer.render()
         return self._interface.get_base_image()
 
 
