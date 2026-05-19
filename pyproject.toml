@@ -19,8 +19,9 @@ dependencies = [
    "hydra-core",
    "kinder_bilevel_planning @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@94fe4d2#subdirectory=kinder-bilevel-planning",
    "kinder_models @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@94fe4d2#subdirectory=kinder-models",
-   "phoenix6",
+   "phoenix6==25.1.0",
    "ruckig",
+   "setuptools<81",
    "threadpoolctl",
 ]
 
