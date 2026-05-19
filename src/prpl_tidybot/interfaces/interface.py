@@ -24,11 +24,22 @@ from prpl_tidybot.interfaces.camera_interface import (
     FakeCameraInterface,
     RealCameraInterface,
 )
-from prpl_tidybot.structs import TidyBotAction, TidyBotObservation
+from prpl_tidybot.structs import TidyBotObservation
 
 
 class Interface(abc.ABC):
-    """A generic interface to the TidyBot++, real or fake."""
+    """A generic interface to the TidyBot++, real or fake.
+
+    The component sub-interfaces are exposed as attributes so that callers
+    (e.g. `RealTidyBotEnv.step`) can address each component directly when the
+    composite action's components need different handling — most notably, the
+    base target is a map-frame pose that needs converting to odom before
+    `base_interface.execute_action` sees it.
+    """
+
+    arm_interface: ArmInterface
+    base_interface: BaseInterface
+    camera_interface: CameraInterface
 
     @abc.abstractmethod
     def get_base_state(self) -> spatialmath.SE2:
@@ -53,10 +64,6 @@ class Interface(abc.ABC):
     @abc.abstractmethod
     def get_base_image(self) -> Image:
         """Get the current base image."""
-
-    @abc.abstractmethod
-    def execute_action(self, action: TidyBotAction) -> None:
-        """Execute a full TidyBotAction (base, arm, and gripper components)."""
 
     def get_observation(self) -> TidyBotObservation:
         """Build a full TidyBotObservation from the component getters."""
@@ -95,11 +102,6 @@ class FakeInterface(Interface):
 
     def get_base_image(self) -> Image:
         return self.camera_interface.get_base_image()
-
-    def execute_action(self, action: TidyBotAction) -> None:
-        self.base_interface.execute_action(action.base_pose_target_map)
-        self.arm_interface.execute_action(action.arm_goal)
-        self.arm_interface.execute_gripper_action(action.gripper_goal)
 
 
 class RealInterface(Interface):
@@ -143,8 +145,3 @@ class RealInterface(Interface):
 
     def get_base_image(self) -> Image:
         return self.camera_interface.get_base_image()
-
-    def execute_action(self, action: TidyBotAction) -> None:
-        self.base_interface.execute_action(action.base_pose_target_map)
-        self.arm_interface.execute_action(action.arm_goal)
-        self.arm_interface.execute_gripper_action(action.gripper_goal)
