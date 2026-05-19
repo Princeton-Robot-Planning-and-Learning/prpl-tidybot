@@ -29,5 +29,5 @@ class TidyBotAction:
     """Low-level joint and base commands for the real TidyBot environment."""
 
     arm_goal: list[float]  # absolute arm position
-    base_local_goal: spatialmath.SE2  # relative to current base pose
+    base_pose_target_map: spatialmath.SE2  # absolute base pose target in the map frame
     gripper_goal: float  # absolute

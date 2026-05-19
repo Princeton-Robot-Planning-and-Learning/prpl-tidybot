@@ -97,7 +97,7 @@ class FakeInterface(Interface):
         return self.camera_interface.get_base_image()
 
     def execute_action(self, action: TidyBotAction) -> None:
-        self.base_interface.execute_action(action.base_local_goal)
+        self.base_interface.execute_action(action.base_pose_target_map)
         self.arm_interface.execute_action(action.arm_goal)
         self.arm_interface.execute_gripper_action(action.gripper_goal)
 
@@ -145,6 +145,6 @@ class RealInterface(Interface):
         return self.camera_interface.get_base_image()
 
     def execute_action(self, action: TidyBotAction) -> None:
-        self.base_interface.execute_action(action.base_local_goal)
+        self.base_interface.execute_action(action.base_pose_target_map)
         self.arm_interface.execute_action(action.arm_goal)
         self.arm_interface.execute_gripper_action(action.gripper_goal)
