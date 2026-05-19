@@ -234,7 +234,7 @@ class MarkerDetectorServer(Publisher):
         port: int = MARKER_DETECTOR_PORT,
         top_only: bool = False,
         debug: bool = False,
-        inverse_heading: bool = False,
+        inverse_heading: bool = True,
     ) -> None:
         super().__init__(hostname=hostname, port=port)
         self.debug = debug
@@ -299,7 +299,7 @@ def main(
     host: str = "0.0.0.0",
     top_only: bool = False,
     debug: bool = False,
-    inverse_heading: bool = False,
+    inverse_heading: bool = True,
 ) -> None:
     """Spawn the camera-server subprocesses, then run the detector publisher.
 
@@ -336,8 +336,13 @@ def cli() -> None:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
         "--inverse-heading",
-        action="store_true",
-        help="Rotate every reported heading by 180 degrees.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Rotate every reported heading by 180 degrees. On by default to "
+            "match the ground-truth robot heading; pass --no-inverse-heading "
+            "to disable."
+        ),
     )
     args = parser.parse_args()
     main(
