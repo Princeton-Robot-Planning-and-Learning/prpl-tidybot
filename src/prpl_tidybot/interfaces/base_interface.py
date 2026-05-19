@@ -3,6 +3,7 @@
 import abc
 from multiprocessing.connection import Client
 
+import numpy as np
 from spatialmath import SE2
 
 from prpl_tidybot.marker_detector.constants import MARKER_DETECTOR_PORT
@@ -88,9 +89,8 @@ class RealBaseInterface(BaseInterface):
         return self.last_pose_map
 
     def execute_action(self, action: SE2) -> None:
-        raise NotImplementedError(
-            "RealBaseInterface.execute_action: command the base to "
-            "absolute pose `action` (in odom frame)."
+        self.base.execute_action(
+            {"base_pose": np.array([action.x, action.y, action.theta()])}
         )
 
     def close(self) -> None:
