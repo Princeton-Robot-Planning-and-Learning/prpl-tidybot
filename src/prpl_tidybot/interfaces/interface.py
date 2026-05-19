@@ -10,14 +10,17 @@ import spatialmath
 from prpl_utils.structs import Image
 
 from prpl_tidybot.interfaces.arm_interface import (
+    ArmInterface,
     FakeArmInterface,
     RealArmInterface,
 )
 from prpl_tidybot.interfaces.base_interface import (
+    BaseInterface,
     FakeBaseInterface,
     RealBaseInterface,
 )
 from prpl_tidybot.interfaces.camera_interface import (
+    CameraInterface,
     FakeCameraInterface,
     RealCameraInterface,
 )
@@ -102,16 +105,26 @@ class FakeInterface(Interface):
 class RealInterface(Interface):
     """The real and sole interface to the TidyBot++ robot.
 
-    Each component (arm, base, camera) is a skeleton whose methods raise
-    `NotImplementedError`. Implement them piece-by-piece against the real
-    hardware drivers; the demo at `scripts/demo_real_to_sim_to_real.py
-    --mode real` will surface the next unimplemented method on each run.
+    Each component (arm, base, camera) defaults to a skeleton whose
+    methods raise `NotImplementedError`; implement them piece-by-piece
+    against the real hardware drivers.
+
+    Any component can be swapped at construction time — e.g. pass a
+    `FakeArmInterface` when running an env (like BaseMotion3D) whose
+    rollout doesn't need real arm reads or writes. This is wired
+    through Hydra in `conf/env/<env>.yaml`'s `real` pipeline; see
+    `conf/env/base_motion3d.yaml`.
     """
 
-    def __init__(self) -> None:
-        self.arm_interface = RealArmInterface()
-        self.base_interface = RealBaseInterface()
-        self.camera_interface = RealCameraInterface()
+    def __init__(
+        self,
+        arm_interface: ArmInterface | None = None,
+        base_interface: BaseInterface | None = None,
+        camera_interface: CameraInterface | None = None,
+    ) -> None:
+        self.arm_interface = arm_interface or RealArmInterface()
+        self.base_interface = base_interface or RealBaseInterface()
+        self.camera_interface = camera_interface or RealCameraInterface()
 
     def get_base_state(self) -> spatialmath.SE2:
         return self.base_interface.get_base_state()
