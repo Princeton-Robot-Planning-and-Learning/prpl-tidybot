@@ -98,6 +98,7 @@ def test_render_routes_through_renderer_when_provided():
 
         def close(self) -> None:
             """No resources to release."""
+
     renderer = _StubRenderer()
     env = RealTidyBotEnv(
         FakeInterface(),
