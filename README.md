@@ -22,22 +22,28 @@ lets agents written against a kinder simulator drive the real environment
                                │ ObjectCentricState
                                ▼
                   ┌────────────────────────────┐
-                  │           Agent            │
+                  │       PlanningAgent        │
                   │ (e.g. BilevelPlanningAgent)│
                   └────────────┬───────────────┘
-                               │ 11-d kinder action
+                               │ planned trajectory
+                               │ [(state, action), …]
                                ▼
                   ┌────────────────────────────┐
-                  │      ActionGrounder        │
+                  │       PlanExecutor         │
+                  │ (per-tick, closed loop)    │
                   └────────────┬───────────────┘
                                │ real_action
                                ▼
                        (back to real_env)
 ```
 
-`prpl_utils.real_sim.Runner` glues these together. The base `Interface`
-abstracts the underlying world; `FakeInterface` is the dev default and
-`RealInterface` stubs hardware until it gets wired up.
+`prpl_utils.real_sim.Runner` glues these together: each outer `step()`
+calls `agent.plan()` for a state-action trajectory, then ticks the
+`PlanExecutor` against the real env until it reports done.
+`FakeInterface` is the dev default; `RealInterface` is the real-robot
+backend, with `arm_interface` / `camera_interface` overridable so a
+base-only rollout can swap in fakes for the parts that aren't wired
+up yet.
 
 ## Install
 
@@ -51,15 +57,22 @@ uv sync --all-extras --dev
 python scripts/run_planner.py env=base_motion3d mode=sim
 python scripts/run_planner.py env=base_motion3d mode=fake max_eval_steps=200
 python scripts/run_planner.py env=prpl3d-o1 mode=sim seed=42
-python scripts/run_planner.py env=base_motion3d mode=real     # raises NotImplementedError
-                                                              # from the first
-                                                              # RealInterface read
+
+# Drives the real base toward an ArUco target. Needs the tmuxinator stack
+# running (see "Launching the servers" below); arm + cameras are faked for
+# this env so only the base controller + marker detector are exercised.
+python scripts/run_planner.py env=base_motion3d mode=real
+
+# Uses the full RealInterface (real arm + cameras), which still raises
+# NotImplementedError from RealArmInterface / RealCameraInterface — the
+# arm wiring lands in #48.
+python scripts/run_planner.py env=prpl3d-o1 mode=real
 ```
 
 Each env yaml under `conf/env/` declares all three pipelines
 (`fake` / `sim` / `real`); pick one with `mode=...`. **Adding a new env
 is one new yaml file** — there is no env switch in code. Hydra composes
-the perceiver, action grounder, and env wrapper from the yaml's
+the perceiver, plan executor, and env wrapper from the yaml's
 `_target_` references.
 
 ## Launching the servers
