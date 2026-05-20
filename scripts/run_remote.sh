@@ -14,18 +14,24 @@ shift
 repo_dir="${PRPL_REPO_DIR:-~/prpl-tidybot}"
 branch="${PRPL_BRANCH:-}"
 
-# When PRPL_BRANCH is set, sync the remote checkout to that branch before
-# anything else runs. `&&` chain so a fetch/checkout/pull failure aborts
-# the pane instead of starting the server (or shell) against stale code.
+# Bootstrap chained into the SSH command via `&&` so any step's failure
+# aborts the pane instead of starting the server (or shell) against
+# stale code or a stale venv.
 #
-# Fast-forward to FETCH_HEAD instead of `git pull --ff-only` — the latter
-# depends on `branch.<name>.merge` config that may be missing on a fresh
-# remote checkout and then errors out with "Cannot fast-forward to
-# multiple branches".
+# 1. Optional git sync. When PRPL_BRANCH is set, fast-forward the remote
+#    checkout to that branch. Use `merge --ff-only FETCH_HEAD` rather
+#    than `git pull --ff-only` — the latter depends on
+#    `branch.<name>.merge` config that may be missing on a fresh remote
+#    checkout and then errors out with "Cannot fast-forward to multiple
+#    branches".
+# 2. Always `uv sync`. Picks up any pyproject.toml / uv.lock changes
+#    from the just-synced branch (or from a manual `git pull` on the
+#    remote since the last launch) before any Python code runs. No-op
+#    when nothing has changed.
 if [[ -n "$branch" ]]; then
-    sync="git fetch origin $branch && git checkout $branch && git merge --ff-only FETCH_HEAD && "
+    sync="git fetch origin $branch && git checkout $branch && git merge --ff-only FETCH_HEAD && uv sync && "
 else
-    sync=""
+    sync="uv sync && "
 fi
 
 # -tt forces a PTY in both directions so closing the local pane delivers
