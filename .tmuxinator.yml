@@ -24,10 +24,10 @@ windows:
       # taking the full width — handy for typing.
       layout: tiled
       panes:
+        - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}" bash
         - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}"
           python -m prpl_tidybot.third_party.base_server
         - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_PERCEPTION_HOST:-<%= laptop_default %>}"
           python scripts/run_marker_detector_server.py<%= lab == 'fwing' ? '' : ' --lab prpl' %>
         - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}"
           python -m prpl_tidybot.third_party.arm_server
-        - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}" bash
