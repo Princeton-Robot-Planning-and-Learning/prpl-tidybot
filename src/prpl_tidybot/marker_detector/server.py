@@ -17,10 +17,9 @@ from pathlib import Path
 from threading import Thread
 from typing import Any
 
-import yaml
-
 import cv2 as cv
 import numpy as np
+import yaml  # type: ignore[import-untyped]
 
 from prpl_tidybot.marker_detector.camera_client import CameraClient
 from prpl_tidybot.marker_detector.camera_server import CameraServer
@@ -271,11 +270,12 @@ class MarkerDetectorServer(Publisher):
         top_only: bool = False,
         debug: bool = False,
         inverse_heading: bool = True,
-        camera_serials: list[str] = CAMERA_SERIALS,
+        camera_serials: list[str] | None = None,
         camera_height: float = CAMERA_HEIGHT,
     ) -> None:
         super().__init__(hostname=hostname, port=port)
         self.debug = debug
+        camera_serials = camera_serials or CAMERA_SERIALS
         if top_only:
             self.detectors = [
                 Detector(
@@ -340,10 +340,8 @@ def _start_camera_server(serial: str, port: int) -> None:
 
 
 def _load_lab_camera_config(lab: str) -> tuple[list[str], float]:
-    conf_path = (
-        Path(__file__).parents[3] / "conf" / "lab" / f"{lab}.yaml"
-    )
-    with open(conf_path, "r") as f:
+    conf_path = Path(__file__).parents[3] / "conf" / "lab" / f"{lab}.yaml"
+    with open(conf_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     return cfg["camera_serials"], cfg["camera_height"]
 
@@ -421,7 +419,10 @@ def cli() -> None:
     parser.add_argument(
         "--lab",
         default=None,
-        help="Lab name (e.g. 'prpl') to load camera serials and height from conf/lab/<lab>.yaml.",
+        help=(
+            "Lab name (e.g. 'prpl') to load camera serials and height"
+            " from conf/lab/<lab>.yaml."
+        ),
     )
     args = parser.parse_args()
     main(
