@@ -6,7 +6,7 @@ Wires:
                      ^                          PrplLab3DPerceiver
                      |                                  |
                      |                                  v
-            Kinematic3DPlanExecutor <- PlanningAgent <- ObjectCentricState
+            PurePursuitKinematic3DPlanExecutor <- PlanningAgent <- ObjectCentricState
 
 through `prpl_utils.real_sim.Runner` and asserts that the FakeInterface
 ends up at the cumulative absolute target after several Runner steps of
@@ -25,7 +25,7 @@ from relational_structs import ObjectCentricState
 
 from prpl_tidybot.interfaces.interface import FakeInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
-from prpl_tidybot.real_sim import Kinematic3DPlanExecutor, PrplLab3DPerceiver
+from prpl_tidybot.real_sim import PrplLab3DPerceiver, PurePursuitKinematic3DPlanExecutor
 
 
 class _OneActionPerPlanAgent(
@@ -80,7 +80,7 @@ def _build_runner(
         real_env=env,
         perceiver=PrplLab3DPerceiver(),
         agent=_OneActionPerPlanAgent(actions),
-        plan_executor=Kinematic3DPlanExecutor(),
+        plan_executor=PurePursuitKinematic3DPlanExecutor(),
     )
     return runner, interface
 
@@ -127,57 +127,25 @@ def test_gripper_close_then_open():
     assert interface.get_gripper_state() == 0.0
 
 
-def test_single_step_can_execute_multi_action_trajectory():
-    """One outer Runner.step can drive multiple inner ticks when the agent returns a
-    multi-pair trajectory."""
-
-    class _SingleMultiPlanAgent(
-        PlanningAgent[ObjectCentricState, NDArray[np.floating], ObjectCentricState]
-    ):
-        """Returns a whole multi-step trajectory on the first plan(); empty after."""
-
-        def __init__(self, actions: list[NDArray[np.floating]]) -> None:
-            super().__init__(seed=0)
-            self._actions = actions
-            self._delivered = False
-
-        def plan(
-            self,
-        ) -> list[tuple[ObjectCentricState, NDArray[np.floating]]]:
-            if self._delivered:
-                return []
-            self._delivered = True
-            assert self._last_observation is not None
-            # All pairs share the same start-state snapshot; that's fine because
-            # the kinematic3d executor re-snapshots when it advances to each
-            # waypoint using the perceived state at that point.
-            return [(self._last_observation, a) for a in self._actions]
-
-        def _get_action(self) -> NDArray[np.floating]:  # pragma: no cover
-            raise NotImplementedError
-
-        def update(
-            self,
-            obs: ObjectCentricState,
-            reward: float,
-            done: bool,
-            info: dict[str, Any],
-        ) -> None:
-            self._last_observation = obs
-            self._last_info = info
-
+def test_single_outer_step_drives_multiple_inner_ticks():
+    """Pure pursuit caps each commanded target to `lookahead_distance` ahead of the
+    cursor along the path, so a single outer Runner.step against a path longer than
+    `lookahead_distance` yields multiple inner env.step calls and arrives at the final
+    waypoint."""
     delta = np.zeros(11)
-    delta[0] = 0.01
+    delta[0] = 1.0  # 1 m delta, much longer than the lookahead below
     interface = FakeInterface()
     env = RealTidyBotEnv(interface, control_period=0.0)
     runner: Runner = Runner(
         real_env=env,
         perceiver=PrplLab3DPerceiver(),
-        agent=_SingleMultiPlanAgent([delta.copy() for _ in range(3)]),
-        plan_executor=Kinematic3DPlanExecutor(),
+        agent=_OneActionPerPlanAgent([delta]),
+        plan_executor=PurePursuitKinematic3DPlanExecutor(lookahead_distance=0.2),
     )
 
     runner.reset()
     runner.step()
-    # Three inner ticks of dx=0.01.
-    assert interface.get_base_state().x == pytest.approx(0.03)
+    # FakeInterface instantly settles to whatever target it's commanded, so the
+    # robot advances lookahead_distance per tick — multiple ticks are needed to
+    # cover the 1 m path. The final position matches the final waypoint.
+    assert interface.get_base_state().x == pytest.approx(1.0)
