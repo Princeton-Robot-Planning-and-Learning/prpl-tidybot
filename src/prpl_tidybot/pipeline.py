@@ -16,7 +16,7 @@ from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
 from prpl_tidybot.real_sim import build_planner_env_models
-from prpl_tidybot.recording import Recorder
+from prpl_tidybot.recording import Recorder, RecordingPerceiver
 
 
 @dataclass(frozen=True)
@@ -46,7 +46,7 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
     pipeline = cfg.env.pipelines[cfg.mode]
     real_env = hydra.utils.instantiate(pipeline.real_env)
     perceiver = hydra.utils.instantiate(pipeline.perceiver)
-    grounder = hydra.utils.instantiate(pipeline.action_grounder)
+    plan_executor = hydra.utils.instantiate(pipeline.plan_executor)
 
     # Optional side-by-side recording. The shadow sim reuses the env's
     # own sim pipeline yaml (the same one sim mode uses for `real_env`),
@@ -62,6 +62,7 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
             fps=record_cfg.fps,
             seed=cfg.seed,
         )
+        perceiver = RecordingPerceiver(perceiver, recorder)
 
     env_models = build_planner_env_models(
         cfg.env.env_name,
@@ -83,12 +84,10 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
         real_env=real_env,
         perceiver=perceiver,
         agent=agent,
-        action_grounder=grounder,
+        plan_executor=plan_executor,
     )
 
     state = runner.reset(seed=cfg.seed)
-    if recorder is not None:
-        recorder.capture(state)
     total_reward = 0.0
     steps = 0
     finish_reason = "max_steps_reached"
@@ -104,8 +103,6 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
             break
         steps += 1
         total_reward += float(reward)
-        if recorder is not None:
-            recorder.capture(state)
         if terminated:
             finish_reason = "terminated"
             break
