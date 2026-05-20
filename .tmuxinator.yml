@@ -1,9 +1,9 @@
 name: prpl-tidybot
 root: <%= ENV['PRPL_REPO_DIR'] || '~/prpl-tidybot' %>
 <% branch = (@args && @args[0]) || '' %>
-<% lab = ENV['PRPL_LAB'] || 'default' %>
-<% nuc_default    = lab == 'prpl' ? 'tidybot-nuc-prpl'    : 'tidybot-nuc' %>
-<% laptop_default = lab == 'prpl' ? 'tidybot-laptop-prpl' : 'tidybot-laptop' %>
+<% lab = ENV['PRPL_LAB'] || 'prpl' %>
+<% nuc_default    = lab == 'fwing' ? 'tidybot-nuc'    : 'tidybot-nuc-prpl' %>
+<% laptop_default = lab == 'fwing' ? 'tidybot-laptop' : 'tidybot-laptop-prpl' %>
 
 # Override the SSH targets and remote repo path via env vars before
 # launching, e.g.
@@ -27,5 +27,5 @@ windows:
         - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}"
           python -m prpl_tidybot.third_party.base_server
         - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_PERCEPTION_HOST:-<%= laptop_default %>}"
-          python scripts/run_marker_detector_server.py<%= lab == 'prpl' ? ' --lab prpl' : '' %>
+          python scripts/run_marker_detector_server.py<%= lab == 'fwing' ? '' : ' --lab prpl' %>
         - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}" bash

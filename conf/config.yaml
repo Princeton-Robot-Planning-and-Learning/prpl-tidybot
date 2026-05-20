@@ -9,7 +9,7 @@
 defaults:
   - _self_
   - env: ???
-  - lab: default
+  - lab: prpl
 
 hydra:
   run:

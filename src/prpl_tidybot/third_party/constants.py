@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-_lab_name = os.environ.get("PRPL_LAB", "default")
+_lab_name = os.environ.get("PRPL_LAB", "prpl")
 _lab_conf_path = (
-    Path(__file__).parent.parent.parent.parent / "conf" / "lab" / f"{_lab_name}.yaml"
+    Path(__file__).parents[3] / "conf" / "lab" / f"{_lab_name}.yaml"
 )
 with open(_lab_conf_path, "r") as _f:
     _lab_conf = yaml.safe_load(_f)

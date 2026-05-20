@@ -4,18 +4,7 @@ Connection constants shared with the rest of the codebase (`CONN_AUTHKEY`,
 `SERVER_HOSTNAME`) live in `prpl_tidybot.third_party.constants`.
 """
 
-import os
-from pathlib import Path
-
 import cv2 as cv
-import yaml
-
-_lab_name = os.environ.get("PRPL_LAB", "default")
-_lab_conf_path = (
-    Path(__file__).parent.parent.parent.parent / "conf" / "lab" / f"{_lab_name}.yaml"
-)
-with open(_lab_conf_path, "r") as _f:
-    _lab_conf = yaml.safe_load(_f)
 
 # Network ports for the publisher sockets.
 MARKER_DETECTOR_PORT = 6002
@@ -46,13 +35,16 @@ DETECTED_MARKER_IDS = MARKER_IDS + TARGET_MARKER_IDS
 # Ceiling cameras. Order is (top, bottom); top precedes except for single-marker
 # pose estimates where bottom wins. Different physical cameras than the wrist
 # cameras in `third_party.constants.CAMERA_SERIALS`.
-# Loaded from conf/lab/<PRPL_LAB>.yaml (default: "default").
-CAMERA_SERIALS: list[str] = _lab_conf["camera_serials"]
+# Override at runtime with --lab when launching the marker-detector server.
+CAMERA_SERIALS = [
+    "515A41BE",  # Top camera
+    "A01861BE",  # Bottom camera
+]
 CAMERA_FOCUS = 0
 CAMERA_TEMPERATURE = 3900
 CAMERA_EXPOSURE = 77  # 77 is best, 156 is slightly worse, 312 gives motion blur
 CAMERA_GAIN = 50  # Increments of 10
-CAMERA_HEIGHT: float = _lab_conf["camera_height"]
+CAMERA_HEIGHT = 2.6  # m, ceiling-to-floor distance for the mounted cameras
 
 # Floor extents in the map frame. Origin is the floor center.
 NUM_FLOOR_TILES_X = 6

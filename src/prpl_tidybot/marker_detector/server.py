@@ -341,7 +341,7 @@ def _start_camera_server(serial: str, port: int) -> None:
 
 def _load_lab_camera_config(lab: str) -> tuple[list[str], float]:
     conf_path = (
-        Path(__file__).parent.parent.parent.parent / "conf" / "lab" / f"{lab}.yaml"
+        Path(__file__).parents[3] / "conf" / "lab" / f"{lab}.yaml"
     )
     with open(conf_path, "r") as f:
         cfg = yaml.safe_load(f)

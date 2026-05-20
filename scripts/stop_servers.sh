@@ -4,12 +4,12 @@
 
 set -uo pipefail
 
-if [ "${PRPL_LAB:-default}" = "prpl" ]; then
-    _nuc_default="tidybot-nuc-prpl"
-    _perc_default="tidybot-laptop-prpl"
-else
+if [ "${PRPL_LAB:-prpl}" = "fwing" ]; then
     _nuc_default="tidybot-nuc"
     _perc_default="tidybot-laptop"
+else
+    _nuc_default="tidybot-nuc-prpl"
+    _perc_default="tidybot-laptop-prpl"
 fi
 NUC="${PRPL_NUC_HOST:-$_nuc_default}"
 PERC="${PRPL_PERCEPTION_HOST:-$_perc_default}"
