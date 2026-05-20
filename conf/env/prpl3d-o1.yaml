@@ -37,5 +37,8 @@ pipelines:
       _target_: prpl_tidybot.real_env.RealTidyBotEnv
       interface:
         _target_: prpl_tidybot.interfaces.interface.RealInterface
+        base_interface:
+          _target_: prpl_tidybot.interfaces.base_interface.RealBaseInterface
+          marker_detector_host: ${lab.marker_detector_host}
     perceiver: ${env.pipelines.fake.perceiver}
     action_grounder: ${env.pipelines.fake.action_grounder}

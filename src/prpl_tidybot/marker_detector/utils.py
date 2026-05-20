@@ -69,8 +69,11 @@ def get_video_cap(serial: str, frame_width: int, frame_height: int) -> cv.VideoC
 
 def get_camera_params(serial: str) -> tuple[int, int, np.ndarray, np.ndarray]:
     """Load intrinsic camera matrix and distortion coefficients for `serial`."""
-    path = CAMERA_PARAMS_DIR / f"{serial}.yml"
-    assert path.exists(), f"missing camera params file: {path}"
+    candidates = list(CAMERA_PARAMS_DIR.glob(f"*/{serial}.yml"))
+    assert (
+        len(candidates) == 1
+    ), f"expected one camera params file for {serial}, found: {candidates}"
+    path = candidates[0]
     fs = cv.FileStorage(str(path), cv.FILE_STORAGE_READ)
     image_width = int(fs.getNode("image_width").real())
     image_height = int(fs.getNode("image_height").real())
@@ -82,8 +85,11 @@ def get_camera_params(serial: str) -> tuple[int, int, np.ndarray, np.ndarray]:
 
 def get_camera_alignment_params(serial: str) -> tuple[Any, Any]:
     """Load the floor-corner image annotations used to fit the map homography."""
-    path = CAMERA_PARAMS_DIR / f"{serial}.json"
-    assert path.exists(), f"missing camera alignment file: {path}"
+    candidates = list(CAMERA_PARAMS_DIR.glob(f"*/{serial}.json"))
+    assert (
+        len(candidates) == 1
+    ), f"expected one camera alignment file for {serial}, found: {candidates}"
+    path = candidates[0]
     with open(path, "r", encoding="utf-8") as f:
         labels = json.load(f)
     return labels["camera_center"], labels["camera_corners"]

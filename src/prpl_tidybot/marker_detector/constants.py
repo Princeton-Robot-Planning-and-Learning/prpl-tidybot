@@ -35,6 +35,7 @@ DETECTED_MARKER_IDS = MARKER_IDS + TARGET_MARKER_IDS
 # Ceiling cameras. Order is (top, bottom); top precedes except for single-marker
 # pose estimates where bottom wins. Different physical cameras than the wrist
 # cameras in `third_party.constants.CAMERA_SERIALS`.
+# Override at runtime with --lab when launching the marker-detector server.
 CAMERA_SERIALS = [
     "515A41BE",  # Top camera
     "A01861BE",  # Bottom camera

@@ -11,6 +11,7 @@ from prpl_tidybot.third_party.constants import (
     BASE_RPC_HOST,
     BASE_RPC_PORT,
     RPC_AUTHKEY,
+    SERVER_HOSTNAME,
 )
 
 
@@ -56,7 +57,7 @@ class RealBaseInterface(BaseInterface):
     controller (odom frame) and the marker detector (map frame).
     Action execution is not yet implemented."""
 
-    def __init__(self) -> None:
+    def __init__(self, marker_detector_host: str = SERVER_HOSTNAME) -> None:
         self.base_manager = BaseManager(
             address=(BASE_RPC_HOST, BASE_RPC_PORT), authkey=RPC_AUTHKEY
         )
@@ -64,7 +65,7 @@ class RealBaseInterface(BaseInterface):
         self.base = self.base_manager.Base()  # type: ignore # pylint: disable=no-member
         self.base.reset()
 
-        self.marker_detector_client = MarkerDetectorClient()
+        self.marker_detector_client = MarkerDetectorClient(host=marker_detector_host)
         self.last_pose_map = SE2(0, 0, 0)
 
     def get_base_state(self) -> SE2:
