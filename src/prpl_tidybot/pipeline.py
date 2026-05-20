@@ -16,7 +16,7 @@ from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
 from prpl_tidybot.real_sim import build_planner_env_models
-from prpl_tidybot.recording import Recorder
+from prpl_tidybot.recording import Recorder, RecordingPerceiver
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,7 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
             fps=record_cfg.fps,
             seed=cfg.seed,
         )
+        perceiver = RecordingPerceiver(perceiver, recorder)
 
     env_models = build_planner_env_models(
         cfg.env.env_name,
@@ -87,8 +88,6 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
     )
 
     state = runner.reset(seed=cfg.seed)
-    if recorder is not None:
-        recorder.capture(state)
     total_reward = 0.0
     steps = 0
     finish_reason = "max_steps_reached"
@@ -104,8 +103,6 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
             break
         steps += 1
         total_reward += float(reward)
-        if recorder is not None:
-            recorder.capture(state)
         if terminated:
             finish_reason = "terminated"
             break

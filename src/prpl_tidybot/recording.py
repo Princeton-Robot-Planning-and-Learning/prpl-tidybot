@@ -19,13 +19,16 @@ satisfies that protocol.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Generic, Protocol, TypeVar
 
 import cv2 as cv
 import gymnasium
 import numpy as np
 from moviepy import ImageSequenceClip
+from prpl_utils.real_sim import Perceiver
 from relational_structs import ObjectCentricState
+
+_RealObsType = TypeVar("_RealObsType")
 
 
 class _ShadowSim(Protocol):
@@ -95,6 +98,38 @@ class Recorder:
         clip = ImageSequenceClip(self._frames, fps=self._fps)
         clip.write_videofile(str(self._video_path), logger=None)
         return self._video_path
+
+
+class RecordingPerceiver(
+    Generic[_RealObsType], Perceiver[_RealObsType, ObjectCentricState]
+):
+    """Perceiver wrapper that captures a Recorder frame for every produced state.
+
+    Wiring recording at the perceiver layer (rather than via a Runner hook or
+    subclass) is what guarantees one frame per real-env tick: the perceiver is
+    the single point through which every state — initial and per-tick — passes,
+    so wrapping it makes the "one frame per outer Runner.step" failure mode
+    structurally impossible. The state type is pinned to ``ObjectCentricState``
+    because that is what :class:`Recorder` needs to drive its shadow sim.
+    """
+
+    def __init__(
+        self,
+        inner: Perceiver[_RealObsType, ObjectCentricState],
+        recorder: "Recorder",
+    ) -> None:
+        self._inner = inner
+        self._recorder = recorder
+
+    def reset(self, obs: _RealObsType, info: dict[str, Any]) -> ObjectCentricState:
+        state = self._inner.reset(obs, info)
+        self._recorder.capture(state)
+        return state
+
+    def step(self, obs: _RealObsType, info: dict[str, Any]) -> ObjectCentricState:
+        state = self._inner.step(obs, info)
+        self._recorder.capture(state)
+        return state
 
 
 def _hstack_frames(left: np.ndarray, right: np.ndarray) -> np.ndarray:
