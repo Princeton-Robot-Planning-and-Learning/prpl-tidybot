@@ -44,29 +44,42 @@ class FakeArmInterface(ArmInterface):
 
 
 class RealArmInterface(ArmInterface):
-    """Skeleton real arm interface. Every method is a placeholder that
-    raises until the hardware driver gets wired up."""
+    """Real arm interface backed by the Kinova arm RPC server."""
+
+    def __init__(self) -> None:
+        # Deferred import: arm_server pulls in pinocchio/kortex which are only
+        # available on hardware; importing here keeps the module loadable elsewhere.
+        # pylint: disable=import-outside-toplevel
+        from prpl_tidybot.third_party.arm_server import ArmManager
+        from prpl_tidybot.third_party.constants import (
+            ARM_RPC_HOST,
+            ARM_RPC_PORT,
+            RPC_AUTHKEY,
+        )
+
+        self.manager = ArmManager(
+            address=(ARM_RPC_HOST, ARM_RPC_PORT), authkey=RPC_AUTHKEY
+        )
+        self.manager.connect()
+        self.arm = self.manager.Arm()  # type: ignore # pylint: disable=no-member
+        self.arm.reset()
 
     def get_arm_state(self) -> list[float]:
-        raise NotImplementedError(
-            "RealArmInterface.get_arm_state: read the 7-DOF joint positions "
-            "from the real arm (e.g. via the Kinova Kortex SDK)."
-        )
+        return self.arm.get_joint_angles()
 
     def get_gripper_state(self) -> float:
-        raise NotImplementedError(
-            "RealArmInterface.get_gripper_state: read the gripper position "
-            "from the real arm (return 1=closed, 0=open)."
-        )
+        return self.arm.get_gripper_position()
 
     def execute_action(self, action: list[float]) -> None:
-        raise NotImplementedError(
-            "RealArmInterface.execute_action: command the real arm to the "
-            "absolute joint configuration in `action`."
+        self.arm.execute_action_angular(
+            qpos=action, gripper_pos=self.arm.get_gripper_position()
         )
 
     def execute_gripper_action(self, action: float) -> None:
-        raise NotImplementedError(
-            "RealArmInterface.execute_gripper_action: command the gripper "
-            "to absolute position `action` (1=closed, 0=open)."
+        self.arm.execute_action_angular(
+            qpos=self.arm.get_joint_angles(), gripper_pos=action
         )
+
+    def close(self) -> None:
+        """Tear down the RPC connection and stop the low-level arm control loop."""
+        self.arm.close()
