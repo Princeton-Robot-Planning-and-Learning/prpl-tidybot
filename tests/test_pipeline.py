@@ -16,17 +16,16 @@ from prpl_tidybot.pipeline import run_planner
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
 
 
-def _compose(env: str, mode: str, max_eval_steps: int = 30, seed: int = 0):
+def _compose(env: str, mode: str, max_eval_steps: int = 30, seed: int = 0, **extra):
+    overrides = [
+        f"env={env}",
+        f"mode={mode}",
+        f"max_eval_steps={max_eval_steps}",
+        f"seed={seed}",
+    ]
+    overrides.extend(f"{k}={v}" for k, v in extra.items())
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
-        return compose(
-            config_name="config",
-            overrides=[
-                f"env={env}",
-                f"mode={mode}",
-                f"max_eval_steps={max_eval_steps}",
-                f"seed={seed}",
-            ],
-        )
+        return compose(config_name="config", overrides=overrides)
 
 
 @pytest.mark.parametrize(
@@ -53,29 +52,47 @@ def test_run_planner_smoke(env: str, mode: str) -> None:
     assert result.finish_reason
     # The final state always exposes a "robot" object.
     assert result.final_state.get_object_from_name("robot") is not None
-    # Recording was not enabled, so no video should be produced.
+    # No log_dir was supplied and we're not under @hydra.main, so the
+    # recorder is skipped entirely.
+    assert result.trajectory_dir is None
     assert result.video_path is None
 
 
-def test_run_planner_writes_video_when_record_video_path_set(
-    tmp_path: Path,
-) -> None:
-    """End-to-end smoke: with `record.video_path` set, the pipeline writes a side-by-
-    side mp4 alongside the rollout."""
-    video_path = tmp_path / "rollout.mp4"
-    with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
-        cfg = compose(
-            config_name="config",
-            overrides=[
-                "env=base_motion3d",
-                "mode=fake",
-                "max_eval_steps=10",
-                "seed=0",
-                f"record.video_path={video_path}",
-                "record.fps=5",
-            ],
-        )
-    result = run_planner(cfg)
-    assert result.video_path == video_path
-    assert video_path.exists()
-    assert video_path.stat().st_size > 0
+def test_run_planner_writes_trajectory_when_log_dir_set(tmp_path: Path) -> None:
+    """With a log_dir supplied (mimicking the @hydra.main runtime dir), the rollout
+    writes one per-tick subdir under `<log_dir>/trajectory/` for every state."""
+    cfg = _compose("base_motion3d", "fake", max_eval_steps=10, seed=0)
+    result = run_planner(cfg, log_dir=tmp_path)
+    assert result.trajectory_dir == tmp_path / "trajectory"
+    assert result.trajectory_dir.is_dir()
+    tick_dirs = sorted(result.trajectory_dir.iterdir())
+    assert tick_dirs, "Expected at least one per-tick directory"
+    # Each tick dir at minimum has state.pkl and meta.json (real/shadow may be
+    # absent if either renderer returned None).
+    for tick in tick_dirs:
+        assert (tick / "state.pkl").exists()
+        assert (tick / "meta.json").exists()
+
+
+def test_run_planner_composes_video_when_record_video_true(tmp_path: Path) -> None:
+    """`record.video=true` adds a `video.mp4` next to the trajectory dir."""
+    cfg = _compose(
+        "base_motion3d",
+        "fake",
+        max_eval_steps=10,
+        seed=0,
+        **{"record.video": "true", "record.fps": 5},
+    )
+    result = run_planner(cfg, log_dir=tmp_path)
+    assert result.video_path == tmp_path / "video.mp4"
+    assert result.video_path.exists()
+    assert result.video_path.stat().st_size > 0
+
+
+def test_run_planner_omits_video_when_record_video_false(tmp_path: Path) -> None:
+    """Default `record.video=false` writes the trajectory but no video.mp4."""
+    cfg = _compose("base_motion3d", "fake", max_eval_steps=10, seed=0)
+    result = run_planner(cfg, log_dir=tmp_path)
+    assert result.video_path is None
+    assert not (tmp_path / "video.mp4").exists()
+    assert result.trajectory_dir == tmp_path / "trajectory"

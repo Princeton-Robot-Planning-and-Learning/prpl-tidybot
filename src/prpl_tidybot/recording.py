@@ -1,23 +1,36 @@
-"""Side-by-side real+sim video recording for the planner pipeline.
+"""Async per-tick trajectory recording for the planner pipeline.
 
-Each `capture(state)` call:
+Each call to :meth:`RecordingPerceiver.step` (or :meth:`reset`) snapshots
+the new sim state and asks the recorder to persist a per-tick directory
+under the Hydra runtime log dir:
 
-  1. Calls `real_env.render()` for the "real" panel — whatever the
-     current run's `real_env` exposes (kinder render in sim mode, the
-     FakeInterface's base camera in fake mode, the real base camera in
-     real mode).
-  2. `set_state(state)` on a shadow kinder env and renders it for the
-     "sim" panel — i.e. "what the agent thinks the world looks like".
-  3. Horizontally concatenates the two frames into the buffer.
+    ${hydra:runtime.output_dir}/trajectory/000000/
+        state.pkl      # the ObjectCentricState
+        real.png       # real_env.render() at this tick (BGR-encoded on disk)
+        shadow.png     # the shadow sim's render of `state`
+        meta.json      # {idx, timestamp}
 
-`finish()` writes the buffer to an mp4 via moviepy. Frame compositing
-is generic — the `shadow_sim` argument is anything with a `set_state`
-plus a `render() -> ndarray | None`; `prpl_tidybot.sim_env.KinderSimEnv`
-satisfies that protocol.
+Both heavy steps — serialization to disk and the shadow sim's pybullet
+render — run on dedicated background threads, so the rollout's per-tick
+latency budget pays only the (already cached) `real_env.render()` plus
+two non-blocking queue puts. This is what keeps the gap between
+consecutive base commands inside the base controller's command timeout
+on real hardware (issue #45).
+
+Trajectory capture is always on whenever a log dir is supplied; the
+boolean `record.video` config flag controls only whether `finish()`
+composes the per-tick `(real, shadow)` panels into a single
+`video.mp4` alongside the trajectory dir.
 """
 
 from __future__ import annotations
 
+import json
+import pickle
+import queue
+import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, Protocol, TypeVar
 
@@ -29,121 +42,230 @@ from prpl_utils.real_sim import Perceiver
 from relational_structs import ObjectCentricState
 
 _RealObsType = TypeVar("_RealObsType")
+_SENTINEL: Any = object()
 
 
 class _ShadowSim(Protocol):
-    """Minimal protocol the Recorder needs from a shadow sim."""
+    """Minimal protocol the recorder needs from a shadow sim."""
 
     def reset(self, *, seed: int | None = ...) -> Any:
-        """Reset the underlying sim; required by gymnasium order
-        enforcement before any render call."""
+        """Reset the underlying sim; gymnasium's order-enforcing wrapper
+        requires this before any render call."""
 
     def set_state(self, state: ObjectCentricState) -> None:
-        """Teleport the sim to `state` so subsequent renders show it."""
+        """Teleport the sim to `state` so the subsequent render shows it."""
 
     def render(self) -> Any:
         """Return an RGB frame for the sim's current state."""
 
 
-class Recorder:
-    """Capture (real | sim) side-by-side frames per step, write to mp4."""
+@dataclass(frozen=True)
+class _TickPayload:
+    """Single per-tick record handed to the recorder's background workers."""
+
+    idx: int
+    timestamp: float
+    state: ObjectCentricState
+    real_frame: np.ndarray | None
+
+
+class TrajectoryRecorder:
+    """Capture (state, real frame, timestamp) per tick to disk, asynchronously.
+
+    Two background worker threads drain in parallel:
+
+    * **serializer** — writes ``state.pkl``, ``real.png`` and ``meta.json``
+      to the per-tick directory. IO bound, fast.
+    * **shadow** — owns the shadow ``KinderSimEnv``, calls ``set_state`` +
+      ``render`` for each enqueued state, and writes ``shadow.png``. The
+      shadow sim is never touched by the rollout thread, so there is no
+      thread-safety surface area on ``real_env`` or the sim.
+
+    The rollout's per-tick cost reduces to ``real_env.render()`` (expected
+    to be non-blocking via the caching :class:`CeilingCameraRenderer`) plus
+    two ``queue.put`` calls. Even if shadow rendering can't keep up with
+    the tick rate, the queue grows in memory and ``finish()`` blocks to
+    drain it — neither imposes back-pressure on the control loop.
+    """
+
+    _TICK_DIR_FORMAT = "{:06d}"
 
     def __init__(
         self,
-        real_env: gymnasium.Env,
+        log_dir: Path | str,
         shadow_sim: _ShadowSim,
-        video_path: str | Path,
-        fps: int = 10,
+        real_env: gymnasium.Env,
         seed: int = 0,
+        fps: int = 10,
+        compose_video: bool = False,
     ) -> None:
-        self._real_env = real_env
+        self._log_dir = Path(log_dir)
+        self._trajectory_dir = self._log_dir / "trajectory"
+        self._trajectory_dir.mkdir(parents=True, exist_ok=True)
         self._shadow_sim = shadow_sim
-        self._video_path = Path(video_path)
+        self._real_env = real_env
         self._fps = fps
-        self._frames: list[np.ndarray] = []
-        # gymnasium's order-enforcing wrapper raises if you call render
-        # before reset, so prime the shadow sim. Pass the same seed used
-        # for the rollout so that any static / non-state-set env content
-        # (camera positions, world layout) matches between real and sim
-        # in modes where both are the same kinder env.
+        self._compose_video = compose_video
+        # Prime the shadow sim: gymnasium's order-enforcing wrapper raises if
+        # render is called before reset. Same seed as the rollout so any
+        # static / non-state-set env content (camera positions, world layout)
+        # matches between real and sim in modes where both are the same env.
         self._shadow_sim.reset(seed=seed)
 
+        self._serialize_queue: queue.Queue[Any] = queue.Queue()
+        self._shadow_queue: queue.Queue[Any] = queue.Queue()
+        self._serialize_thread = threading.Thread(
+            target=self._serialize_loop, daemon=True, name="trajectory-serializer"
+        )
+        self._shadow_thread = threading.Thread(
+            target=self._shadow_loop, daemon=True, name="trajectory-shadow"
+        )
+        self._serialize_thread.start()
+        self._shadow_thread.start()
+
     @property
-    def frames(self) -> list[np.ndarray]:
-        """Frames captured so far (snapshot of the internal list)."""
-        return list(self._frames)
+    def trajectory_dir(self) -> Path:
+        """Directory holding the per-tick subdirs."""
+        return self._trajectory_dir
 
-    def capture(self, state: ObjectCentricState) -> None:
-        """Append one composed frame for `state` to the buffer.
+    def capture(self, idx: int, state: ObjectCentricState) -> None:
+        """Enqueue tick `idx` for async serialization + shadow rendering.
 
-        Skips silently if either side fails to produce a frame (e.g.
-        `real_env.render()` returns None).
+        Non-blocking: the only synchronous work is ``real_env.render()`` and
+        two ``queue.put`` calls.
         """
         real_frame = self._real_env.render()
-        self._shadow_sim.set_state(state)
-        sim_frame = self._shadow_sim.render()
-        if real_frame is None or sim_frame is None:
-            return
-        composed = _hstack_frames(np.asarray(real_frame), np.asarray(sim_frame))
-        self._frames.append(composed.astype(np.uint8))
+        real_frame_arr: np.ndarray | None = (
+            np.asarray(real_frame) if real_frame is not None else None
+        )
+        payload = _TickPayload(
+            idx=idx,
+            timestamp=time.time(),
+            state=state,
+            real_frame=real_frame_arr,
+        )
+        self._serialize_queue.put(payload)
+        self._shadow_queue.put(payload)
 
     def finish(self) -> Path | None:
-        """Write the captured frames to `video_path` via moviepy.
+        """Drain queues, join workers, optionally compose `video.mp4`.
 
-        Returns the output path, or `None` if no frames have been
-        captured (e.g. no `capture` calls or every render returned None).
+        Returns the path to the video if ``compose_video=True`` and at least
+        one pair of (real, shadow) frames was produced; otherwise ``None``.
         """
-        if not self._frames:
+        self._serialize_queue.put(_SENTINEL)
+        self._shadow_queue.put(_SENTINEL)
+        self._serialize_thread.join()
+        self._shadow_thread.join()
+        if not self._compose_video:
             return None
-        clip = ImageSequenceClip(self._frames, fps=self._fps)
-        clip.write_videofile(str(self._video_path), logger=None)
-        return self._video_path
+        return self._compose_video_from_disk()
+
+    def _serialize_loop(self) -> None:
+        while True:
+            item = self._serialize_queue.get()
+            if item is _SENTINEL:
+                return
+            self._serialize_tick(item)
+
+    def _serialize_tick(self, payload: _TickPayload) -> None:
+        tick_dir = self._trajectory_dir / self._TICK_DIR_FORMAT.format(payload.idx)
+        tick_dir.mkdir(exist_ok=True)
+        with open(tick_dir / "state.pkl", "wb") as f:
+            pickle.dump(payload.state, f)
+        if payload.real_frame is not None:
+            cv.imwrite(
+                str(tick_dir / "real.png"),
+                cv.cvtColor(payload.real_frame, cv.COLOR_RGB2BGR),
+            )
+        with open(tick_dir / "meta.json", "w", encoding="utf-8") as f:
+            json.dump({"idx": payload.idx, "timestamp": payload.timestamp}, f)
+
+    def _shadow_loop(self) -> None:
+        while True:
+            item = self._shadow_queue.get()
+            if item is _SENTINEL:
+                return
+            self._render_shadow(item)
+
+    def _render_shadow(self, payload: _TickPayload) -> None:
+        self._shadow_sim.set_state(payload.state)
+        frame = self._shadow_sim.render()
+        if frame is None:
+            return
+        tick_dir = self._trajectory_dir / self._TICK_DIR_FORMAT.format(payload.idx)
+        tick_dir.mkdir(exist_ok=True)
+        cv.imwrite(
+            str(tick_dir / "shadow.png"),
+            cv.cvtColor(np.asarray(frame, dtype=np.uint8), cv.COLOR_RGB2BGR),
+        )
+
+    def _compose_video_from_disk(self) -> Path | None:
+        frames: list[np.ndarray] = []
+        for tick_dir in sorted(self._trajectory_dir.iterdir()):
+            real_path = tick_dir / "real.png"
+            shadow_path = tick_dir / "shadow.png"
+            if not real_path.exists() or not shadow_path.exists():
+                continue
+            real_bgr = cv.imread(str(real_path))
+            shadow_bgr = cv.imread(str(shadow_path))
+            real_rgb = cv.cvtColor(real_bgr, cv.COLOR_BGR2RGB)
+            shadow_rgb = cv.cvtColor(shadow_bgr, cv.COLOR_BGR2RGB)
+            frames.append(_hstack_frames(real_rgb, shadow_rgb))
+        if not frames:
+            return None
+        video_path = self._log_dir / "video.mp4"
+        clip = ImageSequenceClip(frames, fps=self._fps)
+        clip.write_videofile(str(video_path), logger=None)
+        return video_path
 
 
 class RecordingPerceiver(
     Generic[_RealObsType], Perceiver[_RealObsType, ObjectCentricState]
 ):
-    """Perceiver wrapper that captures a Recorder frame for every produced state.
+    """Perceiver wrapper that hands every produced state to a recorder.
 
-    Wiring recording at the perceiver layer (rather than via a Runner hook or
-    subclass) is what guarantees one frame per real-env tick: the perceiver is
-    the single point through which every state — initial and per-tick — passes,
-    so wrapping it makes the "one frame per outer Runner.step" failure mode
-    structurally impossible. The state type is pinned to ``ObjectCentricState``
-    because that is what :class:`Recorder` needs to drive its shadow sim.
+    Wiring recording at the perceiver layer guarantees one captured tick
+    per real-env tick: every state the rollout ever sees flows through
+    this method. The state type is pinned to ``ObjectCentricState``
+    because that is what :class:`TrajectoryRecorder` needs for its shadow
+    sim.
     """
 
     def __init__(
         self,
         inner: Perceiver[_RealObsType, ObjectCentricState],
-        recorder: "Recorder",
+        recorder: TrajectoryRecorder,
     ) -> None:
         self._inner = inner
         self._recorder = recorder
+        self._idx = 0
 
     def reset(self, obs: _RealObsType, info: dict[str, Any]) -> ObjectCentricState:
         state = self._inner.reset(obs, info)
-        self._recorder.capture(state)
+        self._idx = 0
+        self._recorder.capture(self._idx, state)
         return state
 
     def step(self, obs: _RealObsType, info: dict[str, Any]) -> ObjectCentricState:
         state = self._inner.step(obs, info)
-        self._recorder.capture(state)
+        self._idx += 1
+        self._recorder.capture(self._idx, state)
         return state
 
 
 def _hstack_frames(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """Resize the shorter frame to match heights (preserving aspect ratio), then
-    concat horizontally."""
+    """Pad shorter frame with black to match heights, then concat horizontally."""
     if left.shape[0] != right.shape[0]:
         target_h = max(left.shape[0], right.shape[0])
-        left = _resize_to_height(left, target_h)
-        right = _resize_to_height(right, target_h)
+        left = _pad_to_height(left, target_h)
+        right = _pad_to_height(right, target_h)
     return np.concatenate([left, right], axis=1)
 
 
-def _resize_to_height(frame: np.ndarray, target_h: int) -> np.ndarray:
-    if frame.shape[0] == target_h:
+def _pad_to_height(frame: np.ndarray, target_h: int) -> np.ndarray:
+    pad_h = target_h - frame.shape[0]
+    if pad_h == 0:
         return frame
-    new_w = max(1, int(round(frame.shape[1] * target_h / frame.shape[0])))
-    return cv.resize(frame, (new_w, target_h))
+    pad = np.zeros((pad_h, frame.shape[1], frame.shape[2]), dtype=frame.dtype)
+    return np.concatenate([frame, pad], axis=0)
