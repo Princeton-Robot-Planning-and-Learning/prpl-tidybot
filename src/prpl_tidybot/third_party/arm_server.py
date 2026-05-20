@@ -65,12 +65,11 @@ class Arm:
         arm_pos, arm_quat = self.arm.get_tool_pose()
         if arm_quat[3] < 0.0:  # Enforce quaternion uniqueness
             np.negative(arm_quat, out=arm_quat)
-        state = {
+        return {
             "arm_pos": arm_pos,
             "arm_quat": arm_quat,
             "gripper_pos": np.array([self.arm.gripper_pos]),
         }
-        return state
 
     def get_gripper_position(self):
         return self.arm.gripper_pos
@@ -93,6 +92,7 @@ class ArmManager(MPBaseManager):
 
 
 ArmManager.register("Arm", Arm)
+
 
 if __name__ == "__main__":
     manager = ArmManager(address=(ARM_RPC_HOST, ARM_RPC_PORT), authkey=RPC_AUTHKEY)
