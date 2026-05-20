@@ -8,6 +8,12 @@ misregistration before the robot drives. The PNG is the workaround for running i
 tmux (no interactive matplotlib window); open it from VS Code Remote (or similar) on the
 project tree. The file is deleted once the operator answers the prompt.
 
+Convergence is now the `Kinematic3DPlanExecutor`'s responsibility —
+`RealTidyBotEnv.step` is single-tick. Each waypoint is converted into a one-pair (state,
+delta) trajectory, the executor reissues the absolute target every 100 ms until either
+the perceived map pose is within tolerance or `max_iter` ticks elapse, then we advance
+to the next.
+
 Before running, confirm ~1.5 m of clear floor in every direction from the robot.
 
 python hardware_tests/test_base_map_target.py
@@ -19,6 +25,7 @@ import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.axes import Axes
 from spatialmath import SE2
 
@@ -26,7 +33,10 @@ from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
 from prpl_tidybot.interfaces.camera_interface import FakeCameraInterface
 from prpl_tidybot.interfaces.interface import RealInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
-from prpl_tidybot.structs import TidyBotAction
+from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
+from prpl_tidybot.real_sim.plan_executors.kinematic3d import (
+    Kinematic3DPlanExecutor,
+)
 
 TARGETS_MAP = [
     SE2(0.5, 0.5, math.pi / 2),
@@ -90,6 +100,22 @@ def _save_plan_png(start: SE2, targets: list[SE2], path: Path) -> None:
     plt.close(fig)
 
 
+def _delta_to_target(robot_state, target: SE2) -> np.ndarray:
+    """Build the kinematic3d 11-d sim action whose ground = `target` exactly.
+
+    The first three entries are base [dx, dy, drot]; arm and gripper components are
+    zero, so the executor's `_ground_target` leaves arm joints and gripper untouched
+    at their currently-perceived values (the convergence check on those passes
+    trivially because the target == current).
+    """
+    robot = robot_state.get_object_from_name("robot")
+    action = np.zeros(11)
+    action[0] = target.x - robot_state.get(robot, "pos_base_x")
+    action[1] = target.y - robot_state.get(robot, "pos_base_y")
+    action[2] = target.theta() - robot_state.get(robot, "pos_base_rot")
+    return action
+
+
 def main() -> int:
     """Drive the base to each map-frame waypoint in turn, after the operator confirms
     the plot of the start pose and waypoints looks right."""
@@ -99,8 +125,10 @@ def main() -> int:
         camera_interface=FakeCameraInterface(),
     )
     env = RealTidyBotEnv(interface)
+    perceiver = PrplLab3DPerceiver()
     try:
-        obs, _ = env.reset()
+        obs, info = env.reset()
+        start_state = perceiver.reset(obs, info)
         start = obs.map_base_pose
         print(
             f"Start map pose: x={start.x:+.3f} y={start.y:+.3f} "
@@ -127,20 +155,19 @@ def main() -> int:
             print("Aborted by user before motion.")
             return 1
 
-        arm_goal = interface.get_arm_state()
-        gripper_goal = interface.get_gripper_state()
-
+        state = start_state
         for i, target in enumerate(TARGETS_MAP, start=1):
             print(
                 f"Waypoint {i}/{len(TARGETS_MAP)}: "
                 f"x={target.x:+.3f} y={target.y:+.3f} theta={target.theta():+.3f}"
             )
-            action = TidyBotAction(
-                arm_goal=arm_goal,
-                base_pose_target_map=target,
-                gripper_goal=gripper_goal,
-            )
-            obs, _, _, _, _ = env.step(action)
+            delta = _delta_to_target(state, target)
+            executor = Kinematic3DPlanExecutor()
+            executor.set_trajectory([(state, delta)])
+            while not executor.done(state):
+                real_action, _ = executor.step(state)
+                obs, _, _, _, info = env.step(real_action)
+                state = perceiver.step(obs, info)
             err_xy = math.hypot(
                 obs.map_base_pose.x - target.x, obs.map_base_pose.y - target.y
             )

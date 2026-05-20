@@ -2,9 +2,9 @@
 
 For fake / real backends, compose a `RealTidyBotEnv`, a kinematic3d
 perceiver (`PrplLab3DPerceiver` or `BaseMotion3DPerceiver`),
-`Kinematic3DActionGrounder`, and a `prpl_utils.gym_agent.Agent` with
-`prpl_utils.real_sim.Runner`. For sim, swap in `KinderSimEnv` plus
-`PassThroughPerceiver` / `PassThroughActionGrounder` — the env already
+`Kinematic3DPlanExecutor`, and a `prpl_utils.planning_agent.PlanningAgent`
+with `prpl_utils.real_sim.Runner`. For sim, swap in `KinderSimEnv` plus
+`PassThroughPerceiver` / `PassThroughPlanExecutor` — the env already
 produces an ObjectCentricState, so re-encoding through TidyBotObservation
 is unnecessary.
 
@@ -21,18 +21,18 @@ import kinder
 from bilevel_planning.structs import SesameModels
 from kinder_bilevel_planning.env_models import create_bilevel_planning_models
 
-from prpl_tidybot.real_sim.action_grounders.kinematic3d import (
-    Kinematic3DActionGrounder,
-)
-from prpl_tidybot.real_sim.action_grounders.passthrough import (
-    PassThroughActionGrounder,
-)
 from prpl_tidybot.real_sim.perceivers.kinematic3d import (
     BaseMotion3DPerceiver,
     KinematicRobotPerceiverBase,
     PrplLab3DPerceiver,
 )
 from prpl_tidybot.real_sim.perceivers.passthrough import PassThroughPerceiver
+from prpl_tidybot.real_sim.plan_executors.kinematic3d import (
+    Kinematic3DPlanExecutor,
+)
+from prpl_tidybot.real_sim.plan_executors.passthrough import (
+    PassThroughPlanExecutor,
+)
 
 
 def build_planner_env_models(
@@ -75,10 +75,10 @@ def build_planner_env_models(
 
 __all__ = [
     "BaseMotion3DPerceiver",
-    "Kinematic3DActionGrounder",
+    "Kinematic3DPlanExecutor",
     "KinematicRobotPerceiverBase",
-    "PassThroughActionGrounder",
     "PassThroughPerceiver",
+    "PassThroughPlanExecutor",
     "PrplLab3DPerceiver",
     "build_planner_env_models",
 ]

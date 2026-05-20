@@ -22,7 +22,8 @@ pipelines:
   fake:
     real_env:
       _target_: prpl_tidybot.real_env.RealTidyBotEnv
-      # FakeInterface converges in one inner iteration; skip the sleep.
+      # FakeInterface stores commanded poses, so the executor converges on
+      # the first tick; skip the per-tick sleep to keep tests fast.
       control_period: 0.0
       interface:
         _target_: prpl_tidybot.interfaces.interface.FakeInterface
@@ -33,8 +34,8 @@ pipelines:
         x: ${env.target_pose.0}
         y: ${env.target_pose.1}
         z: ${env.target_pose.2}
-    action_grounder:
-      _target_: prpl_tidybot.real_sim.action_grounders.kinematic3d.Kinematic3DActionGrounder
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv
@@ -44,8 +45,8 @@ pipelines:
       allow_state_access: true
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.passthrough.PassThroughPerceiver
-    action_grounder:
-      _target_: prpl_tidybot.real_sim.action_grounders.passthrough.PassThroughActionGrounder
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.passthrough.PassThroughPlanExecutor
   real:
     real_env:
       _target_: prpl_tidybot.real_env.RealTidyBotEnv
@@ -72,4 +73,4 @@ pipelines:
         _target_: prpl_tidybot.real_sim.perceivers.target_source.MarkerDetectorTargetSource
         marker_id: ${env.target_marker_id}
         target_z: ${env.target_marker_z}
-    action_grounder: ${env.pipelines.fake.action_grounder}
+    plan_executor: ${env.pipelines.fake.plan_executor}
