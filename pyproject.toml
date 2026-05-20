@@ -24,6 +24,7 @@ dependencies = [
    "setuptools<81",
    "threadpoolctl",
    "opencv-contrib-python==4.6.0.66",
+   "pin",
 ]
 
 [project.optional-dependencies]
