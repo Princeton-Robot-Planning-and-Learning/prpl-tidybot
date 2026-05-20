@@ -157,6 +157,14 @@ class BaseMotion3DPerceiver(KinematicRobotPerceiverBase):
     `ConstantTargetSource` threaded in from the env yaml; in real mode it's a
     `MarkerDetectorTargetSource` that subscribes to the marker-detector
     publisher.
+
+    The target is queried once per :meth:`reset` and cached for every
+    :meth:`step` call within that episode. A `MarkerDetectorTargetSource`
+    query blocks up to the publisher's refresh interval; doing it every
+    inner tick stretched the gap between consecutive base commands past the
+    base controller's "no command in 2.5 * POLICY_CONTROL_PERIOD" timeout,
+    producing chunky individual motions. The target marker is stationary
+    during a rollout by design, so episode-scoped caching is safe.
     """
 
     def __init__(
@@ -166,16 +174,27 @@ class BaseMotion3DPerceiver(KinematicRobotPerceiverBase):
     ) -> None:
         super().__init__(robot_name=robot_name)
         self._target_source = target_source
+        self._cached_target: tuple[float, float, float] | None = None
 
     @property
     def _state_cls(self) -> type[ObjectCentricState]:
         return BaseMotion3DObjectCentricState
 
+    def reset(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> ObjectCentricState:
+        self._cached_target = self._target_source.get_target()
+        return super().reset(obs, info)
+
     def _detect_objects(
         self, obs: TidyBotObservation, info: dict[str, Any]
     ) -> dict[Object, dict[str, float]]:
         del obs, info
-        x, y, z = self._target_source.get_target()
+        if self._cached_target is None:
+            # Defensive — reset() should have run first; populate lazily so
+            # callers that call step() before reset() still get a target.
+            self._cached_target = self._target_source.get_target()
+        x, y, z = self._cached_target
         return {
             Object("target", Kinematic3DPointType): {
                 "x": x,
