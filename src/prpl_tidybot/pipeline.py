@@ -46,7 +46,7 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
     pipeline = cfg.env.pipelines[cfg.mode]
     real_env = hydra.utils.instantiate(pipeline.real_env)
     perceiver = hydra.utils.instantiate(pipeline.perceiver)
-    grounder = hydra.utils.instantiate(pipeline.action_grounder)
+    plan_executor = hydra.utils.instantiate(pipeline.plan_executor)
 
     # Optional side-by-side recording. The shadow sim reuses the env's
     # own sim pipeline yaml (the same one sim mode uses for `real_env`),
@@ -83,7 +83,7 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
         real_env=real_env,
         perceiver=perceiver,
         agent=agent,
-        action_grounder=grounder,
+        plan_executor=plan_executor,
     )
 
     state = runner.reset(seed=cfg.seed)

@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 from spatialmath import SE2
 
-from prpl_tidybot.interfaces.base_interface import FakeBaseInterface
 from prpl_tidybot.interfaces.interface import FakeInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
 from prpl_tidybot.structs import TidyBotAction
@@ -34,9 +33,14 @@ def test_step_raises_if_called_before_reset():
         env.step(action)
 
 
-def test_real_tidybot_env_step_converges_to_action_targets():
-    """Step() runs the convergence loop until all components match within tolerance and
-    returns the resulting observation; reward / terminated / truncated are fixed."""
+def test_step_issues_action_targets_and_returns_fresh_obs():
+    """Step() issues one command to each sub-interface and returns the observation taken
+    after `control_period`.
+
+    Convergence (settle loops, tolerances, max_iter) lives in the PlanExecutor — not
+    here — so with FakeInterface the post-command observation already reflects the
+    commanded state. Reward / terminated / truncated are fixed.
+    """
     interface = FakeInterface()
     env = RealTidyBotEnv(interface, control_period=0.0)
     env.reset()
@@ -57,29 +61,6 @@ def test_real_tidybot_env_step_converges_to_action_targets():
     assert terminated is False
     assert truncated is False
     assert not info
-
-
-def test_step_returns_after_max_iter_when_target_unreachable():
-    """When a base sub-interface that ignores commands prevents convergence, step()
-    bails after max_iter rather than looping forever."""
-
-    class _StuckBase(FakeBaseInterface):
-        def execute_action(self, action: SE2) -> None:
-            del action
-
-    interface = FakeInterface()
-    interface.base_interface = _StuckBase()
-    env = RealTidyBotEnv(interface, control_period=0.0, max_iter=3)
-    env.reset()
-    action = TidyBotAction(
-        arm_goal=[0.0] * 7,
-        base_pose_target_map=SE2(x=1.0, y=0.0, theta=0.0),
-        gripper_goal=0.0,
-    )
-
-    obs, _, _, _, _ = env.step(action)
-
-    assert obs.map_base_pose.x == 0.0
 
 
 def test_render_routes_through_renderer_when_provided():
