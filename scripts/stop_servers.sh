@@ -4,8 +4,15 @@
 
 set -uo pipefail
 
-NUC="${PRPL_NUC_HOST:-tidybot@tidybot-nuc}"
-PERC="${PRPL_PERCEPTION_HOST:-yixuan@tidybot-laptop}"
+if [ "${PRPL_LAB:-default}" = "prpl" ]; then
+    _nuc_default="tidybot-nuc-prpl"
+    _perc_default="tidybot-laptop-prpl"
+else
+    _nuc_default="tidybot-nuc"
+    _perc_default="tidybot-laptop"
+fi
+NUC="${PRPL_NUC_HOST:-$_nuc_default}"
+PERC="${PRPL_PERCEPTION_HOST:-$_perc_default}"
 SESSION="${PRPL_TMUX_SESSION:-prpl-tidybot}"
 
 failed=0

@@ -1,0 +1,7 @@
+# Default lab configuration (original deployment).
+marker_detector_host: "192.168.0.11"
+nuc_ip: "192.168.0.60"
+nuc_host: "tidybot-nuc"
+laptop_host: "tidybot-laptop"
+camera_serials: ["515A41BE", "A01861BE"]
+camera_height: 2.6

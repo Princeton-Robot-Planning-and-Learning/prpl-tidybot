@@ -13,8 +13,11 @@ import argparse
 import math
 import time
 from multiprocessing import Process
+from pathlib import Path
 from threading import Thread
 from typing import Any
+
+import yaml
 
 import cv2 as cv
 import numpy as np
@@ -57,7 +60,12 @@ class Detector:
     """Per-camera ArUco detector that emits map-frame robot poses."""
 
     def __init__(
-        self, placement: str, serial: str, port: int, inverse_heading: bool
+        self,
+        placement: str,
+        serial: str,
+        port: int,
+        inverse_heading: bool,
+        camera_height: float = CAMERA_HEIGHT,
     ) -> None:
         assert placement in {"top", "bottom", "top_only"}
         self.placement = placement
@@ -87,7 +95,7 @@ class Detector:
         self.transformation_matrix = self._compute_transformation_matrix(
             np.array(self.camera_corners, dtype=np.float32)
         )
-        self.height_ratio = (CAMERA_HEIGHT - ROBOT_HEIGHT) / CAMERA_HEIGHT
+        self.height_ratio = (camera_height - ROBOT_HEIGHT) / camera_height
         self.angle_offsets = _get_angle_offsets()
         self.position_offset = ROBOT_DIAG / 2 - MARKER_PARAMS[
             "sticker_length"
@@ -263,6 +271,8 @@ class MarkerDetectorServer(Publisher):
         top_only: bool = False,
         debug: bool = False,
         inverse_heading: bool = True,
+        camera_serials: list[str] = CAMERA_SERIALS,
+        camera_height: float = CAMERA_HEIGHT,
     ) -> None:
         super().__init__(hostname=hostname, port=port)
         self.debug = debug
@@ -270,24 +280,27 @@ class MarkerDetectorServer(Publisher):
             self.detectors = [
                 Detector(
                     "top_only",
-                    CAMERA_SERIALS[0],
+                    camera_serials[0],
                     CAMERA_SERVER_PORTS[0],
                     inverse_heading=inverse_heading,
+                    camera_height=camera_height,
                 )
             ]
         else:
             self.detectors = [
                 Detector(
                     "top",
-                    CAMERA_SERIALS[0],
+                    camera_serials[0],
                     CAMERA_SERVER_PORTS[0],
                     inverse_heading=inverse_heading,
+                    camera_height=camera_height,
                 ),
                 Detector(
                     "bottom",
-                    CAMERA_SERIALS[1],
+                    camera_serials[1],
                     CAMERA_SERVER_PORTS[1],
                     inverse_heading=inverse_heading,
+                    camera_height=camera_height,
                 ),
             ]
 
@@ -326,20 +339,37 @@ def _start_camera_server(serial: str, port: int) -> None:
     CameraServer(serial, port=port).run()
 
 
+def _load_lab_camera_config(lab: str) -> tuple[list[str], float]:
+    conf_path = (
+        Path(__file__).parent.parent.parent.parent / "conf" / "lab" / f"{lab}.yaml"
+    )
+    with open(conf_path, "r") as f:
+        cfg = yaml.safe_load(f)
+    return cfg["camera_serials"], cfg["camera_height"]
+
+
 def main(
     host: str = "0.0.0.0",
     top_only: bool = False,
     debug: bool = False,
     inverse_heading: bool = True,
+    lab: str | None = None,
 ) -> None:
     """Spawn the camera-server subprocesses, then run the detector publisher.
 
     `host` controls only the marker-detector publisher socket. The camera
     servers stay on localhost since they're consumed in-process.
+    Pass `lab` (e.g. 'prpl') to override camera serials and height from
+    conf/lab/<lab>.yaml; omit to use whatever PRPL_LAB resolves at import time.
     """
+    if lab is not None:
+        camera_serials, camera_height = _load_lab_camera_config(lab)
+    else:
+        camera_serials, camera_height = CAMERA_SERIALS, CAMERA_HEIGHT
+
     for serial, port in [
-        (CAMERA_SERIALS[0], CAMERA_SERVER_PORTS[0]),
-        (CAMERA_SERIALS[1], CAMERA_SERVER_PORTS[1]),
+        (camera_serials[0], CAMERA_SERVER_PORTS[0]),
+        (camera_serials[1], CAMERA_SERVER_PORTS[1]),
     ]:
         Process(target=_start_camera_server, args=(serial, port), daemon=True).start()
         if top_only:
@@ -363,6 +393,8 @@ def main(
         top_only=top_only,
         debug=debug,
         inverse_heading=inverse_heading,
+        camera_serials=camera_serials,
+        camera_height=camera_height,
     ).run()
 
 
@@ -386,12 +418,18 @@ def cli() -> None:
             "to disable."
         ),
     )
+    parser.add_argument(
+        "--lab",
+        default=None,
+        help="Lab name (e.g. 'prpl') to load camera serials and height from conf/lab/<lab>.yaml.",
+    )
     args = parser.parse_args()
     main(
         host=args.host,
         top_only=args.top_only,
         debug=args.debug,
         inverse_heading=args.inverse_heading,
+        lab=args.lab,
     )
 
 

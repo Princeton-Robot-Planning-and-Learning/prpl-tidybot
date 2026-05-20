@@ -3,7 +3,18 @@
 # mypy: ignore-errors
 # pylint: disable=all
 
+import os
+from pathlib import Path
+
 import numpy as np
+import yaml
+
+_lab_name = os.environ.get("PRPL_LAB", "default")
+_lab_conf_path = (
+    Path(__file__).parent.parent.parent.parent / "conf" / "lab" / f"{_lab_name}.yaml"
+)
+with open(_lab_conf_path, "r") as _f:
+    _lab_conf = yaml.safe_load(_f)
 
 RETRACT_ARM_CONF = np.deg2rad([0, -20, 180, -146, 0, -50, 90])
 BASE_CAMERA_DIMS = (360, 640, 3)
@@ -42,10 +53,10 @@ POLICY_IMAGE_WIDTH = 84
 POLICY_IMAGE_HEIGHT = 84
 
 ################################################################################
-# perception PC
+# perception PC — loaded from conf/lab/<PRPL_LAB>.yaml (default: "default")
 
-SERVER_HOSTNAME = "192.168.0.11"
-ROBOT_HOSTNAME_PREFIX = "192.168.0.60"
+SERVER_HOSTNAME = _lab_conf["marker_detector_host"]
+ROBOT_HOSTNAME_PREFIX = _lab_conf["nuc_ip"]
 CONN_AUTHKEY = b"secret password"  # shared authentication key
 
 ################################################################################
