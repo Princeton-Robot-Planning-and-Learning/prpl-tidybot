@@ -37,6 +37,7 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         self._interface = interface
         self._control_period = control_period
         self._converter: CoordFrameConverter | None = None
+        self._last_obs: TidyBotObservation | None = None
         self._renderer = renderer
 
     def reset(
@@ -48,21 +49,30 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         super().reset(seed=seed)
         obs = self._interface.get_observation()
         self._converter = CoordFrameConverter(obs.map_base_pose, obs.base_pose)
+        self._last_obs = obs
         return obs, {}
 
     def step(
         self, action: TidyBotAction
     ) -> tuple[TidyBotObservation, SupportsFloat, bool, bool, dict[str, Any]]:
-        if self._converter is None:
+        if self._converter is None or self._last_obs is None:
             raise RuntimeError("RealTidyBotEnv.step called before reset")
-        obs = self._interface.get_observation()
-        self._converter.update(obs.map_base_pose, obs.base_pose)
+        # Re-calibrate from the obs we already have on hand (set by reset or
+        # the previous step). Skipping a second get_observation here is what
+        # keeps the gap between consecutive base commands inside the base
+        # controller's "no command in 2.5 * POLICY_CONTROL_PERIOD" timeout —
+        # marker_detector_client.get_latest blocks up to the publisher's
+        # refresh interval, so each extra query stretches the gap. The
+        # calibration is at most one tick (control_period) stale, which
+        # matches the per-iter behaviour of the old inner settle loop.
+        self._converter.update(self._last_obs.map_base_pose, self._last_obs.base_pose)
         target_odom = self._converter.convert_pose(action.base_pose_target_map)
         self._interface.base_interface.execute_action(target_odom)
         self._interface.arm_interface.execute_action(action.arm_goal)
         self._interface.arm_interface.execute_gripper_action(action.gripper_goal)
         time.sleep(self._control_period)
         obs = self._interface.get_observation()
+        self._last_obs = obs
         return obs, 0.0, False, False, {}
 
     def render(self) -> RenderFrame | list[RenderFrame] | None:
