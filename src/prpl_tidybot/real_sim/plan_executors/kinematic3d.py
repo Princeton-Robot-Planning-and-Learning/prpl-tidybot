@@ -94,7 +94,8 @@ class Kinematic3DPlanExecutor(
     ) -> None:
         if base_strategy not in ("pure_pursuit", "settle"):
             raise ValueError(
-                f"base_strategy must be 'pure_pursuit' or 'settle', got {base_strategy!r}"
+                "base_strategy must be 'pure_pursuit' or 'settle', "
+                f"got {base_strategy!r}"
             )
         if lookahead_distance <= 0:
             raise ValueError("lookahead_distance must be > 0")
@@ -146,7 +147,7 @@ class Kinematic3DPlanExecutor(
             )
         segment = self._segments[self._segment_idx]
         if segment.kind == "base" and self._base_strategy == "pure_pursuit":
-            return self._step_pure_pursuit(sim_state, segment)
+            return self._step_pure_pursuit(sim_state)
         return self._step_settle(sim_state, segment)
 
     def done(self, sim_state: ObjectCentricState) -> bool:
@@ -226,7 +227,7 @@ class Kinematic3DPlanExecutor(
     # -- pure-pursuit path (base segments only) -------------------------------
 
     def _step_pure_pursuit(
-        self, sim_state: ObjectCentricState, segment: _Segment
+        self, sim_state: ObjectCentricState
     ) -> tuple[TidyBotAction, NDArray[np.floating]]:
         robot = sim_state.get_object_from_name(self._robot_name)
         robot_xy = (
@@ -251,7 +252,7 @@ class Kinematic3DPlanExecutor(
         # Sim action recorded for the recorder: use the pair whose end-of-
         # segment matches the cursor's current position (best approximation
         # of "where in the planner's trajectory are we right now").
-        sim_action = self._pp_pair_for_cursor(segment).sim_action
+        sim_action = self._pp_pair_for_cursor().sim_action
         action = TidyBotAction(
             arm_goal=arm_goal,
             base_pose_target_map=SE2(target_x, target_y, target_theta),
@@ -260,7 +261,7 @@ class Kinematic3DPlanExecutor(
         self._pp_tick_count += 1
         return action, sim_action
 
-    def _pp_pair_for_cursor(self, segment: _Segment) -> _Waypoint:
+    def _pp_pair_for_cursor(self) -> _Waypoint:
         """Waypoint just past the cursor — its sim_action is the planner's "current"
         pair to record."""
         for i, arc in enumerate(self._pp_cumulative_arc):
