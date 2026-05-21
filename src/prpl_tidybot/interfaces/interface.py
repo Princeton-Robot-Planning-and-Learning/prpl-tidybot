@@ -18,9 +18,9 @@ from prpl_tidybot.interfaces.base_interface import (
 from prpl_tidybot.interfaces.camera_interface import (
     CameraInterface,
     FakeCameraInterface,
-    RealCameraInterface,
 )
 from prpl_tidybot.interfaces.real_arm_interface import RealArmInterface
+from prpl_tidybot.interfaces.real_camera_interface import RealCameraInterface
 from prpl_tidybot.structs import TidyBotObservation
 
 

@@ -7,7 +7,7 @@ name = "prpl_tidybot"
 version = "0.1.0"
 description = "Code for the real TidyBot++ robot and a real-to-sim-to-real pipeline."
 readme = "README.md"
-requires-python = ">=3.10.14, <3.13"
+requires-python = ">=3.10.14, <3.11"
 dependencies = [
    "numpy",
    "matplotlib",
@@ -23,7 +23,8 @@ dependencies = [
    "ruckig",
    "setuptools<81",
    "threadpoolctl",
-   "opencv-contrib-python==4.6.0.66",
+   "opencv-contrib-python==4.9.0.80",
+   "opencv-python==4.9.0.80", 
    "pin",
    "kortex-api==2.6.0.post3",
 ]
@@ -52,6 +53,12 @@ override-dependencies = ["protobuf==3.20.0"]
 # uv tracks in `uv.lock` and reinstalls on every `uv sync`, instead of needing
 # a manual `uv pip install kortex_wheels/...whl` that the next sync would wipe.
 kortex-api = { path = "kortex_wheels/kortex_api-2.6.0.post3-py3-none-any.whl" }
+# opencv-python with GStreamer support — built from source on the NUC.
+# Using the in-repo wheel ensures uv sync doesn't overwrite it with the
+# vanilla PyPI build which lacks GStreamer.
+# opencv-python = [
+#  { path = "opencv_wheels/opencv_python-4.9.0.80-cp310-cp310-linux_x86_64.whl", marker = "sys_platform == 'linux'" },
+# ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
