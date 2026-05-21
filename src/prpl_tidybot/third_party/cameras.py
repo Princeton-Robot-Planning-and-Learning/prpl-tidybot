@@ -131,6 +131,9 @@ class KinovaCamera(Camera):
     def apply_camera_settings(self):
         # Note: This function adds significant camera latency when it is called
         # directly in __init__, so we call it in a separate thread instead
+        from prpl_tidybot.third_party.kinova import _import_kortex
+
+        _import_kortex()
 
         # Use Kortex API to set camera settings
         with DeviceConnection.createTcpConnection() as router:
