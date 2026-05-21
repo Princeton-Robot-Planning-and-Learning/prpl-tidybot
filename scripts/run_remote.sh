@@ -37,11 +37,19 @@ remote_path_prefix='export PATH="$HOME/.local/bin:$PATH" && '
 #    detect any deviation and refuse loudly:
 #      * `git status --porcelain` non-empty → uncommitted modifications
 #        or untracked files.
-#      * `git rev-list HEAD --not FETCH_HEAD` non-empty → local commits
-#        the remote tip doesn't have.
+#      * `git rev-list HEAD --not origin/<branch>` non-empty → local
+#        commits the remote tip doesn't have.
 #    If either trips, the bootstrap aborts with a clear message and
 #    the operator has to resolve manually. If both pass, `git reset
-#    --hard FETCH_HEAD` brings the checkout into exact alignment.
+#    --hard origin/<branch>` brings the checkout into exact alignment.
+#
+#    Using `origin/<branch>` (a remote-tracking ref that persists)
+#    rather than `FETCH_HEAD` (a transient single-file ref that's
+#    brittle across intervening git commands): an earlier draft used
+#    FETCH_HEAD and surfaced "fatal: ambiguous argument 'FETCH_HEAD'"
+#    failures on the NUC for reasons we didn't fully trace.
+#    `origin/<branch>` is updated by the preceding `git fetch origin
+#    <branch>` either way and is immune to that class of issue.
 #
 #    `git fetch origin <branch>` rather than `git pull --ff-only` so
 #    we don't depend on `branch.<name>.merge` config that may be
@@ -52,7 +60,7 @@ remote_path_prefix='export PATH="$HOME/.local/bin:$PATH" && '
 #    remote since the last launch) before any Python code runs. No-op
 #    when nothing has changed.
 if [[ -n "$branch" ]]; then
-    sync="git fetch origin $branch && if [ -n \"\$(git status --porcelain)\" ]; then echo 'run_remote.sh: ERROR: remote checkout has uncommitted modifications or untracked files; refusing to overwrite. Resolve manually before re-launching.' >&2; git status --short >&2; exit 1; fi && git checkout $branch && if [ -n \"\$(git rev-list HEAD --not FETCH_HEAD)\" ]; then echo 'run_remote.sh: ERROR: remote HEAD has commits not on origin/$branch; refusing to discard them. Resolve manually before re-launching.' >&2; git log HEAD --not FETCH_HEAD --oneline >&2; exit 1; fi && git reset --hard FETCH_HEAD && uv sync && "
+    sync="git fetch origin $branch && if [ -n \"\$(git status --porcelain)\" ]; then echo 'run_remote.sh: ERROR: remote checkout has uncommitted modifications or untracked files; refusing to overwrite. Resolve manually before re-launching.' >&2; git status --short >&2; exit 1; fi && git checkout $branch && if [ -n \"\$(git rev-list HEAD --not origin/$branch)\" ]; then echo 'run_remote.sh: ERROR: remote HEAD has commits not on origin/$branch; refusing to discard them. Resolve manually before re-launching.' >&2; git log HEAD --not origin/$branch --oneline >&2; exit 1; fi && git reset --hard origin/$branch && uv sync && "
 else
     sync="uv sync && "
 fi

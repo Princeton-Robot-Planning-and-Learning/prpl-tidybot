@@ -127,10 +127,10 @@ ephemeral mirrors of whatever the laptop most recently pushed — so
 ```bash
 git fetch origin <branch>
 # Refuse loudly if the remote checkout has been edited locally:
-test -z "$(git status --porcelain)"        # no uncommitted modifications, no untracked files
-test -z "$(git rev-list HEAD --not FETCH_HEAD)"   # no local commits ahead of origin
+test -z "$(git status --porcelain)"                  # no uncommitted modifications, no untracked files
+test -z "$(git rev-list HEAD --not origin/<branch>)" # no local commits ahead of origin
 # If both pass: hard-reset onto the just-fetched tip.
-git checkout <branch> && git reset --hard FETCH_HEAD
+git checkout <branch> && git reset --hard origin/<branch>
 ```
 
 If either check fails, the pane prints what it found and aborts —
