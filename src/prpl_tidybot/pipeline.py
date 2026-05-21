@@ -10,13 +10,14 @@ from pathlib import Path
 
 import hydra
 import kinder
+from hydra.core.hydra_config import HydraConfig
 from kinder_bilevel_planning.agent import AgentFailure, BilevelPlanningAgent
 from omegaconf import DictConfig
 from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
 from prpl_tidybot.real_sim import build_planner_env_models
-from prpl_tidybot.recording import Recorder, RecordingPerceiver
+from prpl_tidybot.recording import RecordingPerceiver, TrajectoryRecorder
 
 
 @dataclass(frozen=True)
@@ -30,14 +31,22 @@ class RolloutSummary:
     finish_reason: str
     total_reward: float
     final_state: ObjectCentricState
+    trajectory_dir: Path | None = None
     video_path: Path | None = None
 
 
-def run_planner(cfg: DictConfig) -> RolloutSummary:
+def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSummary:
     """Build the pipeline from `cfg`, run a rollout, return a summary.
 
     Mode and env are picked from `cfg.mode` and `cfg.env.pipelines[mode]`
     respectively; there's no env-specific branching here.
+
+    `log_dir` is the trajectory output directory. When unset, falls back to
+    the Hydra runtime output dir (set by ``@hydra.main``). When neither is
+    available (e.g. test code composing the config without going through
+    ``@hydra.main``), trajectory recording is skipped. ``cfg.record.video``
+    additionally gates whether to compose ``video.mp4`` from the per-tick
+    panels at the end of the rollout.
     """
     # Kinder env registrations are imported lazily; bilevel-planning calls
     # this internally too but a duplicate call is harmless.
@@ -48,19 +57,24 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
     perceiver = hydra.utils.instantiate(pipeline.perceiver)
     plan_executor = hydra.utils.instantiate(pipeline.plan_executor)
 
-    # Optional side-by-side recording. The shadow sim reuses the env's
-    # own sim pipeline yaml (the same one sim mode uses for `real_env`),
-    # which keeps kinder-specific construction out of this file.
-    recorder: Recorder | None = None
+    # Trajectory recording is on whenever we have a place to write it. The
+    # shadow sim reuses the env's own sim pipeline yaml (the same one sim
+    # mode uses for `real_env`), which keeps kinder-specific construction
+    # out of this file.
+    resolved_log_dir = _resolve_log_dir(log_dir)
+    recorder: TrajectoryRecorder | None = None
     record_cfg = cfg.get("record")
-    if record_cfg is not None and record_cfg.get("video_path"):
+    if resolved_log_dir is not None:
         shadow_sim = hydra.utils.instantiate(cfg.env.pipelines.sim.real_env)
-        recorder = Recorder(
-            real_env=real_env,
+        recorder = TrajectoryRecorder(
+            log_dir=resolved_log_dir,
             shadow_sim=shadow_sim,
-            video_path=record_cfg.video_path,
-            fps=record_cfg.fps,
+            real_env=real_env,
             seed=cfg.seed,
+            fps=record_cfg.fps if record_cfg is not None else 10,
+            compose_video=(
+                bool(record_cfg.get("video")) if record_cfg is not None else False
+            ),
         )
         perceiver = RecordingPerceiver(perceiver, recorder)
 
@@ -110,6 +124,7 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
             finish_reason = "truncated"
             break
 
+    trajectory_dir = recorder.trajectory_dir if recorder is not None else None
     video_path = recorder.finish() if recorder is not None else None
 
     return RolloutSummary(
@@ -120,5 +135,19 @@ def run_planner(cfg: DictConfig) -> RolloutSummary:
         finish_reason=finish_reason,
         total_reward=total_reward,
         final_state=state,
+        trajectory_dir=trajectory_dir,
         video_path=video_path,
     )
+
+
+def _resolve_log_dir(explicit: Path | str | None) -> Path | None:
+    """Use the explicit path if given; else the Hydra runtime dir; else None."""
+    if explicit is not None:
+        return Path(explicit)
+    try:
+        return Path(HydraConfig.get().runtime.output_dir)
+    except (ValueError, AttributeError):
+        # HydraConfig.get() raises ValueError when no Hydra context is active
+        # (i.e. tests composing configs via hydra.compose without going
+        # through @hydra.main). Skip recording in that case.
+        return None

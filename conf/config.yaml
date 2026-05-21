@@ -27,10 +27,13 @@ agent:
   heuristic_name: hff
   planning_timeout: 60
 
-# Optional side-by-side (real | shadow-sim) video recording. Set
-# `record.video_path` to enable. The shadow sim is the env's own sim
-# pipeline (`cfg.env.pipelines.sim.real_env`), re-instantiated alongside
-# the active real_env regardless of which mode the run is in.
+# Trajectory recording. The per-tick state, real-env frame and shadow-sim
+# frame are always written to ${hydra:runtime.output_dir}/trajectory/ — that
+# data is cheap to keep and useful for replay / debugging / paper figures.
+# `record.video=true` additionally composes a side-by-side (real | shadow)
+# mp4 from those frames at the end of the rollout. The shadow sim is the
+# env's own sim pipeline (`cfg.env.pipelines.sim.real_env`), re-instantiated
+# alongside the active real_env regardless of which mode the run is in.
 record:
-  video_path: null
+  video: false
   fps: 10
