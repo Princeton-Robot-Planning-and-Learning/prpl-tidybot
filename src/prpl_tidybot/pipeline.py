@@ -111,11 +111,14 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
     # through a shadow sim into preview.mp4 under the log dir and prompt
     # the operator before any real motion is commanded. Rejection raises
     # AgentFailure, which the main loop's existing handler treats as a
-    # clean rollout end (the executor never gets a chance to step).
+    # clean rollout end (the executor never gets a chance to step). Gated
+    # on `cfg.mode == "real"` even when enabled — sim / fake / test runs
+    # shouldn't block on stdin just because the global default is on.
     preview_cfg = cfg.get("preview")
     if (
         preview_cfg is not None
         and bool(preview_cfg.get("enabled"))
+        and cfg.mode == "real"
         and resolved_log_dir is not None
     ):
         try:
