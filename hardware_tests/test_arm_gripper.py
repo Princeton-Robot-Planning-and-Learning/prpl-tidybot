@@ -22,7 +22,7 @@ GRIPPER_OPEN = 0.0
 def main() -> int:
     """Close then open the gripper over N_STEPS steps each."""
     print("Connecting to the real arm interface...")
-    arm = RealArmInterface(reset=False)
+    arm = RealArmInterface(reset_arm=False)
     try:
         print("Closing gripper...")
         for i in range(N_STEPS):

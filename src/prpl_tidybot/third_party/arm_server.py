@@ -33,7 +33,7 @@ class Arm:
         self.controller = None
         self.ik_solver = IKSolver(ee_offset=0.12)
 
-    def reset(self):
+    def reset(self, reset_arm: bool = True):
         # Stop low-level control
         if self.arm.cyclic_running:
             time.sleep(0.75)  # Wait for arm to stop moving
@@ -43,8 +43,10 @@ class Arm:
         self.arm.clear_faults()
 
         # Reset arm configuration
-        self.arm.open_gripper()
-        self.arm.retract()
+        
+        if reset_arm:
+            self.arm.open_gripper()
+            self.arm.retract()
 
         # Create new instance of controller
         self.controller = JointCompliantController(self.command_queue)

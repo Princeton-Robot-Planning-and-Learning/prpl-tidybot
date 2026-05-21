@@ -8,14 +8,13 @@ from prpl_tidybot.third_party.constants import ARM_RPC_HOST, ARM_RPC_PORT, RPC_A
 class RealArmInterface(ArmInterface):
     """Real arm interface backed by the Kinova arm RPC server."""
 
-    def __init__(self, reset: bool = True) -> None:
+    def __init__(self, reset_arm: bool = True) -> None:
         self.manager = ArmManager(
             address=(ARM_RPC_HOST, ARM_RPC_PORT), authkey=RPC_AUTHKEY
         )
         self.manager.connect()
         self.arm = self.manager.Arm()  # type: ignore # pylint: disable=no-member
-        if reset:
-            self.arm.reset()
+        self.arm.reset(reset_arm=reset_arm)
 
     def get_arm_state(self) -> list[float]:
         return self.arm.get_joint_angles()
