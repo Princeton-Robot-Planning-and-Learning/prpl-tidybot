@@ -43,7 +43,7 @@ class Arm:
         self.arm.clear_faults()
 
         # Reset arm configuration
-        
+
         if reset_arm:
             self.arm.open_gripper()
             self.arm.retract()
