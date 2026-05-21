@@ -24,6 +24,8 @@ dependencies = [
    "setuptools<81",
    "threadpoolctl",
    "opencv-contrib-python==4.6.0.66",
+   "pin",
+   "kortex-api==2.6.0.post3",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +38,20 @@ develop = [
     "pytest-pylint>=0.18.0",
     "pytest>=7.2.2",
 ]
+
+[tool.uv]
+# The kortex wheel pins protobuf==3.5.1 (too old for everything else in the
+# tree); pin it to a version that actually works. Override applied across the
+# whole dependency graph at resolve time so kortex doesn't drag the old one
+# back in. Required when uv resolves kortex_api from the local wheel below.
+override-dependencies = ["protobuf==3.20.0"]
+
+[tool.uv.sources]
+# kortex_api isn't on pypi — Kinova distributes it as a local wheel. Pointing
+# `tool.uv.sources` at the in-repo wheel makes it a normal pyproject dep that
+# uv tracks in `uv.lock` and reinstalls on every `uv sync`, instead of needing
+# a manual `uv pip install kortex_wheels/...whl` that the next sync would wipe.
+kortex-api = { path = "kortex_wheels/kortex_api-2.6.0.post3-py3-none-any.whl" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -9,11 +9,7 @@ import abc
 import spatialmath
 from prpl_utils.structs import Image
 
-from prpl_tidybot.interfaces.arm_interface import (
-    ArmInterface,
-    FakeArmInterface,
-    RealArmInterface,
-)
+from prpl_tidybot.interfaces.arm_interface import ArmInterface, FakeArmInterface
 from prpl_tidybot.interfaces.base_interface import (
     BaseInterface,
     FakeBaseInterface,
@@ -24,6 +20,7 @@ from prpl_tidybot.interfaces.camera_interface import (
     FakeCameraInterface,
     RealCameraInterface,
 )
+from prpl_tidybot.interfaces.real_arm_interface import RealArmInterface
 from prpl_tidybot.structs import TidyBotObservation
 
 

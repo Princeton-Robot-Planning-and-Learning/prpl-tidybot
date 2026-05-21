@@ -74,6 +74,7 @@ kill_remote() {
 }
 
 kill_remote "$NUC" "third_party.base_server"
+kill_remote "$NUC" "third_party.arm_server"
 kill_remote "$PERC" "marker_detector"
 
 echo "Killing tmux session '$SESSION'..."
