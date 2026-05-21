@@ -56,9 +56,9 @@ kortex-api = { path = "kortex_wheels/kortex_api-2.6.0.post3-py3-none-any.whl" }
 # opencv-python with GStreamer support — built from source on the NUC.
 # Using the in-repo wheel ensures uv sync doesn't overwrite it with the
 # vanilla PyPI build which lacks GStreamer.
-# opencv-python = [
-#  { path = "opencv_wheels/opencv_python-4.9.0.80-cp310-cp310-linux_x86_64.whl", marker = "sys_platform == 'linux'" },
-# ]
+opencv-python = [
+  { path = "opencv_wheels/opencv_python-4.9.0.80-cp310-cp310-linux_x86_64.whl", marker = "sys_platform == 'linux'" },
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
