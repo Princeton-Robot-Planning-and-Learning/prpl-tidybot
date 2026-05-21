@@ -241,7 +241,9 @@ class Detector:
         """Grab the latest camera frame, detect markers, return fused poses."""
         image = self.camera_client.get_image()
 
-        corners, indices, _ = self.detector.detectMarkers(image)  # pylint: disable=unpacking-non-sequence
+        # pylint: disable=unpacking-non-sequence
+        corners, indices, _ = self.detector.detectMarkers(image)
+        # pylint: enable=unpacking-non-sequence
 
         if debug:
             image_copy = image.copy()  # 0.2 ms
