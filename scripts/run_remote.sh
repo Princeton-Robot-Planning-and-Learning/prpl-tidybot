@@ -60,7 +60,7 @@ remote_path_prefix='export PATH="$HOME/.local/bin:$PATH" && '
 #    remote since the last launch) before any Python code runs. No-op
 #    when nothing has changed.
 if [[ -n "$branch" ]]; then
-    sync="git fetch origin $branch && if [ -n \"\$(git status --porcelain)\" ]; then echo 'run_remote.sh: ERROR: remote checkout has uncommitted modifications or untracked files; refusing to overwrite. Resolve manually before re-launching.' >&2; git status --short >&2; exit 1; fi && git checkout $branch && if [ -n \"\$(git rev-list HEAD --not origin/$branch)\" ]; then echo 'run_remote.sh: ERROR: remote HEAD has commits not on origin/$branch; refusing to discard them. Resolve manually before re-launching.' >&2; git log HEAD --not origin/$branch --oneline >&2; exit 1; fi && git reset --hard origin/$branch && uv sync && "
+    sync="git fetch --prune origin $branch && if [ -n \"\$(git status --porcelain)\" ]; then echo 'run_remote.sh: ERROR: remote checkout has uncommitted modifications or untracked files; refusing to overwrite. Resolve manually before re-launching.' >&2; git status --short >&2; exit 1; fi && git checkout $branch && if [ -n \"\$(git rev-list HEAD --not origin/$branch)\" ]; then echo 'run_remote.sh: ERROR: remote HEAD has commits not on origin/$branch; refusing to discard them. Resolve manually before re-launching.' >&2; git log HEAD --not origin/$branch --oneline >&2; exit 1; fi && git reset --hard origin/$branch && uv sync && "
 else
     sync="uv sync && "
 fi
