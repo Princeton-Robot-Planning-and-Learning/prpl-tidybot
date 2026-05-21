@@ -167,3 +167,6 @@ uv.lock
 # Hydra run / sweep outputs.
 logs/
 outputs/
+
+# test images
+test_images/
