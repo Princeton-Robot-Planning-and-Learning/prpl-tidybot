@@ -35,7 +35,7 @@ pipelines:
         y: ${env.target_pose.1}
         z: ${env.target_pose.2}
     plan_executor:
-      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.PurePursuitKinematic3DPlanExecutor
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv

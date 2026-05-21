@@ -21,7 +21,7 @@ pipelines:
       _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.PrplLab3DPerceiver
       num_cubes: 1
     plan_executor:
-      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.PurePursuitKinematic3DPlanExecutor
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv
