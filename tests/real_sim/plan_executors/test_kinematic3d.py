@@ -125,6 +125,31 @@ def test_pure_pursuit_done_only_at_final_waypoint():
     assert executor.done(final) is True
 
 
+def test_pure_pursuit_done_is_sticky_once_latched():
+    """Once `done()` reports True for any reason (final-waypoint convergence or
+    max_iter), it stays True even if the perceived state subsequently drifts back
+    outside tolerance.
+
+    This prevents end-of-trajectory oscillation on real
+    hardware: marker-detector noise was making `_at_final_waypoint` flip
+    True/False per tick, and each False kept the Runner loop alive while the
+    converter recalibrated and the OTG chased a shifting odom target.
+    """
+    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
+    delta = np.zeros(11)
+    delta[0] = 1.0
+    executor = PurePursuitKinematic3DPlanExecutor(position_tolerance=1e-3)
+    executor.set_trajectory([(s0, delta)])
+
+    # First done() within tolerance — latches.
+    final = _make_state(base_xytheta=(1.0, 0.0, 0.0))
+    assert executor.done(final) is True
+    # Next done() with a noisier reading that pushes outside tolerance — would
+    # have flipped to False before the latch.
+    drifted = _make_state(base_xytheta=(0.9, 0.0, 0.0))
+    assert executor.done(drifted) is True
+
+
 def test_pure_pursuit_done_at_max_iter_safety_cap():
     """If `max_iter` ticks elapse without convergence, done() returns True anyway — the
     rollout doesn't get stuck on an unreachable goal."""

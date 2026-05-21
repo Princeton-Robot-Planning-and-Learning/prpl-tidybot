@@ -83,8 +83,8 @@ class PurePursuitKinematic3DPlanExecutor(
         self,
         robot_name: str = "robot",
         lookahead_distance: float = 0.2,
-        position_tolerance: float = 0.01,
-        angle_tolerance: float = 0.01,
+        position_tolerance: float = 0.02,
+        angle_tolerance: float = 0.05,
         joint_tolerance: float = 0.05,
         gripper_tolerance: float = 0.05,
         max_iter: int = 1000,
@@ -93,6 +93,12 @@ class PurePursuitKinematic3DPlanExecutor(
             raise ValueError("lookahead_distance must be > 0")
         self._robot_name = robot_name
         self._lookahead_distance = lookahead_distance
+        # Tolerance defaults are set wider than the marker detector's typical
+        # noise floor at the ceiling height — too-tight tolerances meant
+        # done() never latched and the OTG kept chasing each tick's
+        # recalibrated odom target (visible as oscillation around the goal
+        # on real hardware). The defaults can still be overridden via the
+        # Hydra env yaml for tighter sim-mode checks.
         self._position_tolerance = position_tolerance
         self._angle_tolerance = angle_tolerance
         self._joint_tolerance = joint_tolerance
@@ -102,6 +108,13 @@ class PurePursuitKinematic3DPlanExecutor(
         self._cumulative_arc: list[float] = []
         self._cursor_arc: float = 0.0
         self._tick_count: int = 0
+        # Sticky done. Once `_at_final_waypoint` reports True even once,
+        # latch the result so a subsequent noisier perception tick can't
+        # un-converge us and re-engage the OTG. With the Runner's `while
+        # not done` loop, latching here means the loop exits and the OTG
+        # holds the last commanded pose — that, combined with looser
+        # tolerances above, is what fixes the end-of-trajectory oscillation.
+        self._done_latched: bool = False
 
     def set_trajectory(
         self,
@@ -111,6 +124,7 @@ class PurePursuitKinematic3DPlanExecutor(
         self._cumulative_arc = _cumulative_arc_lengths(self._waypoints)
         self._cursor_arc = 0.0
         self._tick_count = 0
+        self._done_latched = False
 
     def step(
         self, sim_state: ObjectCentricState
@@ -139,11 +153,18 @@ class PurePursuitKinematic3DPlanExecutor(
         return action, ahead.sim_action
 
     def done(self, sim_state: ObjectCentricState) -> bool:
+        if self._done_latched:
+            return True
         if not self._waypoints:
+            self._done_latched = True
             return True
         if self._tick_count >= self._max_iter:
+            self._done_latched = True
             return True
-        return self._at_final_waypoint(sim_state)
+        if self._at_final_waypoint(sim_state):
+            self._done_latched = True
+            return True
+        return False
 
     def _project_onto_path(self, point: tuple[float, float]) -> float:
         """Arc length along the path of the point closest to `point`.
