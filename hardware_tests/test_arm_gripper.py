@@ -15,8 +15,8 @@ from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD
 
 N_STEPS = 10
 
-GRIPPER_CLOSED = 0.0
-GRIPPER_OPEN = 1.0
+GRIPPER_CLOSED = 1.0
+GRIPPER_OPEN = 0.0
 
 
 def main() -> int:
