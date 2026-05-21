@@ -12,7 +12,7 @@ import time
 
 import numpy as np
 
-from prpl_tidybot.interfaces.arm_interface import RealArmInterface
+from prpl_tidybot.interfaces.real_arm_interface import RealArmInterface
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD, RETRACT_ARM_CONF
 
 N_STEPS = 20

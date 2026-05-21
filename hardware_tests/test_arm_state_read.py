@@ -10,7 +10,7 @@ python hardware_tests/test_arm_state_read.py
 import sys
 import time
 
-from prpl_tidybot.interfaces.arm_interface import RealArmInterface
+from prpl_tidybot.interfaces.real_arm_interface import RealArmInterface
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD
 
 N_STEPS = 50
