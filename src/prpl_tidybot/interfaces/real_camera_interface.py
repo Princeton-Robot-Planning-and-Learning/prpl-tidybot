@@ -1,0 +1,32 @@
+"""Real camera interface backed by the Kinova wrist camera and Logitech base camera."""
+
+from prpl_utils.structs import Image
+
+from prpl_tidybot.interfaces.camera_interface import CameraInterface
+from prpl_tidybot.third_party.cameras import KinovaCamera, LogitechCamera
+from prpl_tidybot.third_party.constants import BASE_CAMERA_SERIAL
+
+
+class RealCameraInterface(CameraInterface):
+    """Real camera interface.
+
+    wrist camera: Kinova wrist camera (RTSP via GStreamer)
+    base camera: Logitech C930e
+    """
+
+    def __init__(self) -> None:
+        self.base_camera = LogitechCamera(  # type: ignore[no-untyped-call]
+            BASE_CAMERA_SERIAL
+        )
+        self.wrist_camera = KinovaCamera()  # type: ignore[no-untyped-call]
+
+    def get_wrist_image(self) -> Image:
+        return self.wrist_camera.get_image()  # type: ignore[no-untyped-call]
+
+    def get_base_image(self) -> Image:
+        return self.base_camera.get_image()  # type: ignore[no-untyped-call]
+
+    def close(self) -> None:
+        """Release camera resources."""
+        self.base_camera.close()  # type: ignore[no-untyped-call]
+        self.wrist_camera.close()  # type: ignore[no-untyped-call]

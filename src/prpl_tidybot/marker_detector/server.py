@@ -73,13 +73,9 @@ class Detector:
         self.camera_client = CameraClient(port)
 
         cv.setNumThreads(4)  # tuned for 12 CPUs
-        # Legacy OpenCV 4.6 aruco API; removed in 4.7+. The aliased name lets
-        # mypy treat these calls as Any until we port to the new API.
         aruco: Any = cv.aruco
-        self.marker_dict = aruco.Dictionary_get(MARKER_DICT_ID)
-        self.marker_dict.bytesList = self.marker_dict.bytesList[
-            list(DETECTED_MARKER_IDS)
-        ]
+        marker_dict = aruco.getPredefinedDictionary(MARKER_DICT_ID)
+        marker_dict.bytesList = marker_dict.bytesList[list(DETECTED_MARKER_IDS)]
         # detectMarkers returns slot indices into the sliced bytesList; this
         # array maps slot -> actual ArUco ID so we can split robot stickers
         # from scene targets after detection.
@@ -87,9 +83,10 @@ class Detector:
         self._num_robot_slots = len(MARKER_IDS)
 
         # Tightened to reduce false positives.
-        self.detector_params = aruco.DetectorParameters_create()
-        self.detector_params.minCornerDistanceRate = 0.2  # require fronto-parallel
-        self.detector_params.adaptiveThreshWinSizeMin = 23  # all markers same size
+        detector_params = aruco.DetectorParameters()
+        detector_params.minCornerDistanceRate = 0.2  # require fronto-parallel
+        detector_params.adaptiveThreshWinSizeMin = 23  # all markers same size
+        self.detector = aruco.ArucoDetector(marker_dict, detector_params)
 
         self.transformation_matrix = self._compute_transformation_matrix(
             np.array(self.camera_corners, dtype=np.float32)
@@ -244,15 +241,14 @@ class Detector:
         """Grab the latest camera frame, detect markers, return fused poses."""
         image = self.camera_client.get_image()
 
-        aruco: Any = cv.aruco
-        corners, indices, _ = aruco.detectMarkers(
-            image, self.marker_dict, parameters=self.detector_params
-        )
+        # pylint: disable=unpacking-non-sequence
+        corners, indices, _ = self.detector.detectMarkers(image)
+        # pylint: enable=unpacking-non-sequence
 
         if debug:
             image_copy = image.copy()  # 0.2 ms
             if indices is not None:
-                aruco.drawDetectedMarkers(image_copy, corners, indices)
+                cv.aruco.drawDetectedMarkers(image_copy, corners, indices)
             cv.imshow(f"Detections ({self.placement})", image_copy)  # 0.3 ms
 
         return self.get_poses_from_markers(corners, indices, debug=debug)
