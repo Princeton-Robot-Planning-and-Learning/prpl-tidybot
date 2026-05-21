@@ -6,12 +6,13 @@ Wires:
                      ^                          PrplLab3DPerceiver
                      |                                  |
                      |                                  v
-            PurePursuitKinematic3DPlanExecutor <- PlanningAgent <- ObjectCentricState
+            Kinematic3DPlanExecutor   <- PlanningAgent  <- ObjectCentricState
 
 through `prpl_utils.real_sim.Runner` and asserts that the FakeInterface
 ends up at the cumulative absolute target after several Runner steps of
-canned sim actions. Proves the env, perceiver, plan executor, and runner
-compose end-to-end without real hardware.
+canned sim actions. The executor enforces base-XOR-arm motion per pair,
+so the accumulation tests below issue separate base-only and arm-only
+deltas (never mixed) and check the components add up.
 """
 
 from typing import Any
@@ -25,7 +26,7 @@ from relational_structs import ObjectCentricState
 
 from prpl_tidybot.interfaces.interface import FakeInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
-from prpl_tidybot.real_sim import PrplLab3DPerceiver, PurePursuitKinematic3DPlanExecutor
+from prpl_tidybot.real_sim import Kinematic3DPlanExecutor, PrplLab3DPerceiver
 
 
 class _OneActionPerPlanAgent(
@@ -80,21 +81,21 @@ def _build_runner(
         real_env=env,
         perceiver=PrplLab3DPerceiver(),
         agent=_OneActionPerPlanAgent(actions),
-        plan_executor=PurePursuitKinematic3DPlanExecutor(),
+        plan_executor=Kinematic3DPlanExecutor(),
     )
     return runner, interface
 
 
-def test_constant_delta_accumulates_over_steps():
-    """Five steps of the same 11-d delta should leave the FakeInterface at exactly 5 *
-    delta in base and arm; gripper stays at the initial 0.0 because the gripper command
-    is in the no-change band."""
+def test_base_only_delta_accumulates_over_steps():
+    """Five base-only deltas should leave the FakeInterface base at exactly 5 * delta in
+    x/y/theta.
+
+    Arm and gripper are unchanged.
+    """
     delta = np.zeros(11)
-    delta[0] = 0.01  # base dx
-    delta[1] = 0.02  # base dy
-    delta[2] = 0.03  # base drot
-    delta[3:10] = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007]
-    delta[10] = 0.0
+    delta[0] = 0.01
+    delta[1] = 0.02
+    delta[2] = 0.03
     runner, interface = _build_runner([delta.copy() for _ in range(5)])
 
     runner.reset()
@@ -105,6 +106,27 @@ def test_constant_delta_accumulates_over_steps():
     assert base.x == pytest.approx(0.05)
     assert base.y == pytest.approx(0.10)
     assert base.theta() == pytest.approx(0.15)
+    assert interface.get_arm_state() == pytest.approx([0.0] * 7)
+    assert interface.get_gripper_state() == 0.0
+
+
+def test_arm_only_delta_accumulates_over_steps():
+    """Five arm-only deltas should leave the FakeInterface arm at exactly 5 * delta.
+
+    Base and gripper are unchanged.
+    """
+    delta = np.zeros(11)
+    delta[3:10] = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007]
+    runner, interface = _build_runner([delta.copy() for _ in range(5)])
+
+    runner.reset()
+    for _ in range(5):
+        runner.step()
+
+    base = interface.get_base_state()
+    assert base.x == pytest.approx(0.0)
+    assert base.y == pytest.approx(0.0)
+    assert base.theta() == pytest.approx(0.0)
     assert interface.get_arm_state() == pytest.approx(
         [0.005, 0.010, 0.015, 0.020, 0.025, 0.030, 0.035]
     )
@@ -133,14 +155,14 @@ def test_single_outer_step_drives_multiple_inner_ticks():
     `lookahead_distance` yields multiple inner env.step calls and arrives at the final
     waypoint."""
     delta = np.zeros(11)
-    delta[0] = 1.0  # 1 m delta, much longer than the lookahead below
+    delta[0] = 1.0  # 1 m base delta, much longer than the lookahead below
     interface = FakeInterface()
     env = RealTidyBotEnv(interface, control_period=0.0)
     runner: Runner = Runner(
         real_env=env,
         perceiver=PrplLab3DPerceiver(),
         agent=_OneActionPerPlanAgent([delta]),
-        plan_executor=PurePursuitKinematic3DPlanExecutor(lookahead_distance=0.2),
+        plan_executor=Kinematic3DPlanExecutor(lookahead_distance=0.2),
     )
 
     runner.reset()
