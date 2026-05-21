@@ -24,6 +24,7 @@ dependencies = [
    "setuptools<81",
    "threadpoolctl",
    "opencv-contrib-python==4.9.0.80",
+   "opencv-python==4.9.0.80", 
    "pin",
    "kortex-api==2.6.0.post3",
 ]
