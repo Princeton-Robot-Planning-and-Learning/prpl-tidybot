@@ -15,7 +15,9 @@ class RealCameraInterface(CameraInterface):
     """
 
     def __init__(self) -> None:
-        self.base_camera = LogitechCamera(BASE_CAMERA_SERIAL)  # type: ignore[no-untyped-call]
+        self.base_camera = LogitechCamera(  # type: ignore[no-untyped-call]
+            BASE_CAMERA_SERIAL
+        )
         self.wrist_camera = KinovaCamera()  # type: ignore[no-untyped-call]
 
     def get_wrist_image(self) -> Image:
