@@ -7,9 +7,13 @@ camera isn't wired up — pass a `Renderer` to swap in an external view.
 
 The current concrete impl is `CeilingCameraRenderer`, which subscribes
 to `CeilingImagePublisher` and yields RGB frames from the top ceiling
-camera.
+camera. The renderer runs its own background poll thread so that
+`render()` is a non-blocking cache read — important for callers (the
+trajectory recorder) that are on the control hot path and can't afford
+to wait the publisher's refresh interval on every call.
 """
 
+import threading
 from typing import Protocol
 
 import cv2 as cv
@@ -34,9 +38,15 @@ class CeilingCameraRenderer:
     """Top-camera-backed `Renderer` for off-host recording.
 
     Subscribes to `CeilingImagePublisher` (running inside the marker-detector
-    daemon on the perception PC) via `CeilingImageClient`, decodes each JPEG
-    payload into a BGR `ndarray`, and converts to RGB before returning so the
-    moviepy recorder sees the colors right.
+    daemon on the perception PC) via `CeilingImageClient`. A background thread
+    drains the publisher continuously and stores the latest decoded frame
+    (BGR -> RGB) in `self._latest`; `render()` is a non-blocking attribute read
+    of that cache.
+
+    Polling on a thread is what lets the recorder call `render()` once per
+    inner real-env tick without paying the publisher's per-call blocking
+    latency — the same pattern stretched the gap between consecutive base
+    commands past the controller's command-timeout in #45.
     """
 
     def __init__(
@@ -51,14 +61,30 @@ class CeilingCameraRenderer:
             if client is not None
             else CeilingImageClient(host=host, port=port, poll_timeout_s=poll_timeout_s)
         )
+        self._latest: np.ndarray | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def _poll_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                frame_bgr = self._client.get_image()
+            except Exception:  # pylint: disable=broad-except
+                # Connection broke mid-shutdown (close() raced ahead of the
+                # final poll). Exiting the loop cleanly is the right call —
+                # `render()` keeps serving the last cached frame.
+                break
+            if frame_bgr is not None:
+                self._latest = cv.cvtColor(frame_bgr, cv.COLOR_BGR2RGB)
 
     def render(self) -> np.ndarray | None:
-        """Return the latest top-camera frame as RGB, or None if none has arrived."""
-        frame_bgr = self._client.get_image()
-        if frame_bgr is None:
-            return None
-        return cv.cvtColor(frame_bgr, cv.COLOR_BGR2RGB)
+        """Return the latest cached top-camera frame as RGB, or None if none has
+        arrived yet."""
+        return self._latest
 
     def close(self) -> None:
-        """Close the underlying client connection."""
+        """Stop the poll thread and close the underlying client."""
+        self._stop.set()
+        self._thread.join(timeout=2.0)
         self._client.close()
