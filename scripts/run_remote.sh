@@ -14,6 +14,13 @@ shift
 repo_dir="${PRPL_REPO_DIR:-~/prpl-tidybot}"
 branch="${PRPL_BRANCH:-}"
 
+# `uv`'s installer drops the binary in ~/.local/bin/, which is typically only
+# added to PATH by the user's interactive shell rc (~/.bashrc). The SSH command
+# below runs a non-interactive non-login shell that doesn't source any rc file,
+# so `uv` isn't visible without this explicit prepend. The escaped `\$HOME` is
+# evaluated on the remote, not locally.
+remote_path_prefix='export PATH="$HOME/.local/bin:$PATH" && '
+
 # Bootstrap chained into the SSH command via `&&` so any step's failure
 # aborts the pane instead of starting the server (or shell) against
 # stale code or a stale venv.
@@ -40,7 +47,7 @@ if [[ "$*" == "bash" ]]; then
     # Interactive shell: use --rcfile so .bashrc loads first and the venv
     # activation runs after, otherwise .bashrc resets PS1 (and possibly
     # PATH) and the venv prefix disappears from the prompt.
-    exec ssh -tt "$host" "cd $repo_dir && ${sync}exec bash --rcfile <(echo \"[ -f ~/.bashrc ] && source ~/.bashrc; cd $repo_dir; source .venv/bin/activate\")"
+    exec ssh -tt "$host" "${remote_path_prefix}cd $repo_dir && ${sync}exec bash --rcfile <(echo \"[ -f ~/.bashrc ] && source ~/.bashrc; cd $repo_dir; source .venv/bin/activate\")"
 else
-    exec ssh -tt "$host" "cd $repo_dir && ${sync}source .venv/bin/activate && exec $*"
+    exec ssh -tt "$host" "${remote_path_prefix}cd $repo_dir && ${sync}source .venv/bin/activate && exec $*"
 fi
