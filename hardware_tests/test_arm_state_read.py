@@ -1,35 +1,33 @@
-"""Hardware integration test: command the real arm to a target joint configuration.
+"""Hardware integration test: read arm joint angles and gripper position.
 
 Run on the robot (the arm server must already be up). Connects via RealArmInterface,
-prints the current joint angles, then commands the arm to the retract configuration for
-N_STEPS steps at policy rate, printing the per-step state.
+resets the arm to the retract configuration, then prints joint angles and gripper
+position at policy rate for 50 steps.
 
-python hardware_tests/test_arm_target.py
+python hardware_tests/test_arm_state_read.py
 """
 
 import sys
 import time
 
-import numpy as np
-
 from prpl_tidybot.interfaces.arm_interface import RealArmInterface
-from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD, RETRACT_ARM_CONF
+from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD
 
-N_STEPS = 20
+N_STEPS = 50
 
 
 def main() -> int:
-    """Move the arm to the retract configuration over N_STEPS steps."""
-    target = RETRACT_ARM_CONF.tolist()
+    """Connect to the real arm, reset it, and stream state for N_STEPS steps."""
     print("Connecting to the real arm interface...")
     arm = RealArmInterface()
     try:
         for i in range(N_STEPS):
             joints = arm.get_arm_state()
+            gripper = arm.get_gripper_state()
             joints_str = "  ".join(f"{j:+.3f}" for j in joints)
-            err = np.linalg.norm(np.array(joints) - np.array(target))
-            print(f"step {i + 1:02d}/{N_STEPS}  joints=[{joints_str}]  err={err:.4f}")
-            arm.execute_action(target)
+            print(
+                f"step {i + 1:02d}/{N_STEPS}  joints=[{joints_str}]  grip={gripper:.3f}"
+            )
             time.sleep(POLICY_CONTROL_PERIOD)
         return 0
     finally:
