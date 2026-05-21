@@ -84,7 +84,7 @@ class PurePursuitKinematic3DPlanExecutor(
         robot_name: str = "robot",
         lookahead_distance: float = 0.2,
         position_tolerance: float = 0.02,
-        angle_tolerance: float = 0.05,
+        angle_tolerance: float = 0.1,
         joint_tolerance: float = 0.05,
         gripper_tolerance: float = 0.05,
         max_iter: int = 1000,
