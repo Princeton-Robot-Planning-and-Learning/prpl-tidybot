@@ -16,7 +16,7 @@ import gymnasium
 import numpy as np
 from gymnasium import spaces
 
-from prpl_tidybot.recording import TrajectoryRecorder
+from prpl_tidybot.recording import TrajectoryRecorder, _hstack_frames
 
 
 @dataclass(frozen=True)
@@ -113,8 +113,14 @@ def test_recorder_writes_per_tick_dir_with_state_real_shadow_meta(
     tmp_path: Path,
 ) -> None:
     """Each capture creates a zero-padded subdir under trajectory/ with state.pkl,
-    real.png, shadow.png and meta.json."""
-    recorder, _, _ = _make_recorder(tmp_path, real_color=30, shadow_color=60)
+    real.png, shadow.png and meta.json.
+
+    `compose_video=True` is required for the shadow render sweep at finish(); without it
+    shadow.png isn't written.
+    """
+    recorder, _, _ = _make_recorder(
+        tmp_path, real_color=30, shadow_color=60, compose_video=True
+    )
     state = _StubState(label="t0")
     recorder.capture(idx=0, state=state)  # type: ignore[arg-type]
     recorder.capture(idx=1, state=_StubState(label="t1"))  # type: ignore[arg-type]
@@ -179,7 +185,7 @@ def test_recorder_compose_video_no_captures_returns_none(tmp_path: Path) -> None
 
 def test_recorder_skips_real_png_when_real_renders_none(tmp_path: Path) -> None:
     """If real_env.render() returns None, the per-tick dir omits real.png; state and
-    shadow still land."""
+    shadow still land (shadow requires compose_video=True to be written)."""
 
     class _NoneReal(_StubRealEnv):
         def render(self):  # type: ignore[override]
@@ -190,6 +196,7 @@ def test_recorder_skips_real_png_when_real_renders_none(tmp_path: Path) -> None:
         log_dir=tmp_path,
         shadow_sim=shadow,
         real_env=_NoneReal(color=0),
+        compose_video=True,
     )
     recorder.capture(idx=0, state=_StubState(label="t0"))  # type: ignore[arg-type]
     recorder.finish()
@@ -201,7 +208,9 @@ def test_recorder_skips_real_png_when_real_renders_none(tmp_path: Path) -> None:
 
 
 def test_recorder_skips_shadow_png_when_shadow_renders_none(tmp_path: Path) -> None:
-    """If shadow_sim.render() returns None, the per-tick dir omits shadow.png."""
+    """With compose_video=True the shadow render sweep runs at finish(), but if
+    shadow_sim.render() returns None for a tick the corresponding shadow.png is skipped
+    (state.pkl + real.png + meta.json still land)."""
 
     class _NoneShadow(_StubShadowSim):
         def render(self):  # type: ignore[override]
@@ -212,6 +221,7 @@ def test_recorder_skips_shadow_png_when_shadow_renders_none(tmp_path: Path) -> N
         log_dir=tmp_path,
         shadow_sim=_NoneShadow(color=0),
         real_env=real,
+        compose_video=True,
     )
     recorder.capture(idx=0, state=_StubState(label="t0"))  # type: ignore[arg-type]
     recorder.finish()
@@ -249,6 +259,32 @@ def test_recorder_capture_is_non_blocking(tmp_path: Path) -> None:
     finally:
         # finish() waits for the slow shadow render to actually complete.
         recorder.finish()
+
+
+def test_hstack_resizes_shorter_frame_to_match_heights():
+    """Different-height inputs get resized (preserving aspect ratio) before concat — no
+    black padding bands on the shorter panel."""
+    # Real 4x4 (uniform 10); shadow 6x4 (uniform 20).
+    real = np.full((4, 4, 3), 10, dtype=np.uint8)
+    shadow = np.full((6, 4, 3), 20, dtype=np.uint8)
+    composed = _hstack_frames(real, shadow)
+    # Real (4x4) is resized to height 6 -> width round(4 * 6 / 4) = 6, so the
+    # composite is height 6, width 6 (real) + 4 (shadow) = 10.
+    assert composed.shape == (6, 10, 3)
+    # Real panel stays uniform color 10 after resize.
+    assert (composed[:, :6] == 10).all()
+    # Shadow panel keeps its original uniform color 20.
+    assert (composed[:, 6:] == 20).all()
+
+
+def test_hstack_no_op_when_heights_already_match():
+    """Same-height inputs are concatenated as-is."""
+    real = np.full((4, 4, 3), 10, dtype=np.uint8)
+    shadow = np.full((4, 4, 3), 20, dtype=np.uint8)
+    composed = _hstack_frames(real, shadow)
+    assert composed.shape == (4, 8, 3)
+    assert (composed[:, :4] == 10).all()
+    assert (composed[:, 4:] == 20).all()
 
 
 def test_recorder_trajectory_dir_property(tmp_path: Path) -> None:
