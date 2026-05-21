@@ -21,8 +21,12 @@ def main() -> int:
     try:
         wrist_image = cameras.get_wrist_image()
         base_image = cameras.get_base_image()
-        cv.imwrite("wrist_image.jpg", cv.cvtColor(wrist_image, cv.COLOR_RGB2BGR))
-        cv.imwrite("base_image.jpg", cv.cvtColor(base_image, cv.COLOR_RGB2BGR))
+        cv.imwrite(
+            "test_images/wrist_image.jpg", cv.cvtColor(wrist_image, cv.COLOR_RGB2BGR)
+        )
+        cv.imwrite(
+            "test_images/base_image.jpg", cv.cvtColor(base_image, cv.COLOR_RGB2BGR)
+        )
         print(f"wrist image saved: wrist_image.jpg  shape={wrist_image.shape}")
         print(f"base image saved:  base_image.jpg   shape={base_image.shape}")
         return 0
