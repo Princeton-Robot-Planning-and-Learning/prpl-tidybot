@@ -23,7 +23,7 @@ dependencies = [
    "ruckig",
    "setuptools<81",
    "threadpoolctl",
-   "opencv-contrib-python",
+   "opencv-contrib-python==4.6.0.66",
    "pin",
    "kortex-api==2.6.0.post3",
 ]
