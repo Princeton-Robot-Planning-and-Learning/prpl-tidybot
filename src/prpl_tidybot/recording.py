@@ -164,9 +164,12 @@ class TrajectoryRecorder:
         """
         self._serialize_queue.put(_SENTINEL)
         self._serialize_thread.join()
-        self._render_shadows_from_disk()
         if not self._compose_video:
+            # Shadow rendering only feeds the mp4. Skipping it when no video
+            # was requested keeps `finish()` fast — the pybullet sweep over
+            # every captured state was the dominant cost otherwise.
             return None
+        self._render_shadows_from_disk()
         return self._compose_video_from_disk()
 
     def _serialize_loop(self) -> None:
