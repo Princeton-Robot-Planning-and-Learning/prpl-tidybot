@@ -8,7 +8,7 @@ misregistration before the robot drives. The PNG is the workaround for running i
 tmux (no interactive matplotlib window); open it from VS Code Remote (or similar) on the
 project tree. The file is deleted once the operator answers the prompt.
 
-Convergence is now the `PurePursuitKinematic3DPlanExecutor`'s responsibility —
+Convergence is now the `Kinematic3DPlanExecutor`'s responsibility —
 `RealTidyBotEnv.step` is single-tick. Each waypoint is converted into a one-pair (state,
 delta) trajectory, the executor reissues the absolute target every 100 ms until either
 the perceived map pose is within tolerance or `max_iter` ticks elapse, then we advance
@@ -35,7 +35,7 @@ from prpl_tidybot.interfaces.interface import RealInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
 from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import (
-    PurePursuitKinematic3DPlanExecutor,
+    Kinematic3DPlanExecutor,
 )
 
 TARGETS_MAP = [
@@ -162,7 +162,7 @@ def main() -> int:
                 f"x={target.x:+.3f} y={target.y:+.3f} theta={target.theta():+.3f}"
             )
             delta = _delta_to_target(state, target)
-            executor = PurePursuitKinematic3DPlanExecutor()
+            executor = Kinematic3DPlanExecutor()
             executor.set_trajectory([(state, delta)])
             while not executor.done(state):
                 real_action, _ = executor.step(state)

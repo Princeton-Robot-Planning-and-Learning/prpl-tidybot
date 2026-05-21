@@ -37,3 +37,18 @@ agent:
 record:
   video: false
   fps: 10
+
+# Plan preview gate. When true and `mode=real`, after the agent finishes
+# planning (and before the executor starts driving the real env), the
+# planned trajectory is rendered through the shadow sim into a
+# `preview.mp4` under the rollout log dir, and the rollout pauses for
+# operator approval via stdin. Type `y` to execute, anything else to abort
+# cleanly. Defaults to on as a hardware-safety gate; restricted to
+# `mode=real` in pipeline.py so sim / fake / test runs don't block on
+# stdin. Override either way on the command line:
+#   `preview.enabled=false` to skip the prompt before a real-mode rollout
+#   (unattended demos), or set `preview.enabled=true mode=sim` if you
+#   want a preview for a non-real-mode rollout too.
+preview:
+  enabled: true
+  fps: 10
