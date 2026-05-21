@@ -18,6 +18,12 @@ target_pose: [1.0, 1.0, 0.2]
 target_marker_id: 23
 target_marker_z: 0.0
 
+# Base motion strategy for Kinematic3DPlanExecutor. "pure_pursuit" (default)
+# flows lookahead across consecutive base waypoints for smooth motion;
+# "settle" converges per-waypoint, useful as a diagnostic / fallback.
+# Override per-run with `env.base_strategy=settle`.
+base_strategy: pure_pursuit
+
 pipelines:
   fake:
     real_env:
@@ -35,7 +41,8 @@ pipelines:
         y: ${env.target_pose.1}
         z: ${env.target_pose.2}
     plan_executor:
-      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.PurePursuitKinematic3DPlanExecutor
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
+      base_strategy: ${env.base_strategy}
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv

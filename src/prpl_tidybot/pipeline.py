@@ -16,6 +16,7 @@ from omegaconf import DictConfig
 from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
+from prpl_tidybot.preview import planned_states_from_agent, preview_or_abort
 from prpl_tidybot.real_sim import build_planner_env_models
 from prpl_tidybot.recording import RecordingPerceiver, TrajectoryRecorder
 
@@ -105,6 +106,45 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
     total_reward = 0.0
     steps = 0
     finish_reason = "max_steps_reached"
+
+    # Optional plan-preview gate. Render the agent's planned trajectory
+    # through a shadow sim into preview.mp4 under the log dir and prompt
+    # the operator before any real motion is commanded. Rejection raises
+    # AgentFailure, which the main loop's existing handler treats as a
+    # clean rollout end (the executor never gets a chance to step). Gated
+    # on `cfg.mode == "real"` even when enabled — sim / fake / test runs
+    # shouldn't block on stdin just because the global default is on.
+    preview_cfg = cfg.get("preview")
+    if (
+        preview_cfg is not None
+        and bool(preview_cfg.get("enabled"))
+        and cfg.mode == "real"
+        and resolved_log_dir is not None
+    ):
+        try:
+            preview_or_abort(
+                planned_states=planned_states_from_agent(agent),
+                shadow_sim=hydra.utils.instantiate(cfg.env.pipelines.sim.real_env),
+                log_dir=resolved_log_dir,
+                seed=cfg.seed,
+                fps=int(preview_cfg.get("fps", 10)),
+            )
+        except AgentFailure as e:
+            finish_reason = f"agent_failure: {e}"
+            return RolloutSummary(
+                env_name=cfg.env.env_name,
+                mode=cfg.mode,
+                seed=cfg.seed,
+                steps=0,
+                finish_reason=finish_reason,
+                total_reward=0.0,
+                final_state=state,
+                trajectory_dir=(
+                    recorder.trajectory_dir if recorder is not None else None
+                ),
+                video_path=(recorder.finish() if recorder is not None else None),
+            )
+
     for _ in range(cfg.max_eval_steps):
         try:
             state, reward, terminated, truncated, _ = runner.step()
