@@ -14,18 +14,31 @@ shift
 repo_dir="${PRPL_REPO_DIR:-~/prpl-tidybot}"
 branch="${PRPL_BRANCH:-}"
 
-# When PRPL_BRANCH is set, sync the remote checkout to that branch before
-# anything else runs. `&&` chain so a fetch/checkout/pull failure aborts
-# the pane instead of starting the server (or shell) against stale code.
+# `uv`'s installer drops the binary in ~/.local/bin/, which is typically only
+# added to PATH by the user's interactive shell rc (~/.bashrc). The SSH command
+# below runs a non-interactive non-login shell that doesn't source any rc file,
+# so `uv` isn't visible without this explicit prepend. The escaped `\$HOME` is
+# evaluated on the remote, not locally.
+remote_path_prefix='export PATH="$HOME/.local/bin:$PATH" && '
+
+# Bootstrap chained into the SSH command via `&&` so any step's failure
+# aborts the pane instead of starting the server (or shell) against
+# stale code or a stale venv.
 #
-# Fast-forward to FETCH_HEAD instead of `git pull --ff-only` — the latter
-# depends on `branch.<name>.merge` config that may be missing on a fresh
-# remote checkout and then errors out with "Cannot fast-forward to
-# multiple branches".
+# 1. Optional git sync. When PRPL_BRANCH is set, fast-forward the remote
+#    checkout to that branch. Use `merge --ff-only FETCH_HEAD` rather
+#    than `git pull --ff-only` — the latter depends on
+#    `branch.<name>.merge` config that may be missing on a fresh remote
+#    checkout and then errors out with "Cannot fast-forward to multiple
+#    branches".
+# 2. Always `uv sync`. Picks up any pyproject.toml / uv.lock changes
+#    from the just-synced branch (or from a manual `git pull` on the
+#    remote since the last launch) before any Python code runs. No-op
+#    when nothing has changed.
 if [[ -n "$branch" ]]; then
-    sync="git fetch origin $branch && git checkout $branch && git merge --ff-only FETCH_HEAD && "
+    sync="git fetch origin $branch && git checkout $branch && git merge --ff-only FETCH_HEAD && uv sync && "
 else
-    sync=""
+    sync="uv sync && "
 fi
 
 # -tt forces a PTY in both directions so closing the local pane delivers
@@ -34,7 +47,7 @@ if [[ "$*" == "bash" ]]; then
     # Interactive shell: use --rcfile so .bashrc loads first and the venv
     # activation runs after, otherwise .bashrc resets PS1 (and possibly
     # PATH) and the venv prefix disappears from the prompt.
-    exec ssh -tt "$host" "cd $repo_dir && ${sync}exec bash --rcfile <(echo \"[ -f ~/.bashrc ] && source ~/.bashrc; cd $repo_dir; source .venv/bin/activate\")"
+    exec ssh -tt "$host" "${remote_path_prefix}cd $repo_dir && ${sync}exec bash --rcfile <(echo \"[ -f ~/.bashrc ] && source ~/.bashrc; cd $repo_dir; source .venv/bin/activate\")"
 else
-    exec ssh -tt "$host" "cd $repo_dir && ${sync}source .venv/bin/activate && exec $*"
+    exec ssh -tt "$host" "${remote_path_prefix}cd $repo_dir && ${sync}source .venv/bin/activate && exec $*"
 fi
