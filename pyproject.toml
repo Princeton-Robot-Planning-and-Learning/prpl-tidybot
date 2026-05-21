@@ -7,7 +7,7 @@ name = "prpl_tidybot"
 version = "0.1.0"
 description = "Code for the real TidyBot++ robot and a real-to-sim-to-real pipeline."
 readme = "README.md"
-requires-python = ">=3.10.14, <3.13"
+requires-python = ">=3.10.14, <3.11"
 dependencies = [
    "numpy",
    "matplotlib",
