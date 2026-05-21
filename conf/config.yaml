@@ -37,3 +37,14 @@ agent:
 record:
   video: false
   fps: 10
+
+# Plan preview gate. When true, after the agent finishes planning (and
+# before the executor starts driving the real env), the planned trajectory
+# is rendered through the shadow sim into a `preview.mp4` under the rollout
+# log dir, and the rollout pauses for operator approval via stdin. Type
+# `y` to execute, anything else to abort cleanly. The default is off so
+# automated runs aren't blocked on stdin; enable per-rollout on the
+# command line as `preview.enabled=true`.
+preview:
+  enabled: false
+  fps: 10
