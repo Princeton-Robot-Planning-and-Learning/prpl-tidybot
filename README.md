@@ -118,11 +118,30 @@ cd prpl-tidybot
 ./scripts/launch.sh my-feature-branch        # sync every remote pane to <branch> first
 ```
 
-When a branch is given, each pane runs
-`git fetch origin <branch> && git checkout <branch> && git merge --ff-only FETCH_HEAD`
-on the remote before starting its server — non-fast-forward state (local
-commits on the NUC, dirty tree) aborts the pane instead of silently
-running stale code.
+When a branch is given, each pane brings the remote checkout into exact
+alignment with `origin/<branch>` before starting its server. The
+**remote machines are not development boxes** — they're meant to be
+ephemeral mirrors of whatever the laptop most recently pushed — so
+`origin` is the source of truth. Concretely, each pane runs (roughly):
+
+```bash
+git fetch origin <branch>
+# Refuse loudly if the remote checkout has been edited locally:
+test -z "$(git status --porcelain)"        # no uncommitted modifications, no untracked files
+test -z "$(git rev-list HEAD --not FETCH_HEAD)"   # no local commits ahead of origin
+# If both pass: hard-reset onto the just-fetched tip.
+git checkout <branch> && git reset --hard FETCH_HEAD
+```
+
+If either check fails, the pane prints what it found and aborts —
+nothing on the remote gets overwritten silently. The fix is to SSH
+in, deal with the work (`git stash`, push the commits somewhere,
+whatever), and re-launch. If you find yourself doing this often, you
+probably want to do that work on a real dev machine instead.
+
+After the git sync, every pane also runs `uv sync` so that
+`pyproject.toml` / `uv.lock` changes from the just-synced branch
+land in the venv before any Python code starts.
 
 The wrapper is a thin shim around `tmuxinator start ./.tmuxinator.yml`,
 which (unlike `tmuxinator local`) forwards positional args to the

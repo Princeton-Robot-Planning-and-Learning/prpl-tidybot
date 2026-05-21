@@ -25,18 +25,34 @@ remote_path_prefix='export PATH="$HOME/.local/bin:$PATH" && '
 # aborts the pane instead of starting the server (or shell) against
 # stale code or a stale venv.
 #
-# 1. Optional git sync. When PRPL_BRANCH is set, fast-forward the remote
-#    checkout to that branch. Use `merge --ff-only FETCH_HEAD` rather
-#    than `git pull --ff-only` — the latter depends on
-#    `branch.<name>.merge` config that may be missing on a fresh remote
-#    checkout and then errors out with "Cannot fast-forward to multiple
-#    branches".
+# 1. Optional git sync. When PRPL_BRANCH is set, force the remote
+#    checkout into exact alignment with origin/<branch>. The remote
+#    machines are NOT development boxes — they're meant to be
+#    ephemeral mirrors of whatever the laptop most recently pushed —
+#    so origin is unambiguously the source of truth and a hard reset
+#    is the right tool to recover from force-pushes (issue #44).
+#
+#    But blindly hard-resetting would silently destroy any local work
+#    if someone did happen to edit / commit on the remote. So first
+#    detect any deviation and refuse loudly:
+#      * `git status --porcelain` non-empty → uncommitted modifications
+#        or untracked files.
+#      * `git rev-list HEAD --not FETCH_HEAD` non-empty → local commits
+#        the remote tip doesn't have.
+#    If either trips, the bootstrap aborts with a clear message and
+#    the operator has to resolve manually. If both pass, `git reset
+#    --hard FETCH_HEAD` brings the checkout into exact alignment.
+#
+#    `git fetch origin <branch>` rather than `git pull --ff-only` so
+#    we don't depend on `branch.<name>.merge` config that may be
+#    missing on a fresh remote checkout and then errors out with
+#    "Cannot fast-forward to multiple branches".
 # 2. Always `uv sync`. Picks up any pyproject.toml / uv.lock changes
 #    from the just-synced branch (or from a manual `git pull` on the
 #    remote since the last launch) before any Python code runs. No-op
 #    when nothing has changed.
 if [[ -n "$branch" ]]; then
-    sync="git fetch origin $branch && git checkout $branch && git merge --ff-only FETCH_HEAD && uv sync && "
+    sync="git fetch origin $branch && if [ -n \"\$(git status --porcelain)\" ]; then echo 'run_remote.sh: ERROR: remote checkout has uncommitted modifications or untracked files; refusing to overwrite. Resolve manually before re-launching.' >&2; git status --short >&2; exit 1; fi && git checkout $branch && if [ -n \"\$(git rev-list HEAD --not FETCH_HEAD)\" ]; then echo 'run_remote.sh: ERROR: remote HEAD has commits not on origin/$branch; refusing to discard them. Resolve manually before re-launching.' >&2; git log HEAD --not FETCH_HEAD --oneline >&2; exit 1; fi && git reset --hard FETCH_HEAD && uv sync && "
 else
     sync="uv sync && "
 fi
