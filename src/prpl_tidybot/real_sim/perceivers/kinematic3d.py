@@ -16,12 +16,17 @@ from kinder.envs.kinematic3d.motion3d import Motion3DObjectCentricState
 from kinder.envs.kinematic3d.object_types import (
     Kinematic3DCuboidType,
     Kinematic3DEnvTypeFeatures,
+    Kinematic3DFixtureType,
     Kinematic3DPointType,
     Kinematic3DRobotType,
 )
 from kinder.envs.kinematic3d.prpl3d import (
     PrplLab3DEnvConfig,
     PrplLab3DObjectCentricState,
+)
+from kinder.envs.kinematic3d.shelf3d import (
+    Shelf3DEnvConfig,
+    Shelf3DObjectCentricState,
 )
 from prpl_utils.real_sim import Perceiver
 from relational_structs import Object, ObjectCentricState
@@ -31,6 +36,7 @@ from prpl_tidybot.real_sim.perceivers.target_source import TargetSource
 from prpl_tidybot.structs import TidyBotObservation
 
 _DEFAULT_CUBE_HALF_EXTENTS = PrplLab3DEnvConfig().block_half_extents
+_DEFAULT_SHELF_CUBE_HALF_EXTENTS = Shelf3DEnvConfig().block_half_extents
 
 
 class KinematicRobotPerceiverBase(
@@ -255,4 +261,84 @@ class Motion3DPerceiver(KinematicRobotPerceiverBase):
                 "y": obs.map_base_pose.y + ox * sin_t + oy * cos_t,
                 "z": oz,
             }
+        }
+
+
+class Shelf3DPerceiver(KinematicRobotPerceiverBase):
+    """Perceiver for kinder/KinematicShelf3D-o{N}-v0.
+
+    Emits one cube (cube0) whose `(x, y, z)` comes from a TargetSource
+    plus a shelf fixture at a fixed pose threaded in from the env yaml.
+    The cube target follows the same pattern as
+    :class:`BaseMotion3DPerceiver`: in fake / sim modes the source is a
+    `ConstantTargetSource`; in real mode it's a
+    `MarkerDetectorTargetSource` for the ArUco that marks the cube. The
+    marker detector only provides `(x, y, z)` so the cube's orientation
+    defaults to identity (z-up, lying flat); the shelf orientation does
+    the same. The cube target is cached once per :meth:`reset` for the
+    same control-loop-latency reason as in
+    :class:`BaseMotion3DPerceiver` — the cube is stationary during a
+    rollout by design.
+    """
+
+    def __init__(
+        self,
+        target_source: TargetSource,
+        shelf_pose: tuple[float, float, float],
+        cube_half_extents: tuple[
+            float, float, float
+        ] = _DEFAULT_SHELF_CUBE_HALF_EXTENTS,
+        robot_name: str = "robot",
+    ) -> None:
+        super().__init__(robot_name=robot_name)
+        self._target_source = target_source
+        self._shelf_pose = tuple(shelf_pose)
+        self._cube_half_extents = tuple(cube_half_extents)
+        self._cached_cube_target: tuple[float, float, float] | None = None
+
+    @property
+    def _state_cls(self) -> type[ObjectCentricState]:
+        return Shelf3DObjectCentricState
+
+    def reset(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> ObjectCentricState:
+        self._cached_cube_target = self._target_source.get_target()
+        return super().reset(obs, info)
+
+    def _detect_objects(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> dict[Object, dict[str, float]]:
+        del obs, info
+        if self._cached_cube_target is None:
+            # Defensive — reset() should have run first; populate lazily
+            # so callers that call step() before reset() still get a cube.
+            self._cached_cube_target = self._target_source.get_target()
+        cube_x, cube_y, cube_z = self._cached_cube_target
+        shelf_x, shelf_y, shelf_z = self._shelf_pose
+        hx, hy, hz = self._cube_half_extents
+        return {
+            Object("shelf", Kinematic3DFixtureType): {
+                "pose_x": shelf_x,
+                "pose_y": shelf_y,
+                "pose_z": shelf_z,
+                "pose_qx": 0.0,
+                "pose_qy": 0.0,
+                "pose_qz": 0.0,
+                "pose_qw": 1.0,
+            },
+            Object("cube0", Kinematic3DCuboidType): {
+                "pose_x": cube_x,
+                "pose_y": cube_y,
+                "pose_z": cube_z,
+                "pose_qx": 0.0,
+                "pose_qy": 0.0,
+                "pose_qz": 0.0,
+                "pose_qw": 1.0,
+                "grasp_active": 0.0,
+                "object_type": 0.0,
+                "half_extent_x": hx,
+                "half_extent_y": hy,
+                "half_extent_z": hz,
+            },
         }

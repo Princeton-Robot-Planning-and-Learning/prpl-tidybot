@@ -1,0 +1,108 @@
+# kinder/KinematicShelf3D-o1-v0 — pick a cube off the floor and place it on a shelf.
+# Bilevel-planning env model lives in
+# kinder_bilevel_planning.env_models.kinematic3d.shelf3d.
+
+env_name: shelf3d
+make_kwargs:
+  id: kinder/KinematicShelf3D-o1-v0
+env_model_kwargs:
+  num_objects: 1
+
+# Used by the fake-mode target source: where the agent thinks the cube is.
+# (Sim mode reads the cube from the kinder env directly; real mode pulls it
+# from the marker detector and ignores this constant.)
+cube_pose: [0.5, 0.0, 0.025]
+
+# ArUco marker (and its z value in the env frame) that the real-mode perceiver
+# reads as the cube position. The marker detector must be configured to publish
+# this ID — see `prpl_tidybot.marker_detector.constants.TARGET_MARKER_IDS`.
+#
+# `cube_marker_z` is the cube's *center* height above the floor — i.e. the
+# cube's half-extent_z, NOT the height of the physical marker. The planner's
+# grasp controller assumes the cube is sitting fully on the floor; with z=0
+# (cube half-buried) it rejects every candidate grasp trajectory.
+cube_marker_id: 23
+cube_marker_z: 0.025
+
+# Static shelf pose threaded into the perceiver. Matches the default in
+# `kinder.envs.kinematic3d.shelf3d.Shelf3DEnvConfig` so that the perceived
+# shelf and the planner's internal env model agree on where the shelf is;
+# override here per-lab once the real shelf is staged.
+shelf_pose: [2.0, 2.4, 0.02]
+
+# Streaming arm executor knobs (weighted-L1 joint metric units). See
+# conf/env/motion3d.yaml for the full discussion of trade-offs; the
+# short version is that 0.4 stays outside the Kinova shoulder OTG decel
+# zone for smooth motion, smaller values give tighter tracking at the
+# cost of visible per-waypoint accel/decel. Override on the CLI with
+# `env.arm_advance_radius=0.05 env.arm_arrival_tolerance=0.2`.
+arm_advance_radius: 0.4
+arm_arrival_tolerance: 0.4
+
+pipelines:
+  fake:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      # FakeInterface stores commanded poses, so the executor converges on
+      # the first tick; skip the per-tick sleep to keep tests fast.
+      control_period: 0.0
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.FakeInterface
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.Shelf3DPerceiver
+      target_source:
+        _target_: prpl_tidybot.real_sim.perceivers.target_source.ConstantTargetSource
+        x: ${env.cube_pose.0}
+        y: ${env.cube_pose.1}
+        z: ${env.cube_pose.2}
+      shelf_pose: ${env.shelf_pose}
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
+      base_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.base_motion3d.PurePursuitBaseMotion3DPlanExecutor
+      arm_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.StreamingArmMotion3DPlanExecutor
+        distance_fn:
+          _target_: prpl_tidybot.real_sim.plan_executors.distance_factories.create_kinova_distance_fn
+        advance_radius: ${env.arm_advance_radius}
+        arrival_tolerance: ${env.arm_arrival_tolerance}
+        max_iter_total: 300
+  sim:
+    real_env:
+      _target_: prpl_tidybot.sim_env.KinderSimEnv
+      env_id: ${env.make_kwargs.id}
+      # Enable inner-env `set_state` so this same pipeline can serve as
+      # a shadow sim for the side-by-side video recorder.
+      allow_state_access: true
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.passthrough.PassThroughPerceiver
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.passthrough.PassThroughPlanExecutor
+  real:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.RealInterface
+        # Real arm + real base — the planner commands both for pick/place.
+        # Camera stays faked: perception of the cube is via the ceiling
+        # marker detector (see `target_source` below), not the on-robot
+        # cams, and `get_observation` would otherwise hit
+        # NotImplementedError on the real cams.
+        base_interface:
+          _target_: prpl_tidybot.interfaces.base_interface.RealBaseInterface
+          marker_detector_host: ${lab.marker_detector_host}
+        camera_interface:
+          _target_: prpl_tidybot.interfaces.camera_interface.FakeCameraInterface
+      # Off-host render source: subscribes to the JPEG image publisher running
+      # inside the marker-detector daemon. Lets `record.video=true` work on the
+      # real pipeline without the on-robot base camera being wired up.
+      renderer:
+        _target_: prpl_tidybot.rendering.CeilingCameraRenderer
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.Shelf3DPerceiver
+      target_source:
+        _target_: prpl_tidybot.real_sim.perceivers.target_source.MarkerDetectorTargetSource
+        marker_id: ${env.cube_marker_id}
+        target_z: ${env.cube_marker_z}
+      shelf_pose: ${env.shelf_pose}
+    plan_executor: ${env.pipelines.fake.plan_executor}
