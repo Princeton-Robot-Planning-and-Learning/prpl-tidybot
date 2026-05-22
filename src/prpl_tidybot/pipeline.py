@@ -79,10 +79,20 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
         )
         perceiver = RecordingPerceiver(perceiver, recorder)
 
+    # `hydra.utils.instantiate(_recursive_=True, _convert_="all")` resolves
+    # any `_target_:` blocks nested inside make_kwargs / env_model_kwargs
+    # (e.g. a `Shelf3DEnvConfig` wrapping a `Pose` for a custom shelf_pose).
+    # `_convert_="all"` returns plain Python objects rather than OmegaConf
+    # wrappers — without it, dataclass field defaults like
+    # `Kinematic3DEnvConfig.robot_base_home_pose: SE2Pose` get re-wrapped
+    # as structured configs and downstream `.to_se3(...)` method calls fail
+    # with "Key 'to_se3' not in 'SE2Pose'".
     env_models = build_planner_env_models(
         cfg.env.env_name,
-        cfg.env.make_kwargs,
-        cfg.env.env_model_kwargs,
+        hydra.utils.instantiate(cfg.env.make_kwargs, _recursive_=True, _convert_="all"),
+        hydra.utils.instantiate(
+            cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
+        ),
     )
 
     agent: BilevelPlanningAgent = BilevelPlanningAgent(

@@ -5,8 +5,18 @@
 env_name: shelf3d
 make_kwargs:
   id: kinder/KinematicShelf3D-o1-v0
+# Threads the perceiver's shelf_pose through to the bilevel-planning agent's
+# internal Shelf3DEnvConfig so the planner reasons about the shelf at the
+# same location the perceiver reports it. Without this the env_model's
+# internal sim would default to Shelf3DEnvConfig.shelf_pose = (2.0, 2.4, 0.02)
+# and the planner would emit base motion to the wrong place.
 env_model_kwargs:
   num_objects: 1
+  config:
+    _target_: kinder.envs.kinematic3d.shelf3d.Shelf3DEnvConfig
+    shelf_pose:
+      _target_: pybullet_helpers.geometry.Pose
+      position: ${env.shelf_pose}
 
 # Used by the fake-mode target source: where the agent thinks the cube is.
 # (Sim mode reads the cube from the kinder env directly; real mode pulls it
