@@ -28,20 +28,20 @@ target_offset: [0.55, 0.0, 0.75]
 #
 # arm_advance_radius: how close the perceived joints have to be to the
 # current cursor target before the cursor jumps to the next planned
-# waypoint. Smaller → tighter trajectory tracking (cursor advances later,
-# so OTG decelerates more between waypoints; visibly stepped motion at
-# fine granularities). Larger → smoother / faster motion but the cursor
-# can skip via-points if it gets bigger than typical inter-waypoint spacing.
-# 0.4 stays comfortably outside the OTG decel zone for the dominant
-# shoulder joints — good for unmarked filler waypoints. 0.1 is a
-# reasonable starting value for tight tracking; lower if you want even
-# tighter, accepting visible accel/decel jerks per waypoint.
+# waypoint. 0.4 (default) stays comfortably outside the OTG decel zone
+# for the dominant Kinova shoulder joints, so the arm cruises smoothly
+# between waypoints. Try smaller values (e.g. 0.05–0.1) for tighter
+# trajectory tracking — at that scale the OTG decelerates between
+# waypoints and the motion is visibly stepped per waypoint, which is
+# easier to interrupt but slower wall-clock. Don't make this bigger
+# than the typical inter-waypoint spacing in joint-space, or the
+# cursor will skip via-points.
 #
-# arm_arrival_tolerance: how close the perceived joints have to be to the
-# final waypoint for the executor to declare done(). The compliant
-# controller has a steady-state lag of ~0.1 on the dominant joints, so
-# below ~0.1 the executor will spin until max_iter_total.
-arm_advance_radius: 0.1
+# arm_arrival_tolerance: how close the perceived joints have to be to
+# the final waypoint for the executor to declare done(). The compliant
+# controller has a steady-state lag of ~0.1 on the dominant joints,
+# so below ~0.1 the executor will spin until max_iter_total.
+arm_advance_radius: 0.4
 arm_arrival_tolerance: 0.4
 
 pipelines:
