@@ -11,10 +11,9 @@ Named targets (see ``_TARGETS`` below):
 
   * ``home`` — gripper out in front of the base, facing forward (same pose
     as ``test_arm_ik_home``)
-  * ``floor`` — gripper reaching down in front of the base, ~50 cm above
-    the floor with the gripper pointed straight down (kept high for safety;
-    lower the z in ``_TARGETS`` once the motion is validated). Confirm
-    clear floor in front of the robot before running this target.
+  * ``floor`` — gripper reaching down in front of the base, ~25 cm above
+    the floor and ~30 cm in front, with the gripper pointed straight down.
+    Confirm clear floor in front of the robot before running this target.
 
 Each trajectory is discretised into ``--n-waypoints`` evenly spaced joint
 configurations (wrap-aware via pybullet-helpers' ``interpolate_joints``)
@@ -83,12 +82,12 @@ _TARGETS = {
         np.array([0.5, 0.5, 0.5, 0.5]),
     ),  # gripper out in front, facing forward (same as test_arm_ik_home)
     "floor": (
-        np.array([0.45, 0.0, 0.50]),
+        np.array([0.30, 0.0, 0.25]),
         np.array([1.0, 0.0, 0.0, 0.0]),
-    ),  # ~50 cm above floor in front of the base, gripper pointing down.
-    # The quat is a 180° rotation about world-x — that's the rotation that
-    # maps the EE +z axis (the gripper-pointing direction at HOME) from world
-    # +x (forward) to world -z (down). Verified empirically via pybullet FK.
+    ),  # ~25 cm above floor, ~30 cm in front of the base, gripper pointing
+    # down. The quat is a 180° rotation about world-x — maps EE +z (the
+    # gripper-pointing direction at HOME) from world +x (forward) to world
+    # -z (down). Verified empirically via pybullet FK.
 }
 
 
