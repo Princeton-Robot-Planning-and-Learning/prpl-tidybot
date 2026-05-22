@@ -12,6 +12,10 @@ import math
 from typing import Any
 
 from kinder.envs.kinematic3d.base_motion3d import BaseMotion3DObjectCentricState
+from kinder.envs.kinematic3d.ground3d import (
+    Ground3DEnvConfig,
+    Ground3DObjectCentricState,
+)
 from kinder.envs.kinematic3d.motion3d import Motion3DObjectCentricState
 from kinder.envs.kinematic3d.object_types import (
     Kinematic3DCuboidType,
@@ -31,6 +35,12 @@ from prpl_tidybot.real_sim.perceivers.target_source import TargetSource
 from prpl_tidybot.structs import TidyBotObservation
 
 _DEFAULT_CUBE_HALF_EXTENTS = PrplLab3DEnvConfig().block_half_extents
+_GROUND_BLOCK_HALF = Ground3DEnvConfig().block_size / 2
+_DEFAULT_GROUND_CUBE_HALF_EXTENTS = (
+    _GROUND_BLOCK_HALF,
+    _GROUND_BLOCK_HALF,
+    _GROUND_BLOCK_HALF,
+)
 
 
 class KinematicRobotPerceiverBase(
@@ -255,4 +265,74 @@ class Motion3DPerceiver(KinematicRobotPerceiverBase):
                 "y": obs.map_base_pose.y + ox * sin_t + oy * cos_t,
                 "z": oz,
             }
+        }
+
+
+class Ground3DPerceiver(KinematicRobotPerceiverBase):
+    """Perceiver for kinder/Ground3D-o{N}-v0.
+
+    Emits a single `cube0` of `Kinematic3DCuboidType` whose `(x, y, z)`
+    comes from a `TargetSource`. Same pattern as `BaseMotion3DPerceiver`:
+    in fake / sim modes the source is a `ConstantTargetSource` threaded
+    in from the env yaml; in real mode it's a
+    `MarkerDetectorTargetSource` for the ArUco that marks the cube. The
+    marker detector only provides `(x, y, z)` so the cube's orientation
+    defaults to identity (z-up, lying flat). The cube target is cached
+    once per :meth:`reset` for the same control-loop-latency reason as
+    in `BaseMotion3DPerceiver` — the cube is stationary during a
+    rollout by design.
+
+    Only emits `cube0` — Ground3D-o{>1} variants (with obstructing
+    cubes) are not currently supported by this perceiver, since we
+    have no way to detect more than one marker simultaneously.
+    """
+
+    def __init__(
+        self,
+        target_source: TargetSource,
+        cube_half_extents: tuple[
+            float, float, float
+        ] = _DEFAULT_GROUND_CUBE_HALF_EXTENTS,
+        robot_name: str = "robot",
+    ) -> None:
+        super().__init__(robot_name=robot_name)
+        self._target_source = target_source
+        self._cube_half_extents = tuple(cube_half_extents)
+        self._cached_cube_target: tuple[float, float, float] | None = None
+
+    @property
+    def _state_cls(self) -> type[ObjectCentricState]:
+        return Ground3DObjectCentricState
+
+    def reset(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> ObjectCentricState:
+        self._cached_cube_target = self._target_source.get_target()
+        return super().reset(obs, info)
+
+    def _detect_objects(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> dict[Object, dict[str, float]]:
+        del obs, info
+        if self._cached_cube_target is None:
+            # Defensive — reset() should have run first; populate lazily
+            # so callers that call step() before reset() still get a cube.
+            self._cached_cube_target = self._target_source.get_target()
+        cube_x, cube_y, cube_z = self._cached_cube_target
+        hx, hy, hz = self._cube_half_extents
+        return {
+            Object("cube0", Kinematic3DCuboidType): {
+                "pose_x": cube_x,
+                "pose_y": cube_y,
+                "pose_z": cube_z,
+                "pose_qx": 0.0,
+                "pose_qy": 0.0,
+                "pose_qz": 0.0,
+                "pose_qw": 1.0,
+                "grasp_active": 0.0,
+                "object_type": 0.0,
+                "half_extent_x": hx,
+                "half_extent_y": hy,
+                "half_extent_z": hz,
+            },
         }
