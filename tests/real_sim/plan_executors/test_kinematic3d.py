@@ -106,26 +106,23 @@ def test_base_only_trajectory_delegates_to_base_executor():
     assert executor.done(_make_state(base_xytheta=(1.0, 0.0, 0.0))) is True
 
 
-def test_trajectory_with_arm_segment_raises_when_dispatcher_loads_it():
-    """An arm segment routes to the stub arm executor, which raises at set_trajectory
-    time.
-
-    With an arm-only trajectory the raise surfaces from the dispatcher's set_trajectory
-    (it eagerly loads the first segment).
-    """
+def test_trajectory_with_arm_segment_raises_when_no_arm_executor_configured():
+    """An arm segment with no arm_executor wired in surfaces a clear NotImplementedError
+    from the dispatcher when the segment is loaded."""
     s0 = _make_state()
     arm_pair = _arm_action(arm_deltas=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    executor = Kinematic3DPlanExecutor()
-    with pytest.raises(NotImplementedError, match="ArmMotion3DPlanExecutor"):
+    executor = Kinematic3DPlanExecutor()  # no arm_executor
+    with pytest.raises(NotImplementedError, match="arm_executor was configured"):
         executor.set_trajectory([(s0, arm_pair)])
 
 
 def test_base_then_arm_trajectory_runs_base_then_raises_at_arm_segment():
     """A trajectory of [base, arm] runs the base segment to completion, then raises
-    NotImplementedError when the dispatcher loads the arm segment."""
+    NotImplementedError when the dispatcher tries to load the arm segment with no
+    arm_executor configured."""
     s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
     s1 = _make_state(base_xytheta=(0.5, 0.0, 0.0))
-    executor = _tight_executor()
+    executor = _tight_executor()  # no arm_executor
     executor.set_trajectory(
         [
             (s0, _base_action(dx=0.5)),
@@ -136,9 +133,9 @@ def test_base_then_arm_trajectory_runs_base_then_raises_at_arm_segment():
     # Base segment runs.
     executor.step(s0)
     # Robot reaches the base final waypoint; done() then tries to load the arm
-    # segment via the stub executor, which raises immediately.
+    # segment, which raises from the dispatcher.
     s_after_base = _make_state(base_xytheta=(0.5, 0.0, 0.0))
-    with pytest.raises(NotImplementedError, match="ArmMotion3DPlanExecutor"):
+    with pytest.raises(NotImplementedError, match="arm_executor was configured"):
         executor.done(s_after_base)
 
 
