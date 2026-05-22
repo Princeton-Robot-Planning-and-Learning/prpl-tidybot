@@ -39,7 +39,7 @@ Run on the robot (the arm server must already be up):
 
 import argparse
 import sys
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import pybullet as p
@@ -105,8 +105,13 @@ def _run_trajectory(
     obs,
     state: ObjectCentricState,
     target: Sequence[float],
+    distance_fn: Callable[[Sequence[float], Sequence[float]], float],
 ) -> tuple[object, ObjectCentricState]:
     """Run one trajectory through the env/executor loop.
+
+    ``err_to_target`` is logged in the same weighted-L1 metric the executor uses for its
+    arrival check, so the printed value can be compared directly against
+    ``arrival_tolerance``.
 
     Returns final (obs, state).
     """
@@ -117,7 +122,7 @@ def _run_trajectory(
         real_action, _ = executor.step(state)
         cmd_str = "  ".join(f"{j:+.3f}" for j in real_action.arm_goal)
         joints_str = "  ".join(f"{j:+.3f}" for j in obs.arm_conf)
-        err = float(np.linalg.norm(np.array(obs.arm_conf) - np.array(target)))
+        err = float(distance_fn(list(obs.arm_conf), list(target)))
         print(
             f"step {step + 1:03d}  joints=[{joints_str}]  "
             f"cmd=[{cmd_str}]  err_to_target={err:.4f}"
@@ -151,7 +156,7 @@ def main() -> int:
     home_str = "  ".join(f"{j:+.3f}" for j in home_arm_conf)
     print(f"HOME joint angles: [{home_str}]")
 
-    print("Building pybullet TidyBotKinova for the joint distance function...")
+    print("Building pybullet Kinova arm for the joint distance function...")
     # Standalone 7-DOF Kinova arm (no Robotiq gripper) — its arm_joints is the 7-joint
     # kinematic chain to the end effector, matching the 7-element configs we get from
     # obs.arm_conf. Using TidyBotKinova / KinovaGen3RobotiqGripperPyBulletRobot here
@@ -171,11 +176,16 @@ def main() -> int:
     )
     env = RealTidyBotEnv(interface=interface)
     perceiver = PrplLab3DPerceiver()
+    # arrival_tolerance matches advance_radius: if the cursor was willing to
+    # advance through this waypoint mid-trajectory, it's willing to terminate
+    # on it as the final. Tighter values (e.g. 0.1) are unreachable against
+    # the compliant controller's steady-state lag — joint 5 alone can sit
+    # ~0.1 rad off target indefinitely.
     arm_executor = StreamingArmMotion3DPlanExecutor(
         distance_fn=distance_fn,
         advance_radius=0.2,
-        arrival_tolerance=0.1,
-        max_iter_total=2000,
+        arrival_tolerance=0.2,
+        max_iter_total=300,
     )
     executor = Kinematic3DPlanExecutor(arm_executor=arm_executor)
 
@@ -200,6 +210,7 @@ def main() -> int:
             obs,
             state,
             target=home_arm_conf,
+            distance_fn=distance_fn,
         )
 
         # q_start is the perceived arm conf, not home_arm_conf — the OTG may have
@@ -221,6 +232,7 @@ def main() -> int:
             obs,
             state,
             target=RETRACT_ARM_CONF.tolist(),
+            distance_fn=distance_fn,
         )
         return 0
     finally:
