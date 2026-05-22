@@ -59,7 +59,6 @@ from pybullet_helpers.joint import (
     interpolate_joints,
 )
 from pybullet_helpers.motion_planning import create_joint_distance_fn
-from pybullet_helpers.robots.kinova import KinovaGen3NoGripperPyBulletRobot
 from relational_structs import ObjectCentricState
 
 from prpl_tidybot.interfaces.base_interface import FakeBaseInterface
@@ -70,6 +69,7 @@ from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
 from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
     StreamingArmMotion3DPlanExecutor,
 )
+from prpl_tidybot.real_sim.plan_executors.distance_factories import create_kinova_robot
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExecutor
 from prpl_tidybot.structs import TidyBotObservation
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
@@ -187,13 +187,7 @@ def main() -> int:
     print(f"{target_label} joint angles: [{target_str}]")
 
     print("Building pybullet Kinova arm for the joint distance function...")
-    # Standalone 7-DOF Kinova arm (no Robotiq gripper) — its arm_joints is the 7-joint
-    # kinematic chain to the end effector, matching the 7-element configs we get from
-    # obs.arm_conf. Using TidyBotKinova / KinovaGen3RobotiqGripperPyBulletRobot here
-    # would extend arm_joints with the 6 Robotiq finger ids → 13 entries, and the
-    # length check in get_jointwise_difference would reject our 7-element configs.
-    client_id = p.connect(p.DIRECT)
-    pb_robot = KinovaGen3NoGripperPyBulletRobot(physics_client_id=client_id)
+    pb_robot = create_kinova_robot()
     distance_fn = create_joint_distance_fn(
         pb_robot, metric="weighted_joints", weight_base=0.9
     )
@@ -274,7 +268,7 @@ def main() -> int:
         return 0
     finally:
         interface.arm_interface.close()
-        p.disconnect(client_id)
+        p.disconnect(pb_robot.physics_client_id)
 
 
 if __name__ == "__main__":

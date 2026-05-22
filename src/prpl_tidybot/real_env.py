@@ -80,3 +80,13 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         if self._renderer is not None:
             return self._renderer.render()
         return self._interface.get_base_image()
+
+    def close(self) -> None:
+        """Tear down the underlying interface (arm cyclic, base RPC, cameras).
+
+        Required to avoid cross-session state bleed-through: without this,
+        Python process exit doesn't trigger the server-side ``stop_cyclic`` /
+        ``disconnect`` calls and the next rollout starts against an arm that's
+        still in low-level torque-control mode from the previous one.
+        """
+        self._interface.close()

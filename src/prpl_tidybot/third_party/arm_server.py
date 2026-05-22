@@ -39,6 +39,19 @@ class Arm:
             time.sleep(0.75)  # Wait for arm to stop moving
             self.arm.stop_cyclic()
 
+        # Drain any leftover commands from the previous session. The
+        # command_queue is reused across resets (passed into each new
+        # JointCompliantController), so a stale (qpos, gripper) item from
+        # the previous rollout would otherwise be the first thing the new
+        # controller reads, briefly steering the OTG toward the previous
+        # session's target before the current session's first command
+        # arrives. Mirrors issue #54's pattern for the base.
+        while not self.command_queue.empty():
+            try:
+                self.command_queue.get_nowait()
+            except queue.Empty:
+                break
+
         # Clear faults
         self.arm.clear_faults()
 

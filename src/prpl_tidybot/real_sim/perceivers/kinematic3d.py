@@ -8,9 +8,11 @@ the non-robot object detection differs per env.
 """
 
 import abc
+import math
 from typing import Any
 
 from kinder.envs.kinematic3d.base_motion3d import BaseMotion3DObjectCentricState
+from kinder.envs.kinematic3d.motion3d import Motion3DObjectCentricState
 from kinder.envs.kinematic3d.object_types import (
     Kinematic3DCuboidType,
     Kinematic3DEnvTypeFeatures,
@@ -200,5 +202,57 @@ class BaseMotion3DPerceiver(KinematicRobotPerceiverBase):
                 "x": x,
                 "y": y,
                 "z": z,
+            }
+        }
+
+
+class Motion3DPerceiver(KinematicRobotPerceiverBase):
+    """Perceiver for kinder/Motion3D-v0.
+
+    Emits a single `target` of `Kinematic3DPointType` computed as the
+    robot's current base pose plus a fixed `target_offset` interpreted
+    in the robot's heading frame: `ox` forward, `oy` left, `oz` world-
+    up. Motion3D is an arm-only env, so tying the target to the
+    robot's actual base pose makes it always reachable regardless of
+    where the robot happens to be sitting in the lab (the arm reach
+    envelope is base-relative, but the kinder env's default target
+    sampler picks world-frame points that may be far from a real
+    robot's actual pose — see the No-Plan-Found we hit before this
+    refactor).
+
+    No marker-detector source is involved on this perceiver — Motion3D
+    doesn't need one, the target is fully determined by the perceived
+    base pose and the configured offset.
+    """
+
+    def __init__(
+        self,
+        target_offset: tuple[float, float, float],
+        robot_name: str = "robot",
+    ) -> None:
+        super().__init__(robot_name=robot_name)
+        self._target_offset = (
+            float(target_offset[0]),
+            float(target_offset[1]),
+            float(target_offset[2]),
+        )
+
+    @property
+    def _state_cls(self) -> type[ObjectCentricState]:
+        return Motion3DObjectCentricState
+
+    def _detect_objects(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> dict[Object, dict[str, float]]:
+        del info
+        ox, oy, oz = self._target_offset
+        theta = obs.map_base_pose.theta()
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        return {
+            Object("target", Kinematic3DPointType): {
+                "x": obs.map_base_pose.x + ox * cos_t - oy * sin_t,
+                "y": obs.map_base_pose.y + ox * sin_t + oy * cos_t,
+                "z": oz,
             }
         }

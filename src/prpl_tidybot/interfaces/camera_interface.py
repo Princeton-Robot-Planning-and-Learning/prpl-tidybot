@@ -19,6 +19,9 @@ class CameraInterface(abc.ABC):
     def get_base_image(self) -> Image:
         """Get the current base image."""
 
+    def close(self) -> None:
+        """Release camera resources; real-resource subclasses override."""
+
 
 class FakeCameraInterface(CameraInterface):
     """Fake camera interface that returns black images of the expected
