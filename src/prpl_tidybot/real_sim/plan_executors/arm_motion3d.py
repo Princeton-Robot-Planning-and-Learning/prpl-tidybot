@@ -137,6 +137,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         advance_radius: float = 0.2,
         arrival_tolerance: float = 0.1,
         max_iter_total: int = 2000,
+        gripper_dwell_ticks: int = 0,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if advance_radius <= 0:
@@ -145,15 +146,20 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             raise ValueError("arrival_tolerance must be > 0")
         if max_iter_total <= 0:
             raise ValueError("max_iter_total must be > 0")
+        if gripper_dwell_ticks < 0:
+            raise ValueError("gripper_dwell_ticks must be >= 0")
         self._distance_fn = distance_fn
         self._advance_radius = advance_radius
         self._arrival_tolerance = arrival_tolerance
         self._max_iter_total = max_iter_total
+        self._gripper_dwell_ticks = gripper_dwell_ticks
 
         self._targets: list[JointPositions] = []
         self._cursor: int = 0
         self._tick_count: int = 0
         self._done_latched: bool = False
+        self._gripper_cursor: int = -1
+        self._gripper_ticks_remaining: int = 0
 
     def _on_set_trajectory(self) -> None:
         self._targets = [
@@ -163,6 +169,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._cursor = 0
         self._tick_count = 0
         self._done_latched = False
+        self._gripper_cursor = -1
+        self._gripper_ticks_remaining = 0
 
     def step(
         self, sim_state: ObjectCentricState
@@ -180,14 +188,21 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             sim_state, target, sim_action, self._robot_name, planned_finger
         )
         self._tick_count += 1
-        # After issuing one gripper command, advance cursor to the next pair.
-        # Gripper-close pairs all have arm_delta=0 (target = current grasp
-        # joints), so _advance_cursor skips them in a single tick. Advancing
-        # by 1 here ensures each gripper pair is executed for exactly one
-        # tick; the Kinova servo keeps driving to the commanded target between
-        # policy ticks, so a single command per planning step is sufficient.
+        # Advance past a gripper pair after gripper_dwell_ticks extra ticks.
+        # With gripper_dwell_ticks=0 the cursor advances on the very next tick
+        # after the command is issued (original behaviour, correct for sim/fake
+        # where FakeInterface stores the target immediately).  In real mode set
+        # gripper_dwell_ticks to something like 20 (≈5 s at 0.25 s/tick) so the
+        # arm stays at the grasp position while the Kinova gripper physically
+        # closes around the object before retract begins.
         if _is_gripper_cmd(sim_action) and self._cursor + 1 < len(self._targets):
-            self._cursor += 1
+            if self._cursor != self._gripper_cursor:
+                self._gripper_cursor = self._cursor
+                self._gripper_ticks_remaining = self._gripper_dwell_ticks
+            if self._gripper_ticks_remaining > 0:
+                self._gripper_ticks_remaining -= 1
+            else:
+                self._cursor += 1
         return action, sim_action
 
     def done(self, sim_state: ObjectCentricState) -> bool:

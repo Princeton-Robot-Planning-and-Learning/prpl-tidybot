@@ -407,8 +407,12 @@ def test_gripper_stays_closed_during_retract_after_grasp():
             _arm_action(arm_deltas=[-1.0, 0, 0, 0, 0, 0, 0]),
         ),
     ]
+    # gripper_dwell_ticks=0: cursor advances immediately after one gripper tick
     executor = StreamingArmMotion3DPlanExecutor(
-        distance_fn=_l1_distance, advance_radius=0.5, arrival_tolerance=0.05
+        distance_fn=_l1_distance,
+        advance_radius=0.5,
+        arrival_tolerance=0.05,
+        gripper_dwell_ticks=0,
     )
     executor.set_trajectory(pairs)
 
@@ -420,3 +424,45 @@ def test_gripper_stays_closed_during_retract_after_grasp():
     assert real_action.gripper_goal == pytest.approx(1.0), (
         "retract phase must hold gripper_goal=1.0 using planned finger, not perceived"
     )
+
+
+def test_gripper_dwell_holds_arm_at_grasp():
+    """gripper_dwell_ticks > 0 keeps the arm at the grasp position for that many
+    extra ticks after issuing the close command, before advancing to retract.
+
+    This lets the Kinova gripper physically close around the object before the
+    arm starts retracting.
+    """
+    grasp_joints = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pairs = [
+        (
+            _make_state(arm_conf=grasp_joints, gripper=0.4),
+            _arm_action(arm_deltas=[0.0] * 7, gripper_cmd=-1.0),
+        ),
+        (
+            _make_state(arm_conf=grasp_joints, gripper=1.0),
+            _arm_action(arm_deltas=[-1.0, 0, 0, 0, 0, 0, 0]),
+        ),
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.5,
+        arrival_tolerance=0.05,
+        gripper_dwell_ticks=2,
+    )
+    executor.set_trajectory(pairs)
+
+    perceived = _make_state(arm_conf=grasp_joints, gripper=0.4)
+
+    # Ticks 1–3: dwell counts down (2→1→0), cursor does not advance yet; arm at grasp.
+    # The cursor advances at the END of the tick when dwell_remaining hits 0, so the
+    # retract target first appears on tick 4.
+    for tick in range(1, 4):
+        a, _ = executor.step(perceived)
+        assert a.gripper_goal == pytest.approx(1.0), f"tick {tick}: gripper_goal"
+        assert a.arm_goal[0] == pytest.approx(1.0), f"tick {tick}: arm must hold at grasp"
+
+    # Tick 4: cursor is now at the retract pair → arm moves to home (0.0)
+    action4, _ = executor.step(perceived)
+    assert action4.gripper_goal == pytest.approx(1.0)
+    assert action4.arm_goal[0] == pytest.approx(0.0), "arm must retract after dwell ends"
