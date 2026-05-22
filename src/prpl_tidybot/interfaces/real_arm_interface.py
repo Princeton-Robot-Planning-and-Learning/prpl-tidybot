@@ -22,15 +22,8 @@ class RealArmInterface(ArmInterface):
     def get_gripper_state(self) -> float:
         return self.arm.get_gripper_position()
 
-    def execute_action(self, action: list[float]) -> None:
-        self.arm.execute_action_angular(
-            qpos=action, gripper_pos=self.arm.get_gripper_position()
-        )
-
-    def execute_gripper_action(self, action: float) -> None:
-        self.arm.execute_action_angular(
-            qpos=self.arm.get_joint_angles(), gripper_pos=action
-        )
+    def execute_action(self, arm_goal: list[float], gripper_goal: float) -> None:
+        self.arm.execute_action_angular(qpos=arm_goal, gripper_pos=gripper_goal)
 
     def close(self) -> None:
         """Tear down the RPC connection and stop the low-level arm control loop."""

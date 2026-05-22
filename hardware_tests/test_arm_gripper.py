@@ -28,14 +28,14 @@ def main() -> int:
         for i in range(N_STEPS):
             gripper = arm.get_gripper_state()
             print(f"step {i + 1:02d}/{N_STEPS}  gripper={gripper:.3f}")
-            arm.execute_gripper_action(GRIPPER_CLOSED)
+            arm.execute_action(arm.get_arm_state(), GRIPPER_CLOSED)
             time.sleep(POLICY_CONTROL_PERIOD)
 
         print("Opening gripper...")
         for i in range(N_STEPS):
             gripper = arm.get_gripper_state()
             print(f"step {i + 1:02d}/{N_STEPS}  gripper={gripper:.3f}")
-            arm.execute_gripper_action(GRIPPER_OPEN)
+            arm.execute_action(arm.get_arm_state(), GRIPPER_OPEN)
             time.sleep(POLICY_CONTROL_PERIOD)
 
         return 0

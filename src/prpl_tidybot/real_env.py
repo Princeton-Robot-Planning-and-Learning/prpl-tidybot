@@ -68,8 +68,9 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         self._converter.update(self._last_obs.map_base_pose, self._last_obs.base_pose)
         target_odom = self._converter.convert_pose(action.base_pose_target_map)
         self._interface.base_interface.execute_action(target_odom)
-        self._interface.arm_interface.execute_action(action.arm_goal)
-        self._interface.arm_interface.execute_gripper_action(action.gripper_goal)
+        self._interface.arm_interface.execute_action(
+            action.arm_goal, action.gripper_goal
+        )
         time.sleep(self._control_period)
         obs = self._interface.get_observation()
         self._last_obs = obs

@@ -29,7 +29,7 @@ def main() -> int:
             joints_str = "  ".join(f"{j:+.3f}" for j in joints)
             err = np.linalg.norm(np.array(joints) - np.array(target))
             print(f"step {i + 1:02d}/{N_STEPS}  joints=[{joints_str}]  err={err:.4f}")
-            arm.execute_action(target)
+            arm.execute_action(target, arm.get_gripper_state())
             time.sleep(POLICY_CONTROL_PERIOD)
         return 0
     finally:
