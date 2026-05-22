@@ -28,7 +28,7 @@ cube_marker_z: 0.025
 # `kinder.envs.kinematic3d.shelf3d.Shelf3DEnvConfig` so that the perceived
 # shelf and the planner's internal env model agree on where the shelf is;
 # override here per-lab once the real shelf is staged.
-shelf_pose: [2.0, 2.4, 0.02]
+shelf_pose: [1.5, 1.5, 0.02]
 
 # Streaming arm executor knobs (weighted-L1 joint metric units). See
 # conf/env/motion3d.yaml for the full discussion of trade-offs; the
