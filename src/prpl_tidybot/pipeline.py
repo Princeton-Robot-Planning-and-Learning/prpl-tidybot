@@ -102,82 +102,92 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
         plan_executor=plan_executor,
     )
 
-    state = runner.reset(seed=cfg.seed)
-    total_reward = 0.0
-    steps = 0
-    finish_reason = "max_steps_reached"
+    # Wrap the rollout in try/finally so `real_env.close()` always runs —
+    # otherwise Python process exit leaves the arm cyclic torque-control
+    # loop running on the server (and the base RPC session open), and the
+    # next rollout / hardware test inherits buffered state from this one
+    # (see issue #54 for the base manifestation; the arm has an analogous
+    # failure mode where Kortex's high-level controller appears to retain
+    # the previous low-level trajectory state).
+    try:
+        state = runner.reset(seed=cfg.seed)
+        total_reward = 0.0
+        steps = 0
+        finish_reason = "max_steps_reached"
 
-    # Optional plan-preview gate. Render the agent's planned trajectory
-    # through a shadow sim into preview.mp4 under the log dir and prompt
-    # the operator before any real motion is commanded. Rejection raises
-    # AgentFailure, which the main loop's existing handler treats as a
-    # clean rollout end (the executor never gets a chance to step). Gated
-    # on `cfg.mode == "real"` even when enabled — sim / fake / test runs
-    # shouldn't block on stdin just because the global default is on.
-    preview_cfg = cfg.get("preview")
-    if (
-        preview_cfg is not None
-        and bool(preview_cfg.get("enabled"))
-        and cfg.mode == "real"
-        and resolved_log_dir is not None
-    ):
-        try:
-            preview_or_abort(
-                planned_states=planned_states_from_agent(agent),
-                shadow_sim=hydra.utils.instantiate(cfg.env.pipelines.sim.real_env),
-                log_dir=resolved_log_dir,
-                seed=cfg.seed,
-                fps=int(preview_cfg.get("fps", 10)),
-            )
-        except AgentFailure as e:
-            finish_reason = f"agent_failure: {e}"
-            return RolloutSummary(
-                env_name=cfg.env.env_name,
-                mode=cfg.mode,
-                seed=cfg.seed,
-                steps=0,
-                finish_reason=finish_reason,
-                total_reward=0.0,
-                final_state=state,
-                trajectory_dir=(
-                    recorder.trajectory_dir if recorder is not None else None
-                ),
-                video_path=(recorder.finish() if recorder is not None else None),
-            )
+        # Optional plan-preview gate. Render the agent's planned trajectory
+        # through a shadow sim into preview.mp4 under the log dir and prompt
+        # the operator before any real motion is commanded. Rejection raises
+        # AgentFailure, which the main loop's existing handler treats as a
+        # clean rollout end (the executor never gets a chance to step). Gated
+        # on `cfg.mode == "real"` even when enabled — sim / fake / test runs
+        # shouldn't block on stdin just because the global default is on.
+        preview_cfg = cfg.get("preview")
+        if (
+            preview_cfg is not None
+            and bool(preview_cfg.get("enabled"))
+            and cfg.mode == "real"
+            and resolved_log_dir is not None
+        ):
+            try:
+                preview_or_abort(
+                    planned_states=planned_states_from_agent(agent),
+                    shadow_sim=hydra.utils.instantiate(cfg.env.pipelines.sim.real_env),
+                    log_dir=resolved_log_dir,
+                    seed=cfg.seed,
+                    fps=int(preview_cfg.get("fps", 10)),
+                )
+            except AgentFailure as e:
+                finish_reason = f"agent_failure: {e}"
+                return RolloutSummary(
+                    env_name=cfg.env.env_name,
+                    mode=cfg.mode,
+                    seed=cfg.seed,
+                    steps=0,
+                    finish_reason=finish_reason,
+                    total_reward=0.0,
+                    final_state=state,
+                    trajectory_dir=(
+                        recorder.trajectory_dir if recorder is not None else None
+                    ),
+                    video_path=(recorder.finish() if recorder is not None else None),
+                )
 
-    for _ in range(cfg.max_eval_steps):
-        try:
-            state, reward, terminated, truncated, _ = runner.step()
-        except AgentFailure as e:
-            # The bilevel planner produces a finite action sequence; once
-            # it's exhausted the agent raises. For fake mode that's the
-            # natural rollout end (the fake has no goal-detection to
-            # terminate the env).
-            finish_reason = f"agent_failure: {e}"
-            break
-        steps += 1
-        total_reward += float(reward)
-        if terminated:
-            finish_reason = "terminated"
-            break
-        if truncated:
-            finish_reason = "truncated"
-            break
+        for _ in range(cfg.max_eval_steps):
+            try:
+                state, reward, terminated, truncated, _ = runner.step()
+            except AgentFailure as e:
+                # The bilevel planner produces a finite action sequence; once
+                # it's exhausted the agent raises. For fake mode that's the
+                # natural rollout end (the fake has no goal-detection to
+                # terminate the env).
+                finish_reason = f"agent_failure: {e}"
+                break
+            steps += 1
+            total_reward += float(reward)
+            if terminated:
+                finish_reason = "terminated"
+                break
+            if truncated:
+                finish_reason = "truncated"
+                break
 
-    trajectory_dir = recorder.trajectory_dir if recorder is not None else None
-    video_path = recorder.finish() if recorder is not None else None
+        trajectory_dir = recorder.trajectory_dir if recorder is not None else None
+        video_path = recorder.finish() if recorder is not None else None
 
-    return RolloutSummary(
-        env_name=cfg.env.env_name,
-        mode=cfg.mode,
-        seed=cfg.seed,
-        steps=steps,
-        finish_reason=finish_reason,
-        total_reward=total_reward,
-        final_state=state,
-        trajectory_dir=trajectory_dir,
-        video_path=video_path,
-    )
+        return RolloutSummary(
+            env_name=cfg.env.env_name,
+            mode=cfg.mode,
+            seed=cfg.seed,
+            steps=steps,
+            finish_reason=finish_reason,
+            total_reward=total_reward,
+            final_state=state,
+            trajectory_dir=trajectory_dir,
+            video_path=video_path,
+        )
+    finally:
+        real_env.close()
 
 
 def _resolve_log_dir(explicit: Path | str | None) -> Path | None:

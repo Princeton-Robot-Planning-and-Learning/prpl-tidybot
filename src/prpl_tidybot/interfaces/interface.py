@@ -73,6 +73,22 @@ class Interface(abc.ABC):
             base_camera=self.get_base_image(),
         )
 
+    def close(self) -> None:
+        """Tear down hardware connections in all sub-interfaces.
+
+        Important for real-resource subclasses (``RealArmInterface`` /
+        ``RealBaseInterface`` / ``RealCameraInterface``): without this,
+        leaving the process at the end of a rollout leaves the arm cyclic
+        torque-control loop running on the server, the base RPC session
+        open, etc. — and the next session can pick up buffered state from
+        the previous one (see issue #54 for the base side; the arm has an
+        analogous failure mode where Kortex's internal trajectory state
+        can survive a re-init).
+        """
+        self.arm_interface.close()
+        self.base_interface.close()
+        self.camera_interface.close()
+
 
 class FakeInterface(Interface):
     """A fake interface composing fake arm, base, and camera interfaces."""
