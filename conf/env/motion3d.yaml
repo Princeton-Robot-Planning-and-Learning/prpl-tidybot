@@ -4,6 +4,12 @@
 # kinematic-shelf3d-o1: one operator (MoveToTarget), no pick/place, no fixtures,
 # base stays put. Useful as a first hardware test for the streaming arm
 # plan executor end-to-end through the bilevel planner.
+#
+# The real pipeline uses FakeBaseInterface by default — Motion3D never commands
+# base motion and the perceiver derives the target from base pose + offset, so
+# a real base (and the marker detector daemon backing it) is unnecessary. Only
+# the arm server needs to be running on the NUC. Override `interface.base_interface`
+# to `RealBaseInterface` if you want the actual map pose threaded through.
 
 env_name: motion3d
 make_kwargs:
@@ -61,20 +67,23 @@ pipelines:
       _target_: prpl_tidybot.real_env.RealTidyBotEnv
       interface:
         _target_: prpl_tidybot.interfaces.interface.RealInterface
-        # On-robot wrist/base cameras aren't wired to the perceiver
-        # (perception for Motion3D is fully derived from base pose +
-        # target_offset, no marker needed), and `get_observation` would
-        # otherwise hit NotImplementedError on the real cams.
+        # Motion3D is arm-only: the planner never commands base motion, and
+        # `Motion3DPerceiver` derives the target purely from
+        # `obs.map_base_pose + target_offset`. So the base interface can be
+        # fake — saves needing the base server (or the marker detector
+        # daemon that backs the real base interface's map-frame readings).
+        # With FakeBaseInterface, `obs.map_base_pose` is constant (0, 0, 0),
+        # so the perceived target ends up at world-frame `target_offset`.
+        # Override to `RealBaseInterface` only if you want the actual base
+        # pose threaded through (e.g. for a side-by-side video where the
+        # robot's map position matters).
+        base_interface:
+          _target_: prpl_tidybot.interfaces.base_interface.FakeBaseInterface
+        # On-robot wrist/base cameras aren't wired to the perceiver, and
+        # `get_observation` would otherwise hit NotImplementedError on the
+        # real cams.
         camera_interface:
           _target_: prpl_tidybot.interfaces.camera_interface.FakeCameraInterface
-        base_interface:
-          _target_: prpl_tidybot.interfaces.base_interface.RealBaseInterface
-          marker_detector_host: ${lab.marker_detector_host}
-      # Off-host render source: subscribes to the JPEG image publisher running
-      # inside the marker-detector daemon. Lets `record.video=true` work
-      # on the real pipeline without the on-robot base camera being wired up.
-      renderer:
-        _target_: prpl_tidybot.rendering.CeilingCameraRenderer
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.Motion3DPerceiver
       target_offset: ${env.target_offset}
