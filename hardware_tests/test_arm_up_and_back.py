@@ -1,11 +1,20 @@
-"""Hardware integration test: drive the arm to HOME and back to RETRACT via the
-streaming arm plan executor.
+"""Hardware integration test: drive the arm to a named EE pose and back to RETRACT via
+the streaming arm plan executor.
 
 The motion is split into two trajectories:
 
-  * extend: current joint configuration → HOME (solved via IK on a fixed
-    end-effector pose; same as ``test_arm_ik_home``)
-  * retract: HOME → ``RETRACT_ARM_CONF``
+  * extend: current joint configuration → named EE-pose target (solved via
+    IK on the pose selected by ``--target``)
+  * retract: named target → ``RETRACT_ARM_CONF``
+
+Named targets (see ``_TARGETS`` below):
+
+  * ``home`` — gripper out in front of the base, facing forward (same pose
+    as ``test_arm_ik_home``)
+  * ``floor`` — gripper reaching down in front of the base, ~50 cm above
+    the floor with the gripper pointed straight down (kept high for safety;
+    lower the z in ``_TARGETS`` once the motion is validated). Confirm
+    clear floor in front of the robot before running this target.
 
 Each trajectory is discretised into ``--n-waypoints`` evenly spaced joint
 configurations (wrap-aware via pybullet-helpers' ``interpolate_joints``)
@@ -34,7 +43,8 @@ way) and avoids having to clone a fresh ObjectCentricState per pair.
 
 Run on the robot (the arm server must already be up):
 
-    python hardware_tests/test_arm_up_and_back.py --n-waypoints 50
+    python hardware_tests/test_arm_up_and_back.py --target home --n-waypoints 50
+    python hardware_tests/test_arm_up_and_back.py --target floor --n-waypoints 50
 """
 
 import argparse
@@ -65,8 +75,18 @@ from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExec
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
 from prpl_tidybot.third_party.ik_solver import IKSolver
 
-HOME_POS = np.array([0.456, 0.0, 0.434])
-HOME_QUAT = np.array([0.5, 0.5, 0.5, 0.5])  # (x, y, z, w)
+# Named end-effector poses the test can drive the arm to.
+# Each entry: (position_xyz, quaternion_xyzw).
+_TARGETS = {
+    "home": (
+        np.array([0.456, 0.0, 0.434]),
+        np.array([0.5, 0.5, 0.5, 0.5]),
+    ),  # gripper out in front, facing forward (same as test_arm_ik_home)
+    "floor": (
+        np.array([0.45, 0.0, 0.50]),
+        np.array([0.707, 0.0, 0.707, 0.0]),
+    ),  # ~50 cm above floor in front of the base, gripper pointing down
+}
 
 
 def _build_arm_trajectory(
@@ -134,8 +154,8 @@ def _run_trajectory(
 
 
 def main() -> int:
-    """Move the arm to HOME, then back to RETRACT_ARM_CONF, via the streaming arm
-    executor with the given waypoint count."""
+    """Move the arm to the selected target, then back to RETRACT_ARM_CONF, via the
+    streaming arm executor with the given waypoint count."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--n-waypoints",
@@ -143,18 +163,25 @@ def main() -> int:
         default=50,
         help="Number of waypoints per leg (coarse=2, fine=50).",
     )
+    parser.add_argument(
+        "--target",
+        choices=sorted(_TARGETS),
+        default="home",
+        help="Named end-effector pose to reach before retracting.",
+    )
     args = parser.parse_args()
     if args.n_waypoints < 1:
         parser.error("--n-waypoints must be >= 1")
 
-    print("Solving IK for home pose (seed = RETRACT_ARM_CONF)...")
-    home_arm_conf = (
-        IKSolver()
-        .solve(HOME_POS, HOME_QUAT, RETRACT_ARM_CONF)  # type: ignore[no-untyped-call]
-        .tolist()
-    )
-    home_str = "  ".join(f"{j:+.3f}" for j in home_arm_conf)
-    print(f"HOME joint angles: [{home_str}]")
+    target_pos, target_quat = _TARGETS[args.target]
+    target_label = args.target.upper()
+    print(f"Solving IK for {target_label} pose (seed = RETRACT_ARM_CONF)...")
+    ik_solver = IKSolver()  # type: ignore[no-untyped-call]
+    target_arm_conf = ik_solver.solve(  # type: ignore[no-untyped-call]
+        target_pos, target_quat, RETRACT_ARM_CONF
+    ).tolist()
+    target_str = "  ".join(f"{j:+.3f}" for j in target_arm_conf)
+    print(f"{target_label} joint angles: [{target_str}]")
 
     print("Building pybullet Kinova arm for the joint distance function...")
     # Standalone 7-DOF Kinova arm (no Robotiq gripper) — its arm_joints is the 7-joint
@@ -204,24 +231,24 @@ def main() -> int:
         extend_pairs = _build_arm_trajectory(
             joint_infos,
             current_arm,
-            home_arm_conf,
+            target_arm_conf,
             args.n_waypoints,
             template_state=state,
         )
         obs, state = _run_trajectory(
-            "extend (current → HOME)",
+            f"extend (current → {target_label})",
             extend_pairs,
             env,
             perceiver,
             executor,
             obs,
             state,
-            target=home_arm_conf,
+            target=target_arm_conf,
             distance_fn=distance_fn,
         )
 
-        # q_start is the perceived arm conf, not home_arm_conf — the OTG may have
-        # settled within arrival_tolerance but not exactly on home, and the
+        # q_start is the perceived arm conf, not target_arm_conf — the OTG may have
+        # settled within arrival_tolerance but not exactly on the target, and the
         # cumulative-delta trajectory math assumes template_state.joints == q_start.
         retract_pairs = _build_arm_trajectory(
             joint_infos,
@@ -231,7 +258,7 @@ def main() -> int:
             template_state=state,
         )
         obs, state = _run_trajectory(
-            "retract (HOME → RETRACT)",
+            f"retract ({target_label} → RETRACT)",
             retract_pairs,
             env,
             perceiver,
