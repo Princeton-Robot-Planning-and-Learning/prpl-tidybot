@@ -205,6 +205,43 @@ def test_cursor_caps_at_final_waypoint():
 # ---------------------------------------------------------------------------
 
 
+def test_done_not_immediate_when_final_target_equals_initial_perceived():
+    """Multi-waypoint arm segment is not immediately done even when the final target
+    equals the initial perceived position.
+
+    Regression test for the merged approach+retract arm segment bug: the Pick
+    skill produces one "arm" segment whose final waypoint is HOME (retract), the
+    same position the robot starts at. Without the cursor-guard in done(), the
+    distance check fires before a single step() call and the arm never moves.
+    """
+    # Simulate: approach from [0.0]*7 out to [1.0, 0, ...] and back to [0.0]*7.
+    home = [0.0] * 7
+    pairs = [
+        # approach leg
+        (_make_state(arm_conf=home), _arm_action(arm_deltas=[0.5, 0, 0, 0, 0, 0, 0])),
+        (
+            _make_state(arm_conf=[0.5, 0, 0, 0, 0, 0, 0]),
+            _arm_action(arm_deltas=[0.5, 0, 0, 0, 0, 0, 0]),
+        ),
+        # retract leg — final target is home ([1.0 - 0.5 - 0.5, ...] = [0.0, ...])
+        (
+            _make_state(arm_conf=[1.0, 0, 0, 0, 0, 0, 0]),
+            _arm_action(arm_deltas=[-0.5, 0, 0, 0, 0, 0, 0]),
+        ),
+        (
+            _make_state(arm_conf=[0.5, 0, 0, 0, 0, 0, 0]),
+            _arm_action(arm_deltas=[-0.5, 0, 0, 0, 0, 0, 0]),
+        ),
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.1, arrival_tolerance=0.05
+    )
+    executor.set_trajectory(pairs)
+
+    # Before any step(): perceived = home = final_target — must NOT be done.
+    assert executor.done(_make_state(arm_conf=home)) is False
+
+
 def test_done_true_when_within_arrival_tolerance_of_final_waypoint():
     """Done flips True once perceived joints are within arrival_tolerance of the final
     waypoint."""
