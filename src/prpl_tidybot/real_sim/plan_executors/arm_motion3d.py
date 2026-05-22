@@ -188,6 +188,14 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         if self._tick_count >= self._max_iter_total:
             self._done_latched = True
             return True
+        # Require the cursor to have reached the last waypoint before declaring
+        # done. Without this guard, done() returns True immediately when the
+        # final target (the retract/home position) happens to equal the robot's
+        # initial perceived position — the merged arm segment (approach +
+        # gripper + retract) starts and ends at home, so the distance check
+        # fires before a single step() is ever called.
+        if self._cursor < len(self._targets) - 1:
+            return False
         perceived = _perceived_joints(sim_state, self._robot_name)
         final_target = self._targets[-1]
         if self._distance_fn(perceived, final_target) <= self._arrival_tolerance:
