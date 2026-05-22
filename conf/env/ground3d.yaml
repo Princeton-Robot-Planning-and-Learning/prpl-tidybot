@@ -30,6 +30,12 @@ cube_marker_z: 0.01
 # with `env.arm_advance_radius=0.05 env.arm_arrival_tolerance=0.2`.
 arm_advance_radius: 0.4
 arm_arrival_tolerance: 0.4
+# Extra ticks the arm holds at the grasp position while the gripper closes.
+# 0 is correct for fake/sim (FakeInterface stores the target immediately).
+# For real hardware set to ~20 (≈5 s at 0.25 s/tick) so the gripper
+# physically closes before retract begins.
+# Override on the CLI: `env.arm_gripper_dwell_ticks=20`.
+arm_gripper_dwell_ticks: 10
 
 pipelines:
   fake:
@@ -58,6 +64,7 @@ pipelines:
         advance_radius: ${env.arm_advance_radius}
         arrival_tolerance: ${env.arm_arrival_tolerance}
         max_iter_total: 300
+        gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv
