@@ -8,10 +8,6 @@ make_kwargs:
 env_model_kwargs:
   num_objects: 1
 
-# Base motion strategy for Kinematic3DPlanExecutor — see base_motion3d.yaml
-# for what each value means. Override with `env.base_strategy=settle`.
-base_strategy: pure_pursuit
-
 pipelines:
   fake:
     real_env:
@@ -24,9 +20,13 @@ pipelines:
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.PrplLab3DPerceiver
       num_cubes: 1
+    # Arm/gripper segments currently raise NotImplementedError (the arm
+    # executor is a stub pending a rewrite). Base segments use pure-pursuit
+    # — swap base_executor to SettleBaseMotion3DPlanExecutor for diagnostics.
     plan_executor:
       _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
-      base_strategy: ${env.base_strategy}
+      base_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.base_motion3d.PurePursuitBaseMotion3DPlanExecutor
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv

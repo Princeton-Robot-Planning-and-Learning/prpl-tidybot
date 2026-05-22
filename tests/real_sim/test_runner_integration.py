@@ -10,9 +10,9 @@ Wires:
 
 through `prpl_utils.real_sim.Runner` and asserts that the FakeInterface
 ends up at the cumulative absolute target after several Runner steps of
-canned sim actions. The executor enforces base-XOR-arm motion per pair,
-so the accumulation tests below issue separate base-only and arm-only
-deltas (never mixed) and check the components add up.
+canned base-only sim actions. Arm/gripper coverage lives elsewhere — the
+arm sub-executor (`ArmMotion3DPlanExecutor`) is currently a stub that
+raises `NotImplementedError`, so it can't be exercised here.
 """
 
 from typing import Any
@@ -26,7 +26,11 @@ from relational_structs import ObjectCentricState
 
 from prpl_tidybot.interfaces.interface import FakeInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
-from prpl_tidybot.real_sim import Kinematic3DPlanExecutor, PrplLab3DPerceiver
+from prpl_tidybot.real_sim import (
+    Kinematic3DPlanExecutor,
+    PrplLab3DPerceiver,
+    PurePursuitBaseMotion3DPlanExecutor,
+)
 
 
 class _OneActionPerPlanAgent(
@@ -110,45 +114,6 @@ def test_base_only_delta_accumulates_over_steps():
     assert interface.get_gripper_state() == 0.0
 
 
-def test_arm_only_delta_accumulates_over_steps():
-    """Five arm-only deltas should leave the FakeInterface arm at exactly 5 * delta.
-
-    Base and gripper are unchanged.
-    """
-    delta = np.zeros(11)
-    delta[3:10] = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007]
-    runner, interface = _build_runner([delta.copy() for _ in range(5)])
-
-    runner.reset()
-    for _ in range(5):
-        runner.step()
-
-    base = interface.get_base_state()
-    assert base.x == pytest.approx(0.0)
-    assert base.y == pytest.approx(0.0)
-    assert base.theta() == pytest.approx(0.0)
-    assert interface.get_arm_state() == pytest.approx(
-        [0.005, 0.010, 0.015, 0.020, 0.025, 0.030, 0.035]
-    )
-    assert interface.get_gripper_state() == 0.0
-
-
-def test_gripper_close_then_open():
-    """Gripper command <-0.5 closes the gripper (TidyBot 1.0); a subsequent >0.5 command
-    opens it (TidyBot 0.0)."""
-    close = np.zeros(11)
-    close[10] = -1.0
-    do_open = np.zeros(11)
-    do_open[10] = 1.0
-    runner, interface = _build_runner([close, do_open])
-
-    runner.reset()
-    runner.step()
-    assert interface.get_gripper_state() == 1.0
-    runner.step()
-    assert interface.get_gripper_state() == 0.0
-
-
 def test_single_outer_step_drives_multiple_inner_ticks():
     """Pure pursuit caps each commanded target to `lookahead_distance` ahead of the
     cursor along the path, so a single outer Runner.step against a path longer than
@@ -162,7 +127,9 @@ def test_single_outer_step_drives_multiple_inner_ticks():
         real_env=env,
         perceiver=PrplLab3DPerceiver(),
         agent=_OneActionPerPlanAgent([delta]),
-        plan_executor=Kinematic3DPlanExecutor(lookahead_distance=0.2),
+        plan_executor=Kinematic3DPlanExecutor(
+            base_executor=PurePursuitBaseMotion3DPlanExecutor(lookahead_distance=0.2),
+        ),
     )
 
     runner.reset()
