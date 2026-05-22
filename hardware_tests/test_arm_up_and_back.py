@@ -71,6 +71,7 @@ from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
     StreamingArmMotion3DPlanExecutor,
 )
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExecutor
+from prpl_tidybot.structs import TidyBotObservation
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
 from prpl_tidybot.third_party.ik_solver import IKSolver
 
@@ -124,11 +125,11 @@ def _run_trajectory(
     env: RealTidyBotEnv,
     perceiver: PrplLab3DPerceiver,
     executor: Kinematic3DPlanExecutor,
-    obs,
+    obs: TidyBotObservation,
     state: ObjectCentricState,
     target: Sequence[float],
-    distance_fn: Callable[[Sequence[float], Sequence[float]], float],
-) -> tuple[object, ObjectCentricState]:
+    distance_fn: Callable[[list[float], list[float]], float],
+) -> tuple[TidyBotObservation, ObjectCentricState]:
     """Run one trajectory through the env/executor loop.
 
     ``err_to_target`` is logged in the same weighted-L1 metric the executor uses for its

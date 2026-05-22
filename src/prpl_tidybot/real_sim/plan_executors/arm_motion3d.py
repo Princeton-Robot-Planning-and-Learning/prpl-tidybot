@@ -31,7 +31,7 @@ and feeds each homogeneous segment to the appropriate sub-executor.
 from __future__ import annotations
 
 import abc
-from typing import Callable, Sequence
+from typing import Callable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -42,7 +42,11 @@ from spatialmath import SE2
 from prpl_tidybot.structs import TidyBotAction
 
 JointPositions = list[float]
-JointDistanceFn = Callable[[Sequence[float], Sequence[float]], float]
+# Matches pybullet-helpers' create_joint_distance_fn return type. list (not
+# Sequence) in the argument slot so that callable is assignable here without
+# contravariance complaints; Sequence-typed callers still match via the
+# contravariant direction.
+JointDistanceFn = Callable[[JointPositions, JointPositions], float]
 
 _BASE_MOTION_EPS = 1e-4
 
