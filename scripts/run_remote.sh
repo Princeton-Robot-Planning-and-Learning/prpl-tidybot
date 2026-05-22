@@ -29,29 +29,26 @@ remote_path_prefix='export PATH="$HOME/.local/bin:$PATH" && '
 #    checkout into exact alignment with origin/<branch>. The remote
 #    machines are NOT development boxes — they're meant to be
 #    ephemeral mirrors of whatever the laptop most recently pushed —
-#    so origin is unambiguously the source of truth and a hard reset
-#    is the right tool to recover from force-pushes (issue #44).
+#    so origin is unambiguously the source of truth and the local
+#    branch must always re-snap to it (also recovers from force-pushes,
+#    issue #44).
 #
-#    Before resetting, detect and refuse uncommitted modifications or
+#    Before snapping, detect and refuse uncommitted modifications or
 #    untracked files (`git status --porcelain` non-empty), so local
 #    edits are never silently discarded. Local commits are not checked:
 #    doing so via `git rev-list HEAD --not origin/<branch>` produced
 #    false positives when concurrent panels raced on the same repo and
 #    the remote-tracking ref briefly resolved to a stale value.
 #
-#    The fetch is serialized with flock so concurrent panels don't
-#    collide on the remote-tracking ref update. flock also deletes the
-#    loose ref file for origin/<branch> before fetching, preventing the
-#    packed-refs/loose-ref conflict that causes "cannot lock ref" errors
-#    (issue #57).
-#
-#    Using `origin/<branch>` (a remote-tracking ref that persists)
-#    rather than `FETCH_HEAD` (a transient single-file ref that's
-#    brittle across intervening git commands): an earlier draft used
-#    FETCH_HEAD and surfaced "fatal: ambiguous argument 'FETCH_HEAD'"
-#    failures on the NUC for reasons we didn't fully trace.
-#    `origin/<branch>` is updated by the preceding `git fetch origin
-#    <branch>` either way and is immune to that class of issue.
+#    `git checkout -B <branch> origin/<branch>` always (re)creates the
+#    local branch pointing at origin/<branch>, regardless of any prior
+#    state of the local branch — broken upstream config, stale value,
+#    or no local branch at all. Replaces an older
+#    `git checkout <branch> && git reset --hard origin/<branch>`
+#    sequence that could leave the local branch's upstream tracking
+#    config pointing at a ref that briefly didn't resolve (causing
+#    "fatal: ambiguous argument 'origin/<branch>'") after a partial
+#    failure on a previous run.
 #
 #    `git fetch origin <branch>` rather than `git pull --ff-only` so
 #    we don't depend on `branch.<name>.merge` config that may be
@@ -61,8 +58,18 @@ remote_path_prefix='export PATH="$HOME/.local/bin:$PATH" && '
 #    from the just-synced branch (or from a manual `git pull` on the
 #    remote since the last launch) before any Python code runs. No-op
 #    when nothing has changed.
-if [[ -n "$branch" ]]; then
-    sync="flock -x .git/run_remote.lock sh -c 'rm -f .git/refs/remotes/origin/$branch && git fetch --prune origin $branch' && if [ -n \"\$(git status --porcelain)\" ]; then echo 'run_remote.sh: ERROR: remote checkout has uncommitted modifications or untracked files; refusing to overwrite. Resolve manually before re-launching.' >&2; git status --short >&2; exit 1; fi && git checkout $branch && git reset --hard origin/$branch && uv sync && uv pip install --force-reinstall --no-deps opencv_wheels/opencv_python-4.9.0.80-cp310-cp310-linux_x86_64.whl && "
+#
+# Concurrent-panel handling: set PRPL_SKIP_SYNC=1 on every panel
+# except the one that should do the syncing. The sync panel holds an
+# exclusive flock on .git/run_remote.lock for the duration of git +
+# uv + opencv setup; the skipping panels acquire a shared flock on the
+# same file (which blocks until the exclusive holder releases) and
+# then go straight to launching the command. This way the skippers
+# never run their command against a half-synced tree or venv.
+if [[ -n "${PRPL_SKIP_SYNC:-}" ]]; then
+    sync="echo 'run_remote.sh: PRPL_SKIP_SYNC set; waiting for the sync pane to finish before launching...' && (flock -s 9) 9>.git/run_remote.lock && echo 'run_remote.sh: sync pane finished; launching.' && "
+elif [[ -n "$branch" ]]; then
+    sync="(flock -x 9 && git fetch origin $branch && if [ -n \"\$(git status --porcelain)\" ]; then echo 'run_remote.sh: ERROR: remote checkout has uncommitted modifications or untracked files; refusing to overwrite. Resolve manually before re-launching.' >&2; git status --short >&2; exit 1; fi && git checkout -B $branch origin/$branch && uv sync && uv pip install --force-reinstall --no-deps opencv_wheels/opencv_python-4.9.0.80-cp310-cp310-linux_x86_64.whl) 9>.git/run_remote.lock && "
 else
     sync="uv sync && uv pip install --force-reinstall --no-deps opencv_wheels/opencv_python-4.9.0.80-cp310-cp310-linux_x86_64.whl && "
 fi

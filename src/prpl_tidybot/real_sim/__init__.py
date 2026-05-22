@@ -2,8 +2,9 @@
 
 For fake / real backends, compose a `RealTidyBotEnv`, a kinematic3d
 perceiver (`PrplLab3DPerceiver` or `BaseMotion3DPerceiver`),
-`Kinematic3DPlanExecutor` (which dispatches per-segment between
-pure-pursuit on the base and settle-then-advance on the arm), and a
+`Kinematic3DPlanExecutor` (which dispatches per-segment to
+`BaseMotion3DPlanExecutor` for base motion and to the stub
+`ArmMotion3DPlanExecutor` for arm/gripper motion), and a
 `prpl_utils.planning_agent.PlanningAgent` with
 `prpl_utils.real_sim.Runner`. For sim, swap in `KinderSimEnv` plus
 `PassThroughPerceiver` / `PassThroughPlanExecutor` — the env already
@@ -29,6 +30,12 @@ from prpl_tidybot.real_sim.perceivers.kinematic3d import (
     PrplLab3DPerceiver,
 )
 from prpl_tidybot.real_sim.perceivers.passthrough import PassThroughPerceiver
+from prpl_tidybot.real_sim.plan_executors.arm_motion3d import ArmMotion3DPlanExecutor
+from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
+    BaseMotion3DPlanExecutor,
+    PurePursuitBaseMotion3DPlanExecutor,
+    SettleBaseMotion3DPlanExecutor,
+)
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import (
     Kinematic3DPlanExecutor,
 )
@@ -76,11 +83,15 @@ def build_planner_env_models(
 
 
 __all__ = [
+    "ArmMotion3DPlanExecutor",
     "BaseMotion3DPerceiver",
+    "BaseMotion3DPlanExecutor",
     "Kinematic3DPlanExecutor",
     "KinematicRobotPerceiverBase",
     "PassThroughPerceiver",
     "PassThroughPlanExecutor",
     "PrplLab3DPerceiver",
+    "PurePursuitBaseMotion3DPlanExecutor",
+    "SettleBaseMotion3DPlanExecutor",
     "build_planner_env_models",
 ]

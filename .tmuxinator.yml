@@ -23,11 +23,15 @@ windows:
       # `tiled` gives a 2-up grid with the wide bottom pane (the planner)
       # taking the full width — handy for typing.
       layout: tiled
+      # Only one pane per remote host runs the sync (PRPL_BRANCH set); the
+      # rest set PRPL_SKIP_SYNC=1 so they don't race on the index/refs.
+      # The NUC syncs in the bash pane; the laptop syncs in the marker
+      # detector pane (its only pane on that host).
       panes:
         - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}" bash
-        - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}"
+        - PRPL_SKIP_SYNC=1 ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}"
           python -m prpl_tidybot.third_party.base_server
         - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_PERCEPTION_HOST:-<%= laptop_default %>}"
           python scripts/run_marker_detector_server.py<%= lab == 'fwing' ? '' : ' --lab prpl' %>
-        - PRPL_BRANCH="<%= branch %>" ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}"
+        - PRPL_SKIP_SYNC=1 ./scripts/run_remote.sh "${PRPL_NUC_HOST:-<%= nuc_default %>}"
           python -m prpl_tidybot.third_party.arm_server
