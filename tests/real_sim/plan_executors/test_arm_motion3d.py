@@ -371,12 +371,52 @@ def test_gripper_close_command_emitted():
     assert real_action.gripper_goal == 1.0
 
 
-def test_gripper_no_change_passes_through_current_finger():
-    """A gripper command in [-0.5, 0.5] passes through the perceived finger_state."""
-    state = _make_state(gripper=0.4, arm_conf=[0.0] * 7)
-    pairs = [(state, _arm_action(gripper_cmd=0.0))]
+def test_gripper_no_change_uses_planned_finger():
+    """A gripper command in [-0.5, 0.5] uses the planned state's finger_state as the
+    hold target (not the perceived finger). This keeps the gripper closed throughout
+    retract when the planned state already has finger_state=1.0."""
+    planned_state = _make_state(gripper=0.4, arm_conf=[0.0] * 7)
+    pairs = [(planned_state, _arm_action(gripper_cmd=0.0))]
     executor = StreamingArmMotion3DPlanExecutor(distance_fn=_l1_distance)
     executor.set_trajectory(pairs)
 
-    real_action, _ = executor.step(state)
+    # Perceived finger differs from planned finger to make the distinction explicit.
+    perceived_state = _make_state(gripper=0.7, arm_conf=[0.0] * 7)
+    real_action, _ = executor.step(perceived_state)
     assert real_action.gripper_goal == pytest.approx(0.4)
+
+
+def test_gripper_stays_closed_during_retract_after_grasp():
+    """After a gripper-close, retract pairs maintain gripper_goal=1.0 even when
+    the perceived finger has not yet reached 1.0.
+
+    The planned state for retract pairs has finger_state=1.0 (post-grasp). Using
+    the planned finger prevents the arm executor from re-issuing the partially-closed
+    perceived position as the gripper hold target on every retract tick.
+    """
+    grasp_joints = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pairs = [
+        # gripper-close pair: arm holds, gripper closes
+        (
+            _make_state(arm_conf=grasp_joints, gripper=0.4),
+            _arm_action(arm_deltas=[0.0] * 7, gripper_cmd=-1.0),
+        ),
+        # retract pair: planned state has finger=1.0 (post-grasp)
+        (
+            _make_state(arm_conf=grasp_joints, gripper=1.0),
+            _arm_action(arm_deltas=[-1.0, 0, 0, 0, 0, 0, 0]),
+        ),
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.5, arrival_tolerance=0.05
+    )
+    executor.set_trajectory(pairs)
+
+    # Tick 1: arm at grasp — gripper-close issued, cursor advances to retract
+    executor.step(_make_state(arm_conf=grasp_joints, gripper=0.4))
+
+    # Tick 2: retract phase; perceived finger still partially closed (0.4)
+    real_action, _ = executor.step(_make_state(arm_conf=grasp_joints, gripper=0.4))
+    assert real_action.gripper_goal == pytest.approx(1.0), (
+        "retract phase must hold gripper_goal=1.0 using planned finger, not perceived"
+    )

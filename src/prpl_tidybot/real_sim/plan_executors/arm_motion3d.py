@@ -174,8 +174,11 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         perceived = _perceived_joints(sim_state, self._robot_name)
         self._advance_cursor(perceived)
         target = self._targets[self._cursor]
-        sim_action = self._pairs[self._cursor][1]
-        action = _build_tidybot_action(sim_state, target, sim_action, self._robot_name)
+        planned_state, sim_action = self._pairs[self._cursor]
+        planned_finger = _planned_finger(planned_state, self._robot_name)
+        action = _build_tidybot_action(
+            sim_state, target, sim_action, self._robot_name, planned_finger
+        )
         self._tick_count += 1
         # After issuing one gripper command, advance cursor to the next pair.
         # Gripper-close pairs all have arm_delta=0 (target = current grasp
@@ -245,6 +248,11 @@ def _perceived_joints(sim_state: ObjectCentricState, robot_name: str) -> JointPo
     return [sim_state.get(robot, f"joint_{j + 1}") for j in range(7)]
 
 
+def _planned_finger(planned_state: ObjectCentricState, robot_name: str) -> float:
+    robot = planned_state.get_object_from_name(robot_name)
+    return float(planned_state.get(robot, "finger_state"))
+
+
 def _absolute_target(
     state: ObjectCentricState,
     sim_action: NDArray[np.floating],
@@ -272,17 +280,28 @@ def _build_tidybot_action(
     arm_target: JointPositions,
     sim_action: NDArray[np.floating],
     robot_name: str,
+    planned_finger: float | None = None,
 ) -> TidyBotAction:
-    """Pack the commanded arm goal + held base pose + gripper into a TidyBotAction."""
+    """Pack the commanded arm goal + held base pose + gripper into a TidyBotAction.
+
+    For "hold" gripper commands (|action[10]| <= 0.5), uses ``planned_finger``
+    as the hold target when provided. This avoids re-issuing the partially-closed
+    perceived finger position during retract after a gripper-close pair — the
+    planned state already has finger_state=1.0, so the gripper continues closing
+    rather than freezing at whatever position it had reached after one tick.
+    """
     robot = sim_state.get_object_from_name(robot_name)
     base_goal = SE2(
         x=float(sim_state.get(robot, "pos_base_x")),
         y=float(sim_state.get(robot, "pos_base_y")),
         theta=float(sim_state.get(robot, "pos_base_rot")),
     )
-    gripper_goal = _gripper_target(
-        float(sim_state.get(robot, "finger_state")), sim_action
+    hold_finger = (
+        planned_finger
+        if planned_finger is not None
+        else float(sim_state.get(robot, "finger_state"))
     )
+    gripper_goal = _gripper_target(hold_finger, sim_action)
     return TidyBotAction(
         arm_goal=list(arm_target),
         base_pose_target_map=base_goal,
