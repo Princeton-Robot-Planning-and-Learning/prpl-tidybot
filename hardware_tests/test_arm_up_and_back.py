@@ -50,7 +50,7 @@ from pybullet_helpers.joint import (
     interpolate_joints,
 )
 from pybullet_helpers.motion_planning import create_joint_distance_fn
-from pybullet_helpers.robots.tidybot import TidyBotKinova
+from pybullet_helpers.robots.kinova import KinovaGen3NoGripperPyBulletRobot
 from relational_structs import ObjectCentricState
 
 from prpl_tidybot.interfaces.base_interface import FakeBaseInterface
@@ -152,12 +152,17 @@ def main() -> int:
     print(f"HOME joint angles: [{home_str}]")
 
     print("Building pybullet TidyBotKinova for the joint distance function...")
+    # Standalone 7-DOF Kinova arm (no Robotiq gripper) — its arm_joints is the 7-joint
+    # kinematic chain to the end effector, matching the 7-element configs we get from
+    # obs.arm_conf. Using TidyBotKinova / KinovaGen3RobotiqGripperPyBulletRobot here
+    # would extend arm_joints with the 6 Robotiq finger ids → 13 entries, and the
+    # length check in get_jointwise_difference would reject our 7-element configs.
     client_id = p.connect(p.DIRECT)
-    pb_robot = TidyBotKinova(physics_client_id=client_id, base_z=0.0)
+    pb_robot = KinovaGen3NoGripperPyBulletRobot(physics_client_id=client_id)
     distance_fn = create_joint_distance_fn(
-        pb_robot.arm, metric="weighted_joints", weight_base=0.9
+        pb_robot, metric="weighted_joints", weight_base=0.9
     )
-    joint_infos = pb_robot.arm.get_arm_joint_infos()
+    joint_infos = pb_robot.get_arm_joint_infos()
 
     print("Bringing up RealTidyBotEnv (real arm; fake base/cameras)...")
     interface = RealInterface(
