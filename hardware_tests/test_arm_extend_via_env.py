@@ -39,7 +39,7 @@ from prpl_tidybot.interfaces.base_interface import RealBaseInterface
 from prpl_tidybot.interfaces.camera_interface import FakeCameraInterface
 from prpl_tidybot.interfaces.interface import RealInterface
 from prpl_tidybot.real_env import RealTidyBotEnv
-from prpl_tidybot.structs import TidyBotAction
+from prpl_tidybot.structs import TidyBotAction, TidyBotObservation
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
 from prpl_tidybot.third_party.ik_solver import IKSolver
 
@@ -53,11 +53,11 @@ def _run_phase(
     label: str,
     arm_target: Sequence[float],
     env: RealTidyBotEnv,
-    obs,
+    obs: TidyBotObservation,
     initial_base_pose,
-) -> object:
-    """Send ``N_STEPS_PER_PHASE`` arm-only commands with the base target held at the
-    initial map pose.
+) -> TidyBotObservation:
+    """Send ``N_STEPS_PER_PHASE`` arm-only commands; per tick the base target is the
+    current perceived map pose.
 
     Returns the final obs.
     """
@@ -87,11 +87,10 @@ def main() -> int:
     """Extend to HOME, then retract to RETRACT_ARM_CONF, via hand-built
     TidyBotActions."""
     print("Solving IK for home pose (seed = RETRACT_ARM_CONF)...")
-    home_arm_conf = (
-        IKSolver()
-        .solve(HOME_POS, HOME_QUAT, RETRACT_ARM_CONF)  # type: ignore[no-untyped-call]
-        .tolist()
-    )
+    ik_solver = IKSolver()  # type: ignore[no-untyped-call]
+    home_arm_conf = ik_solver.solve(  # type: ignore[no-untyped-call]
+        HOME_POS, HOME_QUAT, RETRACT_ARM_CONF
+    ).tolist()
     home_str = "  ".join(f"{j:+.3f}" for j in home_arm_conf)
     print(f"HOME joint angles: [{home_str}]")
 
