@@ -176,15 +176,22 @@ def main() -> int:
     )
     env = RealTidyBotEnv(interface=interface)
     perceiver = PrplLab3DPerceiver()
-    # arrival_tolerance matches advance_radius: if the cursor was willing to
-    # advance through this waypoint mid-trajectory, it's willing to terminate
-    # on it as the final. Tighter values (e.g. 0.1) are unreachable against
-    # the compliant controller's steady-state lag — joint 5 alone can sit
-    # ~0.1 rad off target indefinitely.
+    # advance_radius needs to exceed the OTG's deceleration distance for the
+    # dominant joints — otherwise the cursor advances at the same moment Ruckig
+    # begins braking and the arm visibly stalls at every waypoint. For the
+    # Kinova shoulder joints (v_max=80°/s, a_max=240°/s², decel distance
+    # v²/2a ≈ 0.23 rad ≈ 0.21 in weighted-L1), 0.4 gives comfortable headroom.
+    # The cost is that the cursor skips ~6-7 of the 50 waypoints per tick —
+    # fine for this test (linear-interp filler waypoints, no via-points), but
+    # any future test that uses waypoints as via-points must space them further
+    # apart in the metric than this radius.
+    #
+    # arrival_tolerance is held at advance_radius for consistency, and to leave
+    # room for the compliant controller's steady-state lag at the final waypoint.
     arm_executor = StreamingArmMotion3DPlanExecutor(
         distance_fn=distance_fn,
-        advance_radius=0.2,
-        arrival_tolerance=0.2,
+        advance_radius=0.4,
+        arrival_tolerance=0.4,
         max_iter_total=300,
     )
     executor = Kinematic3DPlanExecutor(arm_executor=arm_executor)
