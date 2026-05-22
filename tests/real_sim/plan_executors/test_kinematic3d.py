@@ -1,10 +1,10 @@
-"""Tests for real_sim/plan_executors/kinematic3d.py.
+"""Tests for the Kinematic3DPlanExecutor dispatcher.
 
-The unified :class:`Kinematic3DPlanExecutor` enforces a strict invariant: each `(state,
-action)` pair moves ONLY the base OR the arm, never both. It then segments the
-trajectory and dispatches per-segment between pure-pursuit on the base (configurable)
-and settle-then-advance on the arm. These tests cover that segmentation and the two
-strategy paths.
+The dispatcher's job is narrow: validate that each (state, action) pair moves either the
+base XOR the arm/gripper, split the trajectory into maximal same-kind segments, and
+delegate each segment to the appropriate sub-executor. Strategy-specific tracking
+behaviour is covered in test_base_motion3d.py; the arm sub-executor's
+NotImplementedError surface is covered in test_arm_motion3d.py.
 """
 
 import numpy as np
@@ -13,8 +13,18 @@ from spatialmath import SE2
 
 from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
 from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
+from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
+    PurePursuitBaseMotion3DPlanExecutor,
+)
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExecutor
 from prpl_tidybot.structs import TidyBotObservation
+
+
+def _tight_executor() -> Kinematic3DPlanExecutor:
+    """Dispatcher with a tight-tolerance pure-pursuit base sub-executor."""
+    return Kinematic3DPlanExecutor(
+        base_executor=PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3),
+    )
 
 
 def _make_state(
@@ -58,8 +68,8 @@ def _arm_action(
 # ---------------------------------------------------------------------------
 
 
-def test_rejects_mixed_base_and_arm_motion_in_same_pair():
-    """A pair with both base and arm deltas violates the executor's invariant."""
+def test_rejects_pair_that_mixes_base_and_arm_motion():
+    """A pair with both base and arm deltas violates the dispatcher's invariant."""
     mixed = np.zeros(11)
     mixed[0] = 0.1  # base
     mixed[3] = 0.05  # arm joint 1
@@ -68,234 +78,68 @@ def test_rejects_mixed_base_and_arm_motion_in_same_pair():
         executor.set_trajectory([(_make_state(), mixed)])
 
 
-def test_rejects_invalid_base_strategy():
-    """Constructor rejects unknown base_strategy values."""
-    with pytest.raises(ValueError, match="base_strategy"):
-        Kinematic3DPlanExecutor(base_strategy="banana")
-
-
-# ---------------------------------------------------------------------------
-# Arm segments (always settle)
-# ---------------------------------------------------------------------------
-
-
-def test_arm_segment_grounds_target_from_snapshot_and_holds_base():
-    """For an arm-motion pair the commanded TidyBotAction has arm = snapshot + delta
-    and base = snapshot.base (the segment must not move the base)."""
-    state = _make_state(
-        base_xytheta=(1.0, 2.0, 0.5),
-        arm_conf=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
-    )
-    action = _arm_action(arm_deltas=[0.01, 0.02, 0.03, -0.01, -0.02, -0.03, 0.04])
+def test_rejects_pair_that_mixes_base_and_gripper_command():
+    """Gripper rides on the arm side, so base + gripper is also a mixed pair."""
+    mixed = np.zeros(11)
+    mixed[0] = 0.1
+    mixed[10] = -1.0
     executor = Kinematic3DPlanExecutor()
-    executor.set_trajectory([(state, action)])
-
-    real_action, _ = executor.step(state)
-    assert real_action.arm_goal == pytest.approx(
-        [0.11, 0.22, 0.33, 0.39, 0.48, 0.57, 0.74]
-    )
-    # Base unchanged.
-    assert real_action.base_pose_target_map.x == pytest.approx(1.0)
-    assert real_action.base_pose_target_map.y == pytest.approx(2.0)
-    assert real_action.base_pose_target_map.theta() == pytest.approx(0.5)
-
-
-def test_arm_segment_reissues_cached_target_until_converged():
-    """Across multiple ticks on the same arm pair the executor reissues the same
-    grounded target, even if perception drifts in between."""
-    initial = _make_state(arm_conf=[0.0] * 7)
-    action = _arm_action(arm_deltas=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    drifted = _make_state(arm_conf=[0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    executor = Kinematic3DPlanExecutor(joint_tolerance=1e-3, max_iter_per_pair=100)
-    executor.set_trajectory([(initial, action)])
-
-    target_1, _ = executor.step(initial)
-    target_2, _ = executor.step(drifted)
-    assert target_1 is target_2
-    assert target_1.arm_goal[0] == pytest.approx(0.1)
-
-
-def test_arm_segment_advances_when_within_tolerance():
-    """Once the perceived state matches the cached target within tolerance, the executor
-    advances to the next arm pair on the next done() check."""
-    s0 = _make_state(arm_conf=[0.0] * 7)
-    a0 = _arm_action(arm_deltas=[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    s1 = _make_state(arm_conf=[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    a1 = _arm_action(arm_deltas=[0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
-    executor = Kinematic3DPlanExecutor(joint_tolerance=1e-3)
-    executor.set_trajectory([(s0, a0), (s1, a1)])
-
-    executor.step(s0)
-    converged = _make_state(arm_conf=[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    # done() advances past pair 0; not yet done overall.
-    assert executor.done(converged) is False
-    real_action, _ = executor.step(converged)
-    # New snapshot is `converged`; pair 1 adds 0.5 to joint_2.
-    assert real_action.arm_goal[1] == pytest.approx(0.5)
-
-
-def test_arm_segment_advances_at_max_iter_even_without_convergence():
-    """If max_iter_per_pair ticks elapse without convergence, the executor still
-    advances; this caps the rollout if a target is unreachable."""
-    s0 = _make_state(arm_conf=[0.0] * 7)
-    action = _arm_action(arm_deltas=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    executor = Kinematic3DPlanExecutor(joint_tolerance=1e-9, max_iter_per_pair=3)
-    executor.set_trajectory([(s0, action)])
-
-    for _ in range(3):
-        executor.step(s0)
-    assert executor.done(s0) is True
-
-
-def test_arm_segment_keeps_base_at_snapshot_pose_even_under_drift():
-    """The settle path uses the snapshot at the start of the pair, so even if the base
-    drifts during the segment the commanded base is the snapshot pose (not the current
-    pose).
-
-    Verifies the base goal is locked once per pair.
-    """
-    snapshot = _make_state(base_xytheta=(0.0, 0.0, 0.0), arm_conf=[0.0] * 7)
-    action = _arm_action(arm_deltas=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    executor = Kinematic3DPlanExecutor()
-    executor.set_trajectory([(snapshot, action)])
-
-    cmd_initial, _ = executor.step(snapshot)
-    drifted_base = _make_state(base_xytheta=(0.5, 0.0, 0.0), arm_conf=[0.0] * 7)
-    cmd_drifted, _ = executor.step(drifted_base)
-    assert cmd_drifted.base_pose_target_map.x == pytest.approx(
-        cmd_initial.base_pose_target_map.x
-    )
+    with pytest.raises(ValueError, match="ONLY the base OR the arm"):
+        executor.set_trajectory([(_make_state(), mixed)])
 
 
 # ---------------------------------------------------------------------------
-# Base segments — pure_pursuit (default)
+# Segmentation / delegation
 # ---------------------------------------------------------------------------
 
 
-def test_base_segment_pure_pursuit_clamps_to_final_when_path_is_short():
-    """Single base pair (path < lookahead): the commanded target is the final
+def test_base_only_trajectory_delegates_to_base_executor():
+    """A base-only trajectory drives the base sub-executor and reaches the final
     waypoint."""
-    state = _make_state(base_xytheta=(1.0, 2.0, 0.0))
-    action = _base_action(dx=0.05, dy=-0.05)
-    executor = Kinematic3DPlanExecutor()
-    executor.set_trajectory([(state, action)])
-
-    real_action, _ = executor.step(state)
-    assert real_action.base_pose_target_map.x == pytest.approx(1.05)
-    assert real_action.base_pose_target_map.y == pytest.approx(1.95)
-
-
-def test_base_segment_pure_pursuit_commands_lookahead_along_long_path():
-    """On a path longer than lookahead_distance, target sits at cursor + lookahead."""
     s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
-    s1 = _make_state(base_xytheta=(0.5, 0.0, 0.0))
-    s2 = _make_state(base_xytheta=(1.0, 0.0, 0.0))
-    delta = _base_action(dx=0.5)
-    executor = Kinematic3DPlanExecutor(lookahead_distance=0.3)
-    executor.set_trajectory([(s0, delta), (s1, delta), (s2, delta)])
+    executor = _tight_executor()
+    executor.set_trajectory([(s0, _base_action(dx=1.0))])
 
     real_action, _ = executor.step(s0)
-    assert real_action.base_pose_target_map.x == pytest.approx(0.3)
-
-    real_action, _ = executor.step(_make_state(base_xytheta=(0.4, 0.0, 0.0)))
-    assert real_action.base_pose_target_map.x == pytest.approx(0.7)
-
-
-def test_base_segment_pure_pursuit_cursor_is_monotonic_under_perception_jitter():
-    """Brief perception jitter back along the path doesn't make the cursor regress."""
-    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
-    executor = Kinematic3DPlanExecutor(lookahead_distance=0.3)
-    executor.set_trajectory([(s0, _base_action(dx=1.0))])
-
-    executor.step(_make_state(base_xytheta=(0.5, 0.0, 0.0)))  # cursor -> 0.5
-    real_action, _ = executor.step(_make_state(base_xytheta=(0.45, 0.0, 0.0)))
-    assert real_action.base_pose_target_map.x == pytest.approx(0.8)
-
-
-def test_base_segment_pure_pursuit_done_only_at_final_waypoint():
-    """Done() returns False until the perceived base is within position + angle
-    tolerance of the final waypoint."""
-    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
-    executor = Kinematic3DPlanExecutor(position_tolerance=1e-3)
-    executor.set_trajectory([(s0, _base_action(dx=1.0))])
-
-    assert executor.done(s0) is False
-    assert executor.done(_make_state(base_xytheta=(0.5, 0.0, 0.0))) is False
+    # Pure-pursuit commands lookahead along the path.
+    assert real_action.base_pose_target_map.x == pytest.approx(0.2)
     assert executor.done(_make_state(base_xytheta=(1.0, 0.0, 0.0))) is True
 
 
-# ---------------------------------------------------------------------------
-# Base segments — settle
-# ---------------------------------------------------------------------------
+def test_trajectory_with_arm_segment_raises_when_dispatcher_loads_it():
+    """An arm segment routes to the stub arm executor, which raises at set_trajectory
+    time.
 
-
-def test_base_segment_settle_reissues_per_pair_target():
-    """With base_strategy='settle', a base pair settles on its absolute target (not a
-    lookahead).
-
-    Across multiple ticks the same target is reissued.
+    With an arm-only trajectory the raise surfaces from the dispatcher's set_trajectory
+    (it eagerly loads the first segment).
     """
-    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
-    action = _base_action(dx=0.5)
-    drifted = _make_state(base_xytheta=(0.2, 0.0, 0.0))
-    executor = Kinematic3DPlanExecutor(
-        base_strategy="settle", position_tolerance=1e-3, max_iter_per_pair=100
-    )
-    executor.set_trajectory([(s0, action)])
-
-    cmd_1, _ = executor.step(s0)
-    cmd_2, _ = executor.step(drifted)
-    assert cmd_1 is cmd_2
-    assert cmd_1.base_pose_target_map.x == pytest.approx(0.5)
+    s0 = _make_state()
+    arm_pair = _arm_action(arm_deltas=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    executor = Kinematic3DPlanExecutor()
+    with pytest.raises(NotImplementedError, match="ArmMotion3DPlanExecutor"):
+        executor.set_trajectory([(s0, arm_pair)])
 
 
-def test_base_segment_settle_advances_per_pair():
-    """Multi-pair base segment with settle: each pair converges before the next."""
+def test_base_then_arm_trajectory_runs_base_then_raises_at_arm_segment():
+    """A trajectory of [base, arm] runs the base segment to completion, then raises
+    NotImplementedError when the dispatcher loads the arm segment."""
     s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
     s1 = _make_state(base_xytheta=(0.5, 0.0, 0.0))
-    executor = Kinematic3DPlanExecutor(base_strategy="settle", position_tolerance=1e-3)
-    executor.set_trajectory([(s0, _base_action(dx=0.5)), (s1, _base_action(dx=0.5))])
-
-    executor.step(s0)
-    converged_to_s1 = _make_state(base_xytheta=(0.5, 0.0, 0.0))
-    assert executor.done(converged_to_s1) is False  # advances pair, not whole segment
-    cmd, _ = executor.step(converged_to_s1)
-    # New snapshot at (0.5, 0, 0); next target is (1.0, 0, 0).
-    assert cmd.base_pose_target_map.x == pytest.approx(1.0)
-
-
-# ---------------------------------------------------------------------------
-# Mixed (interleaved) trajectories
-# ---------------------------------------------------------------------------
-
-
-def test_mixed_trajectory_segments_base_then_arm():
-    """A trajectory of [base, arm] becomes two segments; each is driven by its own
-    strategy.
-
-    After the base segment finishes, the arm segment starts and commands the arm target
-    while holding the base.
-    """
-    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0), arm_conf=[0.0] * 7)
-    s1 = _make_state(base_xytheta=(0.5, 0.0, 0.0), arm_conf=[0.0] * 7)
-    executor = Kinematic3DPlanExecutor(position_tolerance=1e-3)
+    executor = _tight_executor()
     executor.set_trajectory(
         [
-            (s0, _base_action(dx=0.5)),  # base segment
-            (s1, _arm_action(arm_deltas=[0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])),  # arm
+            (s0, _base_action(dx=0.5)),
+            (s1, _arm_action(arm_deltas=[0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])),
         ]
     )
 
     # Base segment runs.
     executor.step(s0)
-    # Robot reaches the base final waypoint; done() advances past the base segment.
-    s_after_base = _make_state(base_xytheta=(0.5, 0.0, 0.0), arm_conf=[0.0] * 7)
-    assert executor.done(s_after_base) is False  # arm segment still pending
-    # Arm segment now commands arm target relative to its snapshot.
-    cmd, _ = executor.step(s_after_base)
-    assert cmd.arm_goal[0] == pytest.approx(0.2)
-    # And the base stays where the snapshot says.
-    assert cmd.base_pose_target_map.x == pytest.approx(0.5)
+    # Robot reaches the base final waypoint; done() then tries to load the arm
+    # segment via the stub executor, which raises immediately.
+    s_after_base = _make_state(base_xytheta=(0.5, 0.0, 0.0))
+    with pytest.raises(NotImplementedError, match="ArmMotion3DPlanExecutor"):
+        executor.done(s_after_base)
 
 
 # ---------------------------------------------------------------------------
@@ -314,36 +158,9 @@ def test_done_is_sticky():
     """Once done() reports True, it stays True even if perception subsequently drifts
     outside tolerance — same end-of-trajectory oscillation fix as before."""
     s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
-    executor = Kinematic3DPlanExecutor(position_tolerance=1e-3)
+    executor = _tight_executor()
     executor.set_trajectory([(s0, _base_action(dx=1.0))])
 
     assert executor.done(_make_state(base_xytheta=(1.0, 0.0, 0.0))) is True
     # Drifted reading would have undone done() pre-latch.
     assert executor.done(_make_state(base_xytheta=(0.9, 0.0, 0.0))) is True
-
-
-# ---------------------------------------------------------------------------
-# Gripper (rides on arm segments)
-# ---------------------------------------------------------------------------
-
-
-def test_gripper_close_command_emitted_in_arm_segment():
-    """A gripper-close (<-0.5) in an arm pair becomes TidyBotAction.gripper_goal=1."""
-    state = _make_state(gripper=0.4, arm_conf=[0.0] * 7)
-    action = _arm_action(gripper_cmd=-1.0)
-    executor = Kinematic3DPlanExecutor()
-    executor.set_trajectory([(state, action)])
-
-    real_action, _ = executor.step(state)
-    assert real_action.gripper_goal == 1.0
-
-
-def test_gripper_no_change_passes_through_current_finger():
-    """A gripper command in [-0.5, 0.5] passes through the perceived finger_state."""
-    state = _make_state(gripper=0.4, arm_conf=[0.0] * 7)
-    action = _arm_action(gripper_cmd=0.0)
-    executor = Kinematic3DPlanExecutor()
-    executor.set_trajectory([(state, action)])
-
-    real_action, _ = executor.step(state)
-    assert real_action.gripper_goal == pytest.approx(0.4)
