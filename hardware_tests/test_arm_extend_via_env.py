@@ -3,7 +3,8 @@ commands, logging base drift.
 
 Bypasses the plan executor entirely. The goal is to validate the underlying
 ``RealTidyBotEnv.step`` path: handing it a sequence of arm-only commands (where
-``base_pose_target_map`` is held at the perceived map pose from reset) should
+``base_pose_target_map`` is set to the *current* perceived map pose each tick —
+matching what ``StreamingArmMotion3DPlanExecutor`` does for arm segments) should
 not cause the real base to move beyond perception / controller noise.
 
 Two phases, each ``N_STEPS_PER_PHASE`` ticks at policy rate:
@@ -12,12 +13,14 @@ Two phases, each ``N_STEPS_PER_PHASE`` ticks at policy rate:
   as ``test_arm_ik_home``)
 * retract: ``arm_goal = RETRACT_ARM_CONF``
 
-In both phases ``base_pose_target_map`` is held at the initial map pose from
-``env.reset()``, ``gripper_goal`` is held at the current perceived value. Per
-tick we print the arm joints, the arm error vs. the phase target, the perceived
-base pose, and its drift from the initial pose. The arm should reach each phase
-target within a few ticks; base drift should stay within marker-detector noise
-(a few millimeters in xy, milliradians in theta) throughout.
+In both phases ``base_pose_target_map`` is set each tick to the most recent
+``obs.map_base_pose`` (so the target tracks perception, matching the streaming
+arm executor's behaviour); ``gripper_goal`` is held at the current perceived
+value. Per tick we print the arm joints, the arm error vs. the phase target,
+the perceived base pose, and its drift from the initial pose recorded at
+reset. The arm should reach each phase target within a few ticks; the
+drift-from-initial should stay within marker-detector noise (a few millimeters
+in xy, milliradians in theta) throughout.
 
 Requires the base server (on the NUC), arm server (on the NUC), and marker
 detector (on the laptop) to be up — easiest via ``./scripts/launch.sh``. The
@@ -63,7 +66,7 @@ def _run_phase(
     for i in range(N_STEPS_PER_PHASE):
         action = TidyBotAction(
             arm_goal=list(arm_target),
-            base_pose_target_map=initial_base_pose,
+            base_pose_target_map=obs.map_base_pose,
             gripper_goal=obs.gripper,
         )
         obs, _, _, _, _ = env.step(action)
