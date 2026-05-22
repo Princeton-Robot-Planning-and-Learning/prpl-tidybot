@@ -26,6 +26,9 @@ class ArmInterface(abc.ABC):
     def execute_action(self, arm_goal: list[float], gripper_goal: float) -> None:
         """Send a single arm + gripper command (1 is open, 0 is closed)."""
 
+    def close(self) -> None:
+        """Tear down hardware connections; real-resource subclasses override."""
+
 
 class FakeArmInterface(ArmInterface):
     """Fake arm interface that stores commanded values in memory."""
