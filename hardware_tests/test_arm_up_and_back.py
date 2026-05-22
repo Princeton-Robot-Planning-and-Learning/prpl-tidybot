@@ -43,7 +43,7 @@ way) and avoids having to clone a fresh ObjectCentricState per pair.
 
 Run on the robot (the arm server must already be up):
 
-    python hardware_tests/test_arm_up_and_back.py --target home --n-waypoints 50
+    python hardware_tests/test_arm_up_and_back.py --target home  --n-waypoints 50
     python hardware_tests/test_arm_up_and_back.py --target floor --n-waypoints 50
 """
 
@@ -84,8 +84,11 @@ _TARGETS = {
     ),  # gripper out in front, facing forward (same as test_arm_ik_home)
     "floor": (
         np.array([0.45, 0.0, 0.50]),
-        np.array([0.707, 0.0, 0.707, 0.0]),
-    ),  # ~50 cm above floor in front of the base, gripper pointing down
+        np.array([1.0, 0.0, 0.0, 0.0]),
+    ),  # ~50 cm above floor in front of the base, gripper pointing down.
+    # The quat is a 180° rotation about world-x — that's the rotation that
+    # maps the EE +z axis (the gripper-pointing direction at HOME) from world
+    # +x (forward) to world -z (down). Verified empirically via pybullet FK.
 }
 
 
