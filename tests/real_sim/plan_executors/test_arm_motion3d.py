@@ -354,10 +354,10 @@ def test_gripper_close_not_skipped_by_advance_cursor():
     perceived_at_grasp = _make_state(arm_conf=grasp_joints)
 
     # The cursor should stop at the gripper pair, not jump straight to retract.
-    real_action, sim_action = executor.step(perceived_at_grasp)
-    assert real_action.gripper_goal == pytest.approx(1.0), (
-        "gripper-close command must be emitted on the tick the arm arrives at grasp"
-    )
+    real_action, _ = executor.step(perceived_at_grasp)
+    assert real_action.gripper_goal == pytest.approx(
+        1.0
+    ), "gripper-close command must be emitted on the tick the arm arrives at grasp"
 
 
 def test_gripper_close_command_emitted():
@@ -390,7 +390,7 @@ def test_gripper_hold_after_close_uses_last_goal():
     grasp_joints = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     pairs = [
         (_make_state(arm_conf=grasp_joints), _arm_action(gripper_cmd=-1.0)),  # close
-        (_make_state(arm_conf=grasp_joints), _arm_action(gripper_cmd=0.0)),   # hold
+        (_make_state(arm_conf=grasp_joints), _arm_action(gripper_cmd=0.0)),  # hold
     ]
     executor = StreamingArmMotion3DPlanExecutor(
         distance_fn=_l1_distance, advance_radius=0.5
@@ -439,9 +439,9 @@ def test_gripper_stays_closed_during_retract_after_grasp():
 
     # Tick 2: retract phase; perceived finger still partially closed (0.4)
     real_action, _ = executor.step(_make_state(arm_conf=grasp_joints, gripper=0.4))
-    assert real_action.gripper_goal == pytest.approx(1.0), (
-        "retract phase must hold gripper_goal=1.0 using planned finger, not perceived"
-    )
+    assert real_action.gripper_goal == pytest.approx(
+        1.0
+    ), "retract phase must hold gripper_goal=1.0 using planned finger, not perceived"
 
 
 def test_gripper_dwell_holds_arm_at_grasp():
@@ -478,9 +478,11 @@ def test_gripper_dwell_holds_arm_at_grasp():
     for tick in range(1, 4):
         a, _ = executor.step(perceived)
         assert a.gripper_goal == pytest.approx(1.0), f"tick {tick}: gripper_goal"
-        assert a.arm_goal[0] == pytest.approx(1.0), f"tick {tick}: arm must hold at grasp"
+        assert a.arm_goal[0] == pytest.approx(1.0), f"tick {tick}: arm hold at grasp"
 
     # Tick 4: cursor is now at the retract pair → arm moves to home (0.0)
     action4, _ = executor.step(perceived)
     assert action4.gripper_goal == pytest.approx(1.0)
-    assert action4.arm_goal[0] == pytest.approx(0.0), "arm must retract after dwell ends"
+    assert action4.arm_goal[0] == pytest.approx(
+        0.0
+    ), "arm must retract after dwell ends"
