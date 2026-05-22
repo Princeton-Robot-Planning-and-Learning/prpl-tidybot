@@ -11,16 +11,18 @@ each segment to the appropriate sub-executor:
 * base segments → a :class:`BaseMotion3DPlanExecutor` subclass
   (:class:`PurePursuitBaseMotion3DPlanExecutor` by default;
   :class:`SettleBaseMotion3DPlanExecutor` is also available)
-* arm/gripper segments → :class:`ArmMotion3DPlanExecutor` (currently a
-  stub that raises :class:`NotImplementedError`; the prior in-place
-  implementation produced wrong behaviour on real hardware)
+* arm/gripper segments → an :class:`ArmMotion3DPlanExecutor` subclass
+  (e.g. :class:`StreamingArmMotion3DPlanExecutor`). The arm executor
+  must be wired in explicitly; the dispatcher's ``arm_executor``
+  argument defaults to ``None`` and raises a clear
+  :class:`NotImplementedError` if a trajectory containing arm motion
+  is set without one configured. This avoids silently importing
+  pybullet (needed to construct the streaming arm executor's distance
+  function) for base-only callers.
 
 The dispatcher takes the sub-executors as constructor arguments so
 Hydra can instantiate the desired concrete classes directly via
-``_target_`` — there's no string-based strategy switch here. A
-trajectory that contains any arm or gripper motion raises the first
-time the dispatcher reaches the corresponding segment. This is
-intentional until the arm executor is rewritten.
+``_target_`` — there's no string-based strategy switch here.
 """
 
 from __future__ import annotations
@@ -69,7 +71,7 @@ class Kinematic3DPlanExecutor(
         arm_executor: ArmMotion3DPlanExecutor | None = None,
     ) -> None:
         self._base_executor = base_executor or PurePursuitBaseMotion3DPlanExecutor()
-        self._arm_executor = arm_executor or ArmMotion3DPlanExecutor()
+        self._arm_executor = arm_executor
         self._segments: list[_Segment] = []
         self._segment_idx: int = 0
         self._active: (
@@ -123,9 +125,18 @@ class Kinematic3DPlanExecutor(
     def _load_current_segment(self) -> None:
         """Hand the current segment's pairs to the appropriate sub-executor."""
         segment = self._segments[self._segment_idx]
-        self._active = (
-            self._base_executor if segment.kind == "base" else self._arm_executor
-        )
+        if segment.kind == "base":
+            self._active = self._base_executor
+        else:
+            if self._arm_executor is None:
+                raise NotImplementedError(
+                    "Kinematic3DPlanExecutor reached an arm/gripper segment but "
+                    "no arm_executor was configured. Pass a concrete "
+                    "ArmMotion3DPlanExecutor subclass (e.g. "
+                    "StreamingArmMotion3DPlanExecutor) to the constructor or "
+                    "the Hydra plan_executor config."
+                )
+            self._active = self._arm_executor
         self._active.set_trajectory(segment.pairs)
 
 
