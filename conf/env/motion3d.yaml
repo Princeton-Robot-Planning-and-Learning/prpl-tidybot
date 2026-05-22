@@ -15,7 +15,7 @@ env_model_kwargs: {}
 # tying the target to wherever the robot is sitting keeps it inside the arm
 # reach envelope regardless of base location. No marker detector is involved
 # — the target is fully determined by the perceived base pose and this offset.
-target_offset: [0.4, 0.0, 0.3]
+target_offset: [0.55, 0.0, 0.75]
 
 pipelines:
   fake:
