@@ -23,6 +23,27 @@ env_model_kwargs: {}
 # — the target is fully determined by the perceived base pose and this offset.
 target_offset: [0.55, 0.0, 0.75]
 
+# Streaming arm executor knobs (weighted-L1 joint metric units; see
+# pybullet-helpers' create_joint_distance_fn).
+#
+# arm_advance_radius: how close the perceived joints have to be to the
+# current cursor target before the cursor jumps to the next planned
+# waypoint. Smaller → tighter trajectory tracking (cursor advances later,
+# so OTG decelerates more between waypoints; visibly stepped motion at
+# fine granularities). Larger → smoother / faster motion but the cursor
+# can skip via-points if it gets bigger than typical inter-waypoint spacing.
+# 0.4 stays comfortably outside the OTG decel zone for the dominant
+# shoulder joints — good for unmarked filler waypoints. 0.1 is a
+# reasonable starting value for tight tracking; lower if you want even
+# tighter, accepting visible accel/decel jerks per waypoint.
+#
+# arm_arrival_tolerance: how close the perceived joints have to be to the
+# final waypoint for the executor to declare done(). The compliant
+# controller has a steady-state lag of ~0.1 on the dominant joints, so
+# below ~0.1 the executor will spin until max_iter_total.
+arm_advance_radius: 0.1
+arm_arrival_tolerance: 0.4
+
 pipelines:
   fake:
     real_env:
@@ -37,9 +58,10 @@ pipelines:
       target_offset: ${env.target_offset}
     # Pure-pursuit base motion is academic for Motion3D (the planner never
     # commands base motion in this env) but kept for uniformity with the
-    # other kinematic3d env yamls. The arm executor is the load-bearing one.
-    # advance_radius=0.4 stays out of the OTG decel zone for the dominant
-    # shoulder joints — see test_arm_up_and_back for the derivation.
+    # other kinematic3d env yamls. The arm executor is the load-bearing
+    # one; its advance_radius / arrival_tolerance pull from env-level
+    # values so they can be overridden on the CLI without editing this
+    # file: `env.arm_advance_radius=0.05 env.arm_arrival_tolerance=0.2`.
     plan_executor:
       _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
       base_executor:
@@ -48,8 +70,8 @@ pipelines:
         _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.StreamingArmMotion3DPlanExecutor
         distance_fn:
           _target_: prpl_tidybot.real_sim.plan_executors.distance_factories.create_kinova_distance_fn
-        advance_radius: 0.4
-        arrival_tolerance: 0.4
+        advance_radius: ${env.arm_advance_radius}
+        arrival_tolerance: ${env.arm_arrival_tolerance}
         max_iter_total: 300
   sim:
     real_env:
