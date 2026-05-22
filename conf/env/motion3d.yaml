@@ -1,0 +1,81 @@
+# kinder/Motion3D-v0 — the robot reaches a 3D target point with its end-effector.
+# Bilevel-planning env model lives in
+# kinder_bilevel_planning.env_models.kinematic3d.motion3d. Simpler than
+# kinematic-shelf3d-o1: one operator (MoveToTarget), no pick/place, no fixtures,
+# base stays put. Useful as a first hardware test for the streaming arm
+# plan executor end-to-end through the bilevel planner.
+
+env_name: motion3d
+make_kwargs:
+  id: kinder/Motion3D-v0
+env_model_kwargs: {}
+
+# Target offset from the robot's CURRENT base pose, in the robot's heading
+# frame: `ox` forward, `oy` left, `oz` world-up. Motion3D is arm-only, so
+# tying the target to wherever the robot is sitting keeps it inside the arm
+# reach envelope regardless of base location. No marker detector is involved
+# — the target is fully determined by the perceived base pose and this offset.
+target_offset: [0.4, 0.0, 0.3]
+
+pipelines:
+  fake:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      # FakeInterface stores commanded poses, so the executor converges on
+      # the first tick; skip the per-tick sleep to keep tests fast.
+      control_period: 0.0
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.FakeInterface
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.Motion3DPerceiver
+      target_offset: ${env.target_offset}
+    # Pure-pursuit base motion is academic for Motion3D (the planner never
+    # commands base motion in this env) but kept for uniformity with the
+    # other kinematic3d env yamls. The arm executor is the load-bearing one.
+    # advance_radius=0.4 stays out of the OTG decel zone for the dominant
+    # shoulder joints — see test_arm_up_and_back for the derivation.
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
+      base_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.base_motion3d.PurePursuitBaseMotion3DPlanExecutor
+      arm_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.StreamingArmMotion3DPlanExecutor
+        distance_fn:
+          _target_: prpl_tidybot.real_sim.plan_executors.distance_factories.create_kinova_distance_fn
+        advance_radius: 0.4
+        arrival_tolerance: 0.4
+        max_iter_total: 300
+  sim:
+    real_env:
+      _target_: prpl_tidybot.sim_env.KinderSimEnv
+      env_id: ${env.make_kwargs.id}
+      # Enable inner-env `set_state` so this same pipeline can serve as
+      # a shadow sim for the side-by-side video recorder.
+      allow_state_access: true
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.passthrough.PassThroughPerceiver
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.passthrough.PassThroughPlanExecutor
+  real:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.RealInterface
+        # On-robot wrist/base cameras aren't wired to the perceiver
+        # (perception for Motion3D is fully derived from base pose +
+        # target_offset, no marker needed), and `get_observation` would
+        # otherwise hit NotImplementedError on the real cams.
+        camera_interface:
+          _target_: prpl_tidybot.interfaces.camera_interface.FakeCameraInterface
+        base_interface:
+          _target_: prpl_tidybot.interfaces.base_interface.RealBaseInterface
+          marker_detector_host: ${lab.marker_detector_host}
+      # Off-host render source: subscribes to the JPEG image publisher running
+      # inside the marker-detector daemon. Lets `record.video=true` work
+      # on the real pipeline without the on-robot base camera being wired up.
+      renderer:
+        _target_: prpl_tidybot.rendering.CeilingCameraRenderer
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.Motion3DPerceiver
+      target_offset: ${env.target_offset}
+    plan_executor: ${env.pipelines.fake.plan_executor}
