@@ -54,9 +54,16 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
     kinder.register_all_environments()
 
     pipeline = cfg.env.pipelines[cfg.mode]
-    real_env = hydra.utils.instantiate(pipeline.real_env)
-    perceiver = hydra.utils.instantiate(pipeline.perceiver)
-    plan_executor = hydra.utils.instantiate(pipeline.plan_executor)
+    # `_convert_="all"` is needed wherever a nested `_target_: <EnvConfig>`
+    # block may show up (sim's real_env wires the same custom config the
+    # planner uses) — without it dataclass field defaults like
+    # `Kinematic3DEnvConfig.robot_base_home_pose: SE2Pose` are wrapped as
+    # OmegaConf structured configs and downstream `.to_se3(...)` accesses
+    # fail. Applied uniformly to all three instantiations so future yamls
+    # that nest configs don't trip over the same edge.
+    real_env = hydra.utils.instantiate(pipeline.real_env, _convert_="all")
+    perceiver = hydra.utils.instantiate(pipeline.perceiver, _convert_="all")
+    plan_executor = hydra.utils.instantiate(pipeline.plan_executor, _convert_="all")
 
     # Trajectory recording is on whenever we have a place to write it. The
     # shadow sim reuses the env's own sim pipeline yaml (the same one sim
@@ -66,7 +73,9 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
     recorder: TrajectoryRecorder | None = None
     record_cfg = cfg.get("record")
     if resolved_log_dir is not None:
-        shadow_sim = hydra.utils.instantiate(cfg.env.pipelines.sim.real_env)
+        shadow_sim = hydra.utils.instantiate(
+            cfg.env.pipelines.sim.real_env, _convert_="all"
+        )
         recorder = TrajectoryRecorder(
             log_dir=resolved_log_dir,
             shadow_sim=shadow_sim,
@@ -79,10 +88,20 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
         )
         perceiver = RecordingPerceiver(perceiver, recorder)
 
+    # `hydra.utils.instantiate(_recursive_=True, _convert_="all")` resolves
+    # any `_target_:` blocks nested inside make_kwargs / env_model_kwargs
+    # (e.g. a `Shelf3DEnvConfig` wrapping a `Pose` for a custom shelf_pose).
+    # `_convert_="all"` returns plain Python objects rather than OmegaConf
+    # wrappers — without it, dataclass field defaults like
+    # `Kinematic3DEnvConfig.robot_base_home_pose: SE2Pose` get re-wrapped
+    # as structured configs and downstream `.to_se3(...)` method calls fail
+    # with "Key 'to_se3' not in 'SE2Pose'".
     env_models = build_planner_env_models(
         cfg.env.env_name,
-        cfg.env.make_kwargs,
-        cfg.env.env_model_kwargs,
+        hydra.utils.instantiate(cfg.env.make_kwargs, _recursive_=True, _convert_="all"),
+        hydra.utils.instantiate(
+            cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
+        ),
     )
 
     agent: BilevelPlanningAgent = BilevelPlanningAgent(
@@ -132,7 +151,9 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
             try:
                 preview_or_abort(
                     planned_states=planned_states_from_agent(agent),
-                    shadow_sim=hydra.utils.instantiate(cfg.env.pipelines.sim.real_env),
+                    shadow_sim=hydra.utils.instantiate(
+                        cfg.env.pipelines.sim.real_env, _convert_="all"
+                    ),
                     log_dir=resolved_log_dir,
                     seed=cfg.seed,
                     fps=int(preview_cfg.get("fps", 10)),
