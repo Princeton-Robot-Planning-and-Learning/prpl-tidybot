@@ -205,6 +205,43 @@ def test_cursor_caps_at_final_waypoint():
 # ---------------------------------------------------------------------------
 
 
+def test_done_not_immediate_when_final_target_equals_initial_perceived():
+    """Multi-waypoint arm segment is not immediately done even when the final target
+    equals the initial perceived position.
+
+    Regression test for the merged approach+retract arm segment bug: the Pick
+    skill produces one "arm" segment whose final waypoint is HOME (retract), the
+    same position the robot starts at. Without the cursor-guard in done(), the
+    distance check fires before a single step() call and the arm never moves.
+    """
+    # Simulate: approach from [0.0]*7 out to [1.0, 0, ...] and back to [0.0]*7.
+    home = [0.0] * 7
+    pairs = [
+        # approach leg
+        (_make_state(arm_conf=home), _arm_action(arm_deltas=[0.5, 0, 0, 0, 0, 0, 0])),
+        (
+            _make_state(arm_conf=[0.5, 0, 0, 0, 0, 0, 0]),
+            _arm_action(arm_deltas=[0.5, 0, 0, 0, 0, 0, 0]),
+        ),
+        # retract leg — final target is home ([1.0 - 0.5 - 0.5, ...] = [0.0, ...])
+        (
+            _make_state(arm_conf=[1.0, 0, 0, 0, 0, 0, 0]),
+            _arm_action(arm_deltas=[-0.5, 0, 0, 0, 0, 0, 0]),
+        ),
+        (
+            _make_state(arm_conf=[0.5, 0, 0, 0, 0, 0, 0]),
+            _arm_action(arm_deltas=[-0.5, 0, 0, 0, 0, 0, 0]),
+        ),
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.1, arrival_tolerance=0.05
+    )
+    executor.set_trajectory(pairs)
+
+    # Before any step(): perceived = home = final_target — must NOT be done.
+    assert executor.done(_make_state(arm_conf=home)) is False
+
+
 def test_done_true_when_within_arrival_tolerance_of_final_waypoint():
     """Done flips True once perceived joints are within arrival_tolerance of the final
     waypoint."""
@@ -281,6 +318,48 @@ def test_commanded_action_holds_base_at_perceived_pose():
     assert real_action.base_pose_target_map.theta() == pytest.approx(0.5)
 
 
+def test_gripper_close_not_skipped_by_advance_cursor():
+    """Gripper-close pairs (arm_delta=0) are not skipped when the arm is already
+    at the target joint position.
+
+    Regression test: the cursor crossover advance skips any pair whose target
+    equals the perceived joints. Gripper-close pairs have arm_delta=0, so their
+    target is the current grasp position — the cursor was jumping past them and
+    the gripper command was never issued.
+    """
+    grasp_joints = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pairs = [
+        # approach: move from home to grasp
+        (
+            _make_state(arm_conf=[0.0] * 7),
+            _arm_action(arm_deltas=[1.0, 0, 0, 0, 0, 0, 0]),
+        ),
+        # gripper close: arm holds, gripper closes
+        (
+            _make_state(arm_conf=grasp_joints),
+            _arm_action(arm_deltas=[0.0] * 7, gripper_cmd=-1.0),
+        ),
+        # retract: move back toward home
+        (
+            _make_state(arm_conf=grasp_joints),
+            _arm_action(arm_deltas=[-1.0, 0, 0, 0, 0, 0, 0]),
+        ),
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.5
+    )
+    executor.set_trajectory(pairs)
+
+    # Perceive the arm at the grasp position (approach just completed).
+    perceived_at_grasp = _make_state(arm_conf=grasp_joints)
+
+    # The cursor should stop at the gripper pair, not jump straight to retract.
+    real_action, _ = executor.step(perceived_at_grasp)
+    assert real_action.gripper_goal == pytest.approx(
+        1.0
+    ), "gripper-close command must be emitted on the tick the arm arrives at grasp"
+
+
 def test_gripper_close_command_emitted():
     """A gripper-close (<-0.5) becomes TidyBotAction.gripper_goal=1.0."""
     state = _make_state(gripper=0.4, arm_conf=[0.0] * 7)
@@ -292,12 +371,118 @@ def test_gripper_close_command_emitted():
     assert real_action.gripper_goal == 1.0
 
 
-def test_gripper_no_change_passes_through_current_finger():
-    """A gripper command in [-0.5, 0.5] passes through the perceived finger_state."""
-    state = _make_state(gripper=0.4, arm_conf=[0.0] * 7)
-    pairs = [(state, _arm_action(gripper_cmd=0.0))]
+def test_gripper_hold_before_any_command_uses_perceived():
+    """Before any explicit open/close command, a hold action (|cmd| <= 0.5) uses
+    the perceived finger_state as the goal — there is no prior command to remember."""
+    pairs = [(_make_state(arm_conf=[0.0] * 7), _arm_action(gripper_cmd=0.0))]
     executor = StreamingArmMotion3DPlanExecutor(distance_fn=_l1_distance)
     executor.set_trajectory(pairs)
 
-    real_action, _ = executor.step(state)
-    assert real_action.gripper_goal == pytest.approx(0.4)
+    perceived_state = _make_state(gripper=0.7, arm_conf=[0.0] * 7)
+    real_action, _ = executor.step(perceived_state)
+    assert real_action.gripper_goal == pytest.approx(0.7)
+
+
+def test_gripper_hold_after_close_uses_last_goal():
+    """After an explicit close command, hold ticks maintain gripper_goal=1.0 regardless
+    of the perceived finger_state. The kinder planning sim does not update finger_state
+    after close actions, so we cannot read it from the planned state."""
+    grasp_joints = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pairs = [
+        (_make_state(arm_conf=grasp_joints), _arm_action(gripper_cmd=-1.0)),  # close
+        (_make_state(arm_conf=grasp_joints), _arm_action(gripper_cmd=0.0)),  # hold
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.5
+    )
+    executor.set_trajectory(pairs)
+
+    # Tick 1: close command — advances cursor (dwell=0)
+    executor.step(_make_state(arm_conf=grasp_joints, gripper=0.0))
+    # Tick 2: hold — perceived finger still 0.0, but last_gripper_goal=1.0
+    action, _ = executor.step(_make_state(arm_conf=grasp_joints, gripper=0.0))
+    assert action.gripper_goal == pytest.approx(1.0)
+
+
+def test_gripper_stays_closed_during_retract_after_grasp():
+    """After a gripper-close, retract pairs maintain gripper_goal=1.0 even when
+    the perceived finger has not yet reached 1.0.
+
+    The planned state for retract pairs has finger_state=1.0 (post-grasp). Using
+    the planned finger prevents the arm executor from re-issuing the partially-closed
+    perceived position as the gripper hold target on every retract tick.
+    """
+    grasp_joints = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pairs = [
+        # gripper-close pair: arm holds, gripper closes
+        (
+            _make_state(arm_conf=grasp_joints, gripper=0.4),
+            _arm_action(arm_deltas=[0.0] * 7, gripper_cmd=-1.0),
+        ),
+        # retract pair: planned state has finger=1.0 (post-grasp)
+        (
+            _make_state(arm_conf=grasp_joints, gripper=1.0),
+            _arm_action(arm_deltas=[-1.0, 0, 0, 0, 0, 0, 0]),
+        ),
+    ]
+    # gripper_dwell_ticks=0: cursor advances immediately after one gripper tick
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.5,
+        arrival_tolerance=0.05,
+        gripper_dwell_ticks=0,
+    )
+    executor.set_trajectory(pairs)
+
+    # Tick 1: arm at grasp — gripper-close issued, cursor advances to retract
+    executor.step(_make_state(arm_conf=grasp_joints, gripper=0.4))
+
+    # Tick 2: retract phase; perceived finger still partially closed (0.4)
+    real_action, _ = executor.step(_make_state(arm_conf=grasp_joints, gripper=0.4))
+    assert real_action.gripper_goal == pytest.approx(
+        1.0
+    ), "retract phase must hold gripper_goal=1.0 using planned finger, not perceived"
+
+
+def test_gripper_dwell_holds_arm_at_grasp():
+    """gripper_dwell_ticks > 0 keeps the arm at the grasp position for that many
+    extra ticks after issuing the close command, before advancing to retract.
+
+    This lets the Kinova gripper physically close around the object before the
+    arm starts retracting.
+    """
+    grasp_joints = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pairs = [
+        (
+            _make_state(arm_conf=grasp_joints, gripper=0.4),
+            _arm_action(arm_deltas=[0.0] * 7, gripper_cmd=-1.0),
+        ),
+        (
+            _make_state(arm_conf=grasp_joints, gripper=1.0),
+            _arm_action(arm_deltas=[-1.0, 0, 0, 0, 0, 0, 0]),
+        ),
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.5,
+        arrival_tolerance=0.05,
+        gripper_dwell_ticks=2,
+    )
+    executor.set_trajectory(pairs)
+
+    perceived = _make_state(arm_conf=grasp_joints, gripper=0.4)
+
+    # Ticks 1–3: dwell counts down (2→1→0), cursor does not advance yet; arm at grasp.
+    # The cursor advances at the END of the tick when dwell_remaining hits 0, so the
+    # retract target first appears on tick 4.
+    for tick in range(1, 4):
+        a, _ = executor.step(perceived)
+        assert a.gripper_goal == pytest.approx(1.0), f"tick {tick}: gripper_goal"
+        assert a.arm_goal[0] == pytest.approx(1.0), f"tick {tick}: arm hold at grasp"
+
+    # Tick 4: cursor is now at the retract pair → arm moves to home (0.0)
+    action4, _ = executor.step(perceived)
+    assert action4.gripper_goal == pytest.approx(1.0)
+    assert action4.arm_goal[0] == pytest.approx(
+        0.0
+    ), "arm must retract after dwell ends"
