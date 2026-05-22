@@ -371,19 +371,37 @@ def test_gripper_close_command_emitted():
     assert real_action.gripper_goal == 1.0
 
 
-def test_gripper_no_change_uses_planned_finger():
-    """A gripper command in [-0.5, 0.5] uses the planned state's finger_state as the
-    hold target (not the perceived finger). This keeps the gripper closed throughout
-    retract when the planned state already has finger_state=1.0."""
-    planned_state = _make_state(gripper=0.4, arm_conf=[0.0] * 7)
-    pairs = [(planned_state, _arm_action(gripper_cmd=0.0))]
+def test_gripper_hold_before_any_command_uses_perceived():
+    """Before any explicit open/close command, a hold action (|cmd| <= 0.5) uses
+    the perceived finger_state as the goal — there is no prior command to remember."""
+    pairs = [(_make_state(arm_conf=[0.0] * 7), _arm_action(gripper_cmd=0.0))]
     executor = StreamingArmMotion3DPlanExecutor(distance_fn=_l1_distance)
     executor.set_trajectory(pairs)
 
-    # Perceived finger differs from planned finger to make the distinction explicit.
     perceived_state = _make_state(gripper=0.7, arm_conf=[0.0] * 7)
     real_action, _ = executor.step(perceived_state)
-    assert real_action.gripper_goal == pytest.approx(0.4)
+    assert real_action.gripper_goal == pytest.approx(0.7)
+
+
+def test_gripper_hold_after_close_uses_last_goal():
+    """After an explicit close command, hold ticks maintain gripper_goal=1.0 regardless
+    of the perceived finger_state. The kinder planning sim does not update finger_state
+    after close actions, so we cannot read it from the planned state."""
+    grasp_joints = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pairs = [
+        (_make_state(arm_conf=grasp_joints), _arm_action(gripper_cmd=-1.0)),  # close
+        (_make_state(arm_conf=grasp_joints), _arm_action(gripper_cmd=0.0)),   # hold
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.5
+    )
+    executor.set_trajectory(pairs)
+
+    # Tick 1: close command — advances cursor (dwell=0)
+    executor.step(_make_state(arm_conf=grasp_joints, gripper=0.0))
+    # Tick 2: hold — perceived finger still 0.0, but last_gripper_goal=1.0
+    action, _ = executor.step(_make_state(arm_conf=grasp_joints, gripper=0.0))
+    assert action.gripper_goal == pytest.approx(1.0)
 
 
 def test_gripper_stays_closed_during_retract_after_grasp():

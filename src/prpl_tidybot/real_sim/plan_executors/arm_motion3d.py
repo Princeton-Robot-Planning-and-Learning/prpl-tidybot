@@ -160,6 +160,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._done_latched: bool = False
         self._gripper_cursor: int = -1
         self._gripper_ticks_remaining: int = 0
+        self._last_gripper_goal: float | None = None
 
     def _on_set_trajectory(self) -> None:
         self._targets = [
@@ -171,6 +172,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._done_latched = False
         self._gripper_cursor = -1
         self._gripper_ticks_remaining = 0
+        self._last_gripper_goal = None
 
     def step(
         self, sim_state: ObjectCentricState
@@ -182,10 +184,16 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         perceived = _perceived_joints(sim_state, self._robot_name)
         self._advance_cursor(perceived)
         target = self._targets[self._cursor]
-        planned_state, sim_action = self._pairs[self._cursor]
-        planned_finger = _planned_finger(planned_state, self._robot_name)
+        _, sim_action = self._pairs[self._cursor]
+        # Remember the most recent explicit open/close so that subsequent "hold"
+        # ticks (e.g. the entire retract phase) re-issue the same gripper goal.
+        # The planning sim's finger_state may not reflect the real gripper state
+        # (kinder does not update finger_state after close actions), so we cannot
+        # rely on the planned state; tracking the last command is authoritative.
+        if _is_gripper_cmd(sim_action):
+            self._last_gripper_goal = 1.0 if float(sim_action[10]) < -0.5 else 0.0
         action = _build_tidybot_action(
-            sim_state, target, sim_action, self._robot_name, planned_finger
+            sim_state, target, sim_action, self._robot_name, self._last_gripper_goal
         )
         self._tick_count += 1
         # Advance past a gripper pair after gripper_dwell_ticks extra ticks.
@@ -263,11 +271,6 @@ def _perceived_joints(sim_state: ObjectCentricState, robot_name: str) -> JointPo
     return [sim_state.get(robot, f"joint_{j + 1}") for j in range(7)]
 
 
-def _planned_finger(planned_state: ObjectCentricState, robot_name: str) -> float:
-    robot = planned_state.get_object_from_name(robot_name)
-    return float(planned_state.get(robot, "finger_state"))
-
-
 def _absolute_target(
     state: ObjectCentricState,
     sim_action: NDArray[np.floating],
@@ -295,15 +298,15 @@ def _build_tidybot_action(
     arm_target: JointPositions,
     sim_action: NDArray[np.floating],
     robot_name: str,
-    planned_finger: float | None = None,
+    last_gripper_goal: float | None = None,
 ) -> TidyBotAction:
     """Pack the commanded arm goal + held base pose + gripper into a TidyBotAction.
 
-    For "hold" gripper commands (|action[10]| <= 0.5), uses ``planned_finger``
-    as the hold target when provided. This avoids re-issuing the partially-closed
-    perceived finger position during retract after a gripper-close pair — the
-    planned state already has finger_state=1.0, so the gripper continues closing
-    rather than freezing at whatever position it had reached after one tick.
+    For "hold" gripper commands (|action[10]| <= 0.5), uses ``last_gripper_goal``
+    as the hold target when provided (the last explicit open/close command issued
+    by the executor), falling back to perceived finger_state when no explicit
+    command has been issued yet. This ensures the gripper stays closed throughout
+    retract after a gripper-close pair instead of reverting to perceived state.
     """
     robot = sim_state.get_object_from_name(robot_name)
     base_goal = SE2(
@@ -312,8 +315,8 @@ def _build_tidybot_action(
         theta=float(sim_state.get(robot, "pos_base_rot")),
     )
     hold_finger = (
-        planned_finger
-        if planned_finger is not None
+        last_gripper_goal
+        if last_gripper_goal is not None
         else float(sim_state.get(robot, "finger_state"))
     )
     gripper_goal = _gripper_target(hold_finger, sim_action)
