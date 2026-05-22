@@ -318,6 +318,48 @@ def test_commanded_action_holds_base_at_perceived_pose():
     assert real_action.base_pose_target_map.theta() == pytest.approx(0.5)
 
 
+def test_gripper_close_not_skipped_by_advance_cursor():
+    """Gripper-close pairs (arm_delta=0) are not skipped when the arm is already
+    at the target joint position.
+
+    Regression test: the cursor crossover advance skips any pair whose target
+    equals the perceived joints. Gripper-close pairs have arm_delta=0, so their
+    target is the current grasp position — the cursor was jumping past them and
+    the gripper command was never issued.
+    """
+    grasp_joints = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pairs = [
+        # approach: move from home to grasp
+        (
+            _make_state(arm_conf=[0.0] * 7),
+            _arm_action(arm_deltas=[1.0, 0, 0, 0, 0, 0, 0]),
+        ),
+        # gripper close: arm holds, gripper closes
+        (
+            _make_state(arm_conf=grasp_joints),
+            _arm_action(arm_deltas=[0.0] * 7, gripper_cmd=-1.0),
+        ),
+        # retract: move back toward home
+        (
+            _make_state(arm_conf=grasp_joints),
+            _arm_action(arm_deltas=[-1.0, 0, 0, 0, 0, 0, 0]),
+        ),
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.5
+    )
+    executor.set_trajectory(pairs)
+
+    # Perceive the arm at the grasp position (approach just completed).
+    perceived_at_grasp = _make_state(arm_conf=grasp_joints)
+
+    # The cursor should stop at the gripper pair, not jump straight to retract.
+    real_action, sim_action = executor.step(perceived_at_grasp)
+    assert real_action.gripper_goal == pytest.approx(1.0), (
+        "gripper-close command must be emitted on the tick the arm arrives at grasp"
+    )
+
+
 def test_gripper_close_command_emitted():
     """A gripper-close (<-0.5) becomes TidyBotAction.gripper_goal=1.0."""
     state = _make_state(gripper=0.4, arm_conf=[0.0] * 7)

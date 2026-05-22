@@ -177,6 +177,14 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         sim_action = self._pairs[self._cursor][1]
         action = _build_tidybot_action(sim_state, target, sim_action, self._robot_name)
         self._tick_count += 1
+        # After issuing one gripper command, advance cursor to the next pair.
+        # Gripper-close pairs all have arm_delta=0 (target = current grasp
+        # joints), so _advance_cursor skips them in a single tick. Advancing
+        # by 1 here ensures each gripper pair is executed for exactly one
+        # tick; the Kinova servo keeps driving to the commanded target between
+        # policy ticks, so a single command per planning step is sufficient.
+        if _is_gripper_cmd(sim_action) and self._cursor + 1 < len(self._targets):
+            self._cursor += 1
         return action, sim_action
 
     def done(self, sim_state: ObjectCentricState) -> bool:
@@ -206,6 +214,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
     def _advance_cursor(self, perceived: JointPositions) -> None:
         while (
             self._cursor + 1 < len(self._targets)
+            and not _is_gripper_cmd(self._pairs[self._cursor][1])
             and self._distance_fn(perceived, self._targets[self._cursor])
             <= self._advance_radius
         ):
@@ -215,6 +224,11 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
 # ============================================================================
 # Module-level helpers
 # ============================================================================
+
+
+def _is_gripper_cmd(action: NDArray[np.floating]) -> bool:
+    """True when action[10] encodes an explicit open or close command (|cmd| > 0.5)."""
+    return abs(float(action[10])) > 0.5
 
 
 def _validate_arm_only(action: NDArray[np.floating]) -> None:
