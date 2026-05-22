@@ -88,6 +88,13 @@ pipelines:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv
       env_id: ${env.make_kwargs.id}
+      # Same custom env config as the planner's ref env / internal sim
+      # (see env.env_model_kwargs.config above) so the shadow sim used
+      # by the preview / recorder also stages the shelf at env.shelf_pose
+      # instead of Shelf3DEnvConfig's default (2.0, 2.4, 0.02). Without
+      # this, the planned-trajectory preview shows the shelf in the
+      # wrong place.
+      config: ${env.env_model_kwargs.config}
       # Enable inner-env `set_state` so this same pipeline can serve as
       # a shadow sim for the side-by-side video recorder.
       allow_state_access: true
