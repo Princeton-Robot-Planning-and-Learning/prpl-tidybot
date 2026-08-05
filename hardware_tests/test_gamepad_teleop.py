@@ -1,31 +1,47 @@
-# Author: Jimmy Wu
-# Date: October 2024
-#
 # Note: This code is only intended for debugging the base controller.
 # In external code, avoid directly importing Vehicle as done here.
 # Instead, please use the RPC server in base_server.py, which runs the
 # low-level controller in a dedicated, real-time process to help minimize
 # unintended latency spikes caused by external code.
+"""Hardware integration test: teleoperate the base with a gamepad.
+
+Run on the robot. Connects to a Logitech F710 gamepad and drives the base directly
+through the low-level Vehicle controller.
+
+python hardware_tests/test_gamepad_teleop.py
+"""
 
 import os
 import signal
 import time
+
 import numpy as np
 import pygame
 from pygame.joystick import Joystick
-from base_controller import Vehicle
 
-pygame.init()
+from prpl_tidybot.third_party.base_controller import Vehicle
 
-def apply_deadzone(arr, deadzone_size=0.05):
-    return np.where(np.abs(arr) <= deadzone_size, 0, np.sign(arr) * (np.abs(arr) - deadzone_size) / (1 - deadzone_size))
+pygame.init()  # pylint: disable=no-member
+
+
+def apply_deadzone(arr: np.ndarray, deadzone_size: float = 0.05) -> np.ndarray:
+    """Zero out small values and rescale the rest to fill the input range."""
+    return np.where(
+        np.abs(arr) <= deadzone_size,
+        0,
+        np.sign(arr) * (np.abs(arr) - deadzone_size) / (1 - deadzone_size),
+    )
+
 
 class GamepadTeleop:
-    def __init__(self):
-        self.joy = Joystick(0)  # Logitech F710
-        self.vehicle = None
+    """Drives the base's low-level Vehicle controller from a gamepad."""
 
-    def run(self):
+    def __init__(self) -> None:
+        self.joy = Joystick(0)  # Logitech F710
+        self.vehicle: Vehicle | None = None
+
+    def run(self) -> None:
+        """Poll the gamepad in a loop and forward commands to the vehicle."""
         last_enabled = False
         frame = None
         print('Press the "Start" button on the gamepad to start control')
@@ -34,26 +50,28 @@ class GamepadTeleop:
 
             # Start control
             if not self.vehicle and self.joy.get_button(7):  # 7 is the "Start" button
-                self.vehicle = Vehicle(max_vel=(1.0, 1.0, 3.14), max_accel=(0.5, 0.5, 2.36))
-                self.vehicle.start_control()
+                self.vehicle = Vehicle(  # type: ignore[no-untyped-call]
+                    max_vel=(1.0, 1.0, 3.14), max_accel=(0.5, 0.5, 2.36)
+                )
+                self.vehicle.start_control()  # type: ignore[no-untyped-call]
                 last_enabled = False
-                frame = 'local'
-                print('Control started')
+                frame = "local"
+                print("Control started")
 
             # Stop control
             if self.vehicle and self.joy.get_button(6):  # 6 is the "Back" button
-                self.vehicle.stop_control()
+                self.vehicle.stop_control()  # type: ignore[no-untyped-call]
                 self.vehicle = None
-                print('Control stopped')
+                print("Control stopped")
 
             if self.vehicle:
                 # Hold down left/right bumper to enable control in local/global frame
                 left_bumper = self.joy.get_button(4)
                 right_bumper = self.joy.get_button(5)
-                frame = 'local' if left_bumper else 'global'
+                frame = "local" if left_bumper else "global"
                 if left_bumper or right_bumper:
                     if not last_enabled:
-                        print(f'Robot enabled ({frame} frame)')
+                        print(f"Robot enabled ({frame} frame)")
                         last_enabled = True
 
                     # Compute unscaled target velocity
@@ -67,24 +85,31 @@ class GamepadTeleop:
 
                     # Send command to robot
                     target_velocity = self.vehicle.max_vel * target_velocity
-                    self.vehicle.set_target_velocity(target_velocity, frame=frame)
-                    # self.vehicle.set_target_position(self.vehicle.x + 1.5 * target_velocity)
+                    self.vehicle.set_target_velocity(  # type: ignore[no-untyped-call]
+                        target_velocity, frame=frame
+                    )
+                    # self.vehicle.set_target_position(
+                    #     self.vehicle.x + 1.5 * target_velocity
+                    # )
 
                 elif last_enabled:
-                    print('Robot disabled')
+                    print("Robot disabled")
                     last_enabled = False
 
             time.sleep(0.01)
 
-# Handle SIGTERM
-def handler(signum, frame):
+
+def handler(_signum: int, _frame: object) -> None:
+    """Translate SIGTERM into SIGINT so the finally block below still runs."""
     os.kill(os.getpid(), signal.SIGINT)
+
+
 signal.signal(signal.SIGTERM, handler)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     teleop = GamepadTeleop()
     try:
         teleop.run()
     finally:
         if teleop.vehicle:
-            teleop.vehicle.stop_control()
+            teleop.vehicle.stop_control()  # type: ignore[no-untyped-call]
