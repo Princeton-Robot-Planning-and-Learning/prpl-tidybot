@@ -90,12 +90,14 @@ gem install tmuxinator                          # tmux itself must already be in
 
 # Generate a key if you don't have one yet, then trust it on each remote.
 ssh-keygen -t ed25519
-ssh-copy-id tidybot@tidybot-nuc
-ssh-copy-id yixuan@tidybot-laptop
+ssh-copy-id tidybot@tidybot-nuc-prpl
+ssh-copy-id yixuan@tidybot-laptop-prpl
 ```
 
-The defaults assume `~/.ssh/config` aliases named `tidybot-nuc` and
-`tidybot-laptop`. If yours are different, override the two env vars below.
+The defaults assume `~/.ssh/config` aliases named `tidybot-nuc-prpl` and
+`tidybot-laptop-prpl` (or `tidybot-nuc` / `tidybot-laptop` under
+`PRPL_LAB=fwing`), each with its `User` set so no `user@` prefix is needed.
+If yours are different, override the env vars below.
 Without passwordless SSH every tmuxinator pane prompts for a password and
 the launcher is no faster than starting the servers by hand. Optionally
 add `ControlMaster auto` / `ControlPath ~/.ssh/cm-%r@%h:%p` /
@@ -104,11 +106,22 @@ connection per remote.
 
 ### Configuration (env vars with defaults)
 
-| Variable               | Default                  | What it points at                              |
-| ---------------------- | ------------------------ | ---------------------------------------------- |
-| `PRPL_NUC_HOST`        | `tidybot@tidybot-nuc`    | SSH target for the robot NUC.                  |
-| `PRPL_PERCEPTION_HOST` | `yixuan@tidybot-laptop`  | SSH target for the perception PC.              |
-| `PRPL_REPO_DIR`        | `~/prpl-tidybot`         | Repo checkout path on the *remote* machines.   |
+| Variable               | Default                                        | What it points at                                                              |
+| ---------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------ |
+| `PRPL_LAB`             | `prpl`                                         | Lab to run in; selects `conf/lab/<lab>.yaml` and the SSH aliases defaulted below. |
+| `PRPL_NUC_HOST`        | `tidybot-nuc-prpl` (`tidybot-nuc` for fwing)   | SSH target for the robot NUC.                                                  |
+| `PRPL_PERCEPTION_HOST` | `tidybot-laptop-prpl` (`tidybot-laptop` for fwing) | SSH target for the perception PC.                                          |
+| `PRPL_REPO_DIR`        | `~/prpl-tidybot`                               | Repo checkout path on the *remote* machines.                                   |
+
+`PRPL_LAB` is read locally by `.tmuxinator.yml` when it renders. It is *not*
+forwarded over SSH, so the servers on the remote machines fall back to their
+own default when `third_party/constants.py` reads it at import time — see
+issue #43. The marker detector is unaffected because the launcher passes
+`--lab` to it explicitly.
+
+`PRPL_REPO_DIR` is also read by `.tmuxinator.yml` as the *local* session root,
+where it means a different path; setting it for the remote machines will break
+the local root. See issue #77.
 
 ### Launch
 
