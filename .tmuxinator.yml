@@ -1,5 +1,5 @@
 name: prpl-tidybot
-root: <%= ENV['PRPL_REPO_DIR'] || '~/prpl-tidybot' %>
+root: <%= ENV['PRPL_REPO_DIR'] || Dir.pwd %>
 <% branch = (@args && @args[0]) || '' %>
 <% lab = ENV['PRPL_LAB'] || 'prpl' %>
 <% nuc_default    = lab == 'fwing' ? 'tidybot-nuc'    : 'tidybot-nuc-prpl' %>
