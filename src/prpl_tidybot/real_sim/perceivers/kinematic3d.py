@@ -8,15 +8,9 @@ the non-robot object detection differs per env.
 """
 
 import abc
-import math
 from typing import Any
 
 from kinder.envs.kinematic3d.base_motion3d import BaseMotion3DObjectCentricState
-from kinder.envs.kinematic3d.ground3d import (
-    Ground3DEnvConfig,
-    Ground3DObjectCentricState,
-)
-from kinder.envs.kinematic3d.motion3d import Motion3DObjectCentricState
 from kinder.envs.kinematic3d.object_types import (
     Kinematic3DCuboidType,
     Kinematic3DEnvTypeFeatures,
@@ -41,12 +35,6 @@ from prpl_tidybot.structs import TidyBotObservation
 
 _DEFAULT_CUBE_HALF_EXTENTS = PrplLab3DEnvConfig().block_half_extents
 _DEFAULT_SHELF_CUBE_HALF_EXTENTS = Shelf3DEnvConfig().block_half_extents
-_GROUND_BLOCK_HALF = Ground3DEnvConfig().block_size / 2
-_DEFAULT_GROUND_CUBE_HALF_EXTENTS = (
-    _GROUND_BLOCK_HALF,
-    _GROUND_BLOCK_HALF,
-    _GROUND_BLOCK_HALF,
-)
 
 
 class KinematicRobotPerceiverBase(
@@ -222,58 +210,6 @@ class BaseMotion3DPerceiver(KinematicRobotPerceiverBase):
         }
 
 
-class Motion3DPerceiver(KinematicRobotPerceiverBase):
-    """Perceiver for kinder/Motion3D-v0.
-
-    Emits a single `target` of `Kinematic3DPointType` computed as the
-    robot's current base pose plus a fixed `target_offset` interpreted
-    in the robot's heading frame: `ox` forward, `oy` left, `oz` world-
-    up. Motion3D is an arm-only env, so tying the target to the
-    robot's actual base pose makes it always reachable regardless of
-    where the robot happens to be sitting in the lab (the arm reach
-    envelope is base-relative, but the kinder env's default target
-    sampler picks world-frame points that may be far from a real
-    robot's actual pose — see the No-Plan-Found we hit before this
-    refactor).
-
-    No marker-detector source is involved on this perceiver — Motion3D
-    doesn't need one, the target is fully determined by the perceived
-    base pose and the configured offset.
-    """
-
-    def __init__(
-        self,
-        target_offset: tuple[float, float, float],
-        robot_name: str = "robot",
-    ) -> None:
-        super().__init__(robot_name=robot_name)
-        self._target_offset = (
-            float(target_offset[0]),
-            float(target_offset[1]),
-            float(target_offset[2]),
-        )
-
-    @property
-    def _state_cls(self) -> type[ObjectCentricState]:
-        return Motion3DObjectCentricState
-
-    def _detect_objects(
-        self, obs: TidyBotObservation, info: dict[str, Any]
-    ) -> dict[Object, dict[str, float]]:
-        del info
-        ox, oy, oz = self._target_offset
-        theta = obs.map_base_pose.theta()
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        return {
-            Object("target", Kinematic3DPointType): {
-                "x": obs.map_base_pose.x + ox * cos_t - oy * sin_t,
-                "y": obs.map_base_pose.y + ox * sin_t + oy * cos_t,
-                "z": oz,
-            }
-        }
-
-
 class Shelf3DPerceiver(KinematicRobotPerceiverBase):
     """Perceiver for kinder/KinematicShelf3D-o{N}-v0.
 
@@ -337,76 +273,6 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
                 "pose_qz": 0.0,
                 "pose_qw": 1.0,
             },
-            Object("cube0", Kinematic3DCuboidType): {
-                "pose_x": cube_x,
-                "pose_y": cube_y,
-                "pose_z": cube_z,
-                "pose_qx": 0.0,
-                "pose_qy": 0.0,
-                "pose_qz": 0.0,
-                "pose_qw": 1.0,
-                "grasp_active": 0.0,
-                "object_type": 0.0,
-                "half_extent_x": hx,
-                "half_extent_y": hy,
-                "half_extent_z": hz,
-            },
-        }
-
-
-class Ground3DPerceiver(KinematicRobotPerceiverBase):
-    """Perceiver for kinder/Ground3D-o{N}-v0.
-
-    Emits a single `cube0` of `Kinematic3DCuboidType` whose `(x, y, z)`
-    comes from a `TargetSource`. Same pattern as `BaseMotion3DPerceiver`:
-    in fake / sim modes the source is a `ConstantTargetSource` threaded
-    in from the env yaml; in real mode it's a
-    `MarkerDetectorTargetSource` for the ArUco that marks the cube. The
-    marker detector only provides `(x, y, z)` so the cube's orientation
-    defaults to identity (z-up, lying flat). The cube target is cached
-    once per :meth:`reset` for the same control-loop-latency reason as
-    in `BaseMotion3DPerceiver` — the cube is stationary during a
-    rollout by design.
-
-    Only emits `cube0` — Ground3D-o{>1} variants (with obstructing
-    cubes) are not currently supported by this perceiver, since we
-    have no way to detect more than one marker simultaneously.
-    """
-
-    def __init__(
-        self,
-        target_source: TargetSource,
-        cube_half_extents: tuple[
-            float, float, float
-        ] = _DEFAULT_GROUND_CUBE_HALF_EXTENTS,
-        robot_name: str = "robot",
-    ) -> None:
-        super().__init__(robot_name=robot_name)
-        self._target_source = target_source
-        self._cube_half_extents = tuple(cube_half_extents)
-        self._cached_cube_target: tuple[float, float, float] | None = None
-
-    @property
-    def _state_cls(self) -> type[ObjectCentricState]:
-        return Ground3DObjectCentricState
-
-    def reset(
-        self, obs: TidyBotObservation, info: dict[str, Any]
-    ) -> ObjectCentricState:
-        self._cached_cube_target = self._target_source.get_target()
-        return super().reset(obs, info)
-
-    def _detect_objects(
-        self, obs: TidyBotObservation, info: dict[str, Any]
-    ) -> dict[Object, dict[str, float]]:
-        del obs, info
-        if self._cached_cube_target is None:
-            # Defensive — reset() should have run first; populate lazily
-            # so callers that call step() before reset() still get a cube.
-            self._cached_cube_target = self._target_source.get_target()
-        cube_x, cube_y, cube_z = self._cached_cube_target
-        hx, hy, hz = self._cube_half_extents
-        return {
             Object("cube0", Kinematic3DCuboidType): {
                 "pose_x": cube_x,
                 "pose_y": cube_y,
