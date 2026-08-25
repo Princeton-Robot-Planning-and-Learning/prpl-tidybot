@@ -15,7 +15,7 @@ dependencies = [
    "spatialmath-python",
    "prpl_utils>=0.0.7",
    "relational_structs>=0.0.1",
-   "kindergarden>=0.1.3",
+   "kindergarden>=0.2.1",
    "hydra-core",
    "kinder_bilevel_planning @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@a629b78#subdirectory=kinder-bilevel-planning",
    "kinder_models @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@a629b78#subdirectory=kinder-models",
