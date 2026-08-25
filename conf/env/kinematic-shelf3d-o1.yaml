@@ -40,12 +40,25 @@ cube_marker_z: 0.025
 # override here per-lab once the real shelf is staged.
 shelf_pose: [1.5, 1.5, 0.02]
 
-# Streaming arm executor knobs (weighted-L1 joint metric units). See
-# conf/env/motion3d.yaml for the full discussion of trade-offs; the
-# short version is that 0.4 stays outside the Kinova shoulder OTG decel
-# zone for smooth motion, smaller values give tighter tracking at the
-# cost of visible per-waypoint accel/decel. Override on the CLI with
+# Streaming arm executor knobs (weighted-L1 joint metric units; see
+# pybullet-helpers' create_joint_distance_fn). Override on the CLI with
 # `env.arm_advance_radius=0.05 env.arm_arrival_tolerance=0.2`.
+#
+# arm_advance_radius: how close the perceived joints have to be to the
+# current cursor target before the cursor jumps to the next planned
+# waypoint. 0.4 (default) stays comfortably outside the OTG decel zone
+# for the dominant Kinova shoulder joints, so the arm cruises smoothly
+# between waypoints. Try smaller values (e.g. 0.05–0.1) for tighter
+# trajectory tracking — at that scale the OTG decelerates between
+# waypoints and the motion is visibly stepped per waypoint, which is
+# easier to interrupt but slower wall-clock. Don't make this bigger
+# than the typical inter-waypoint spacing in joint-space, or the
+# cursor will skip via-points.
+#
+# arm_arrival_tolerance: how close the perceived joints have to be to
+# the final waypoint for the executor to declare done(). The compliant
+# controller has a steady-state lag of ~0.1 on the dominant joints,
+# so below ~0.1 the executor will spin until max_iter_total.
 arm_advance_radius: 0.4
 arm_arrival_tolerance: 0.4
 # Extra ticks the arm holds at the grasp position while the gripper closes.
