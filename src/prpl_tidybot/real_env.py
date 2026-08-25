@@ -58,11 +58,7 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         if self._converter is None or self._last_obs is None:
             raise RuntimeError("RealTidyBotEnv.step called before reset")
         # Re-calibrate from the obs we already have on hand (set by reset or
-        # the previous step). Skipping a second get_observation here is what
-        # keeps the gap between consecutive base commands inside the base
-        # controller's "no command in 2.5 * POLICY_CONTROL_PERIOD" timeout —
-        # marker_detector_client.get_latest blocks up to the publisher's
-        # refresh interval, so each extra query stretches the gap. The
+        # the previous step): one observation per tick is enough, and the
         # calibration is at most one tick (control_period) stale, which
         # matches the per-iter behaviour of the old inner settle loop.
         self._converter.update(self._last_obs.map_base_pose, self._last_obs.base_pose)

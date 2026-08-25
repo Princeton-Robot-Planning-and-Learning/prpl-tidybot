@@ -1,6 +1,7 @@
 """Base interface."""
 
 import abc
+import time
 
 import numpy as np
 from spatialmath import SE2
@@ -53,9 +54,13 @@ class FakeBaseInterface(BaseInterface):
 
 
 class RealBaseInterface(BaseInterface):
-    """Real base interface. State reading is wired to the TidyBot base
-    controller (odom frame) and the marker detector (map frame).
-    Action execution is not yet implemented."""
+    """Real base interface.
+
+    State reading is wired to the TidyBot base controller (odom frame) and the marker
+    detector (map frame).
+    """
+
+    _ROBOT_MARKER_ID = 0
 
     def __init__(self, marker_detector_host: str = SERVER_HOSTNAME) -> None:
         self.base_manager = BaseManager(
@@ -66,16 +71,45 @@ class RealBaseInterface(BaseInterface):
         self.base.reset()
 
         self.marker_detector_client = MarkerDetectorClient(host=marker_detector_host)
-        self.last_pose_map = SE2(0, 0, 0)
+        self.last_pose_map = self._wait_for_initial_map_pose()
+
+    def _wait_for_initial_map_pose(self, deadline_s: float = 10.0) -> SE2:
+        """Block until the detector reports the robot marker once.
+
+        `get_map_base_state` reads are non-blocking cached lookups, so the
+        first payload has to be guaranteed here — otherwise a rollout could
+        start from a bogus identity map pose and mis-calibrate the map->odom
+        converter.
+        """
+        deadline = time.monotonic() + deadline_s
+        while time.monotonic() < deadline:
+            data = self.marker_detector_client.get_latest()
+            if "poses" in data and self._ROBOT_MARKER_ID in data["poses"]:
+                pose_map = data["poses"][self._ROBOT_MARKER_ID]
+                return SE2(pose_map[0], pose_map[1], pose_map[2])
+        raise RuntimeError(
+            "Marker detector never reported the robot marker "
+            f"(id {self._ROBOT_MARKER_ID}) within {deadline_s:.0f}s. Is the "
+            "marker detector server running and the robot marker visible to "
+            "the ceiling camera?"
+        )
 
     def get_base_state(self) -> SE2:
         base_pose = self.base.get_state()["base_pose"]
         return SE2(base_pose[0], base_pose[1], base_pose[2])
 
     def get_map_base_state(self) -> SE2:
-        detector_data = self.marker_detector_client.get_latest()
-        if "poses" in detector_data and 0 in detector_data["poses"]:
-            pose_map = detector_data["poses"][0]
+        # Non-blocking read: return the freshest already-delivered payload
+        # instead of waiting for the publisher's next refresh. This keeps a
+        # 10 Hz control loop's tick near its nominal period — a blocking
+        # read stalls each tick by up to one publisher period, which
+        # stretched the gap between consecutive arm/base commands past the
+        # controllers' "no command in 2.5 * POLICY_CONTROL_PERIOD" watchdog
+        # and made the OTG brake between commands. The pose returned here is
+        # at most one publisher period staler than the blocking read's.
+        detector_data = self.marker_detector_client.get_latest(timeout_s=0.0)
+        if "poses" in detector_data and self._ROBOT_MARKER_ID in detector_data["poses"]:
+            pose_map = detector_data["poses"][self._ROBOT_MARKER_ID]
             self.last_pose_map = SE2(pose_map[0], pose_map[1], pose_map[2])
         return self.last_pose_map
 
