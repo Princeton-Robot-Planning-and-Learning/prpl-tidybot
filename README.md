@@ -106,8 +106,8 @@ connection per remote.
 
 | Variable               | Default                  | What it points at                              |
 | ---------------------- | ------------------------ | ---------------------------------------------- |
-| `PRPL_NUC_HOST`        | `tidybot@tidybot-nuc`    | SSH target for the robot NUC.                  |
-| `PRPL_PERCEPTION_HOST` | `yixuan@tidybot-laptop`  | SSH target for the perception PC.              |
+| `PRPL_NUC_HOST`        | `tidybot@tidybot-nuc-prpl`    | SSH target for the robot NUC.                  |
+| `PRPL_PERCEPTION_HOST` | `yixuan@tidybot-laptop-prpl`  | SSH target for the perception PC.              |
 | `PRPL_REPO_DIR`        | `~/prpl-tidybot`         | Repo checkout path on the *remote* machines.   |
 
 ### Launch
