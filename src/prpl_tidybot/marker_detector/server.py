@@ -37,6 +37,7 @@ from prpl_tidybot.marker_detector.constants import (
     MARKER_PARAMS,
     ROBOT_DIAG,
     ROBOT_HEIGHT,
+    TARGET_MARKER_HEIGHT,
 )
 from prpl_tidybot.marker_detector.publisher import Publisher
 from prpl_tidybot.marker_detector.utils import get_camera_alignment_params
@@ -53,6 +54,29 @@ def _get_angle_offsets() -> dict[tuple[int, int], float]:
                     corner2[1] - corner1[1], corner2[0] - corner1[0]
                 )
     return offsets
+
+
+def _height_corrected_corners(
+    corners: np.ndarray,
+    slot_indices: np.ndarray,
+    camera_center: np.ndarray,
+    num_robot_slots: int,
+    robot_ratio: float,
+    target_ratio: float,
+) -> np.ndarray:
+    """Scale pixel corners toward the camera center by each marker's height ratio.
+
+    `corners` is a `(4 * num_markers, 2)` array of pixel corners in marker
+    order (four consecutive rows per marker); `slot_indices` holds one slot
+    index per marker. Slots below `num_robot_slots` are robot stickers and
+    get `robot_ratio`; the remaining slots are scene targets and get
+    `target_ratio`.
+    """
+    marker_ratios = np.where(
+        slot_indices < num_robot_slots, robot_ratio, target_ratio
+    ).astype(np.float32)
+    corner_ratios = np.repeat(marker_ratios, 4)[:, None]
+    return camera_center + corner_ratios * (corners - camera_center)
 
 
 class Detector:
@@ -91,7 +115,18 @@ class Detector:
         self.transformation_matrix = self._compute_transformation_matrix(
             np.array(self.camera_corners, dtype=np.float32)
         )
+        # A marker's apparent pixel offset from the camera center scales with
+        # its height above the floor, so each marker class needs its own
+        # pixel->floor ratio: robot stickers sit at ROBOT_HEIGHT, scene
+        # targets lie on the floor at TARGET_MARKER_HEIGHT. Using one ratio
+        # for both pulls the mis-corrected class toward the camera's nadir
+        # by (height error / camera height) x its distance from the nadir,
+        # and makes the two ceiling cameras disagree about a single static
+        # marker by that fraction of the distance between their nadirs.
         self.height_ratio = (camera_height - ROBOT_HEIGHT) / camera_height
+        self.target_height_ratio = (
+            camera_height - TARGET_MARKER_HEIGHT
+        ) / camera_height
         self.angle_offsets = _get_angle_offsets()
         self.position_offset = ROBOT_DIAG / 2 - MARKER_PARAMS[
             "sticker_length"
@@ -145,16 +180,24 @@ class Detector:
         if indices is None:
             return data
 
-        # Convert marker corners from pixel to real-world coordinates.
+        # Convert marker corners from pixel to real-world coordinates,
+        # correcting each marker for its own height above the floor.
         corners = np.concatenate(corners, axis=1).squeeze(0)
         camera_center = np.array(self.camera_center, dtype=np.float32)
-        corners = camera_center + self.height_ratio * (corners - camera_center)
+        indices = indices.squeeze(1)
+        corners = _height_corrected_corners(
+            corners,
+            indices,
+            camera_center,
+            self._num_robot_slots,
+            robot_ratio=self.height_ratio,
+            target_ratio=self.target_height_ratio,
+        )
         corners = np.c_[corners, np.ones(corners.shape[0], dtype=np.float32)]
         corners = corners @ self.transformation_matrix.T
         corners = (corners[:, :2] / corners[:, 2:]).reshape(-1, 4, 2)
 
         centers = corners.mean(axis=1)
-        indices = indices.squeeze(1)
         positions = centers.copy()
 
         # Split detections into robot-sticker slots and scene-target slots.
