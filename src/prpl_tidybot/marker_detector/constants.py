@@ -56,3 +56,8 @@ FLOOR_WIDTH = NUM_FLOOR_TILES_X * FLOOR_TILE_SIZE
 # Robot geometry used by the marker-center → robot-center correction.
 ROBOT_HEIGHT = 0.378  # m
 ROBOT_DIAG = 0.665  # m
+
+# Height of scene-target markers above the floor. Targets lie flat on the
+# floor; a marker projected at the wrong height slides toward the camera's
+# nadir by (height error / camera height) x its distance from the nadir.
+TARGET_MARKER_HEIGHT = 0.0  # m
