@@ -8,6 +8,7 @@ import cv2 as cv
 import numpy as np
 import pytest
 
+from prpl_tidybot import video as video_mod
 from prpl_tidybot.video import write_mp4
 
 
@@ -78,22 +79,26 @@ def test_write_mp4_falls_back_when_preferred_codec_unavailable(
     attempted: list[int] = []
 
     class _Unopened:
+        """Stand-in for a VideoWriter whose backend rejected the codec."""
+
         def isOpened(self) -> bool:
+            """Report the writer as failed-to-open."""
             return False
 
         def release(self) -> None:
-            pass
+            """Nothing to release."""
 
     class _FailAvc1Factory:
+        """VideoWriter factory that rejects avc1 and delegates everything else."""
+
         fourcc = staticmethod(real_writer.fourcc)
 
         def __call__(self, path: str, fourcc: int, fps: int, size: tuple):
+            """Record the attempted codec; fail avc1, delegate the rest."""
             attempted.append(fourcc)
             if fourcc == real_writer.fourcc(*"avc1"):
                 return _Unopened()
             return real_writer(path, fourcc, fps, size)
-
-    import prpl_tidybot.video as video_mod
 
     monkeypatch.setattr(video_mod.cv, "VideoWriter", _FailAvc1Factory())
     out = tmp_path / "fallback.mp4"
