@@ -40,6 +40,10 @@ DEFAULT_OUTPUT = (
 _PAGE_SIZE_IN = (8.5, 11.0)  # US letter
 _MARKERS_PER_PAGE = 2
 _MM_PER_IN = 25.4
+# Center-axis ticks sit this far outside the marker (preserving the white
+# quiet zone the detector needs) and extend this long.
+_TICK_GAP_IN = 6.0 / _MM_PER_IN
+_TICK_LENGTH_IN = 6.0 / _MM_PER_IN
 
 
 def create_marker_pdf(
@@ -54,7 +58,7 @@ def create_marker_pdf(
     side_in = marker_length_mm / _MM_PER_IN
     width_frac = side_in / page_w
     height_frac = side_in / page_h
-    row_tops = (0.62, 0.18)  # bottom-left y of each marker's axes
+    row_tops = (0.61, 0.15)  # bottom-left y of each marker's axes
     bar_frac = (100.0 / _MM_PER_IN) / page_w
 
     pages = [
@@ -71,11 +75,48 @@ def create_marker_pdf(
                 )
                 axes.imshow(image, cmap="gray", interpolation="nearest", aspect="auto")
                 axes.set_axis_off()
+                # Center-line ticks: the calibration YAML positions refer to
+                # marker centres, so extend each centre axis outward (clear
+                # of the marker's quiet zone) for lining up with floor marks.
+                center_y = row_tops[row] + height_frac / 2
+                gap_w = _TICK_GAP_IN / page_w
+                tick_w = _TICK_LENGTH_IN / page_w
+                gap_h = _TICK_GAP_IN / page_h
+                tick_h = _TICK_LENGTH_IN / page_h
+                half_w = width_frac / 2
+                half_h = height_frac / 2
+                for x_start, x_end in (
+                    (0.5 - half_w - gap_w - tick_w, 0.5 - half_w - gap_w),
+                    (0.5 + half_w + gap_w, 0.5 + half_w + gap_w + tick_w),
+                ):
+                    fig.add_artist(
+                        Line2D(
+                            [x_start, x_end],
+                            [center_y, center_y],
+                            transform=fig.transFigure,
+                            color="black",
+                            linewidth=0.8,
+                        )
+                    )
+                for y_start, y_end in (
+                    (center_y - half_h - gap_h - tick_h, center_y - half_h - gap_h),
+                    (center_y + half_h + gap_h, center_y + half_h + gap_h + tick_h),
+                ):
+                    fig.add_artist(
+                        Line2D(
+                            [0.5, 0.5],
+                            [y_start, y_end],
+                            transform=fig.transFigure,
+                            color="black",
+                            linewidth=0.8,
+                        )
+                    )
                 fig.text(
                     0.5,
-                    row_tops[row] - 0.03,
+                    row_tops[row] - 0.055,
                     f"ArUco DICT_4X4_50  id {marker_id}  —  "
-                    f"{marker_length_mm:.0f} mm across (incl. black border)",
+                    f"{marker_length_mm:.0f} mm across (incl. black border); "
+                    "ticks mark the centre axes",
                     ha="center",
                     fontsize=11,
                 )
