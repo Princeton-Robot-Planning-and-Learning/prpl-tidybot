@@ -5,6 +5,8 @@ tests in `tests/` compose configs with `hydra.compose` and call
 `run_planner` directly, without going through the Hydra `@main` decorator.
 """
 
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +21,8 @@ from relational_structs import ObjectCentricState
 from prpl_tidybot.preview import planned_states_from_agent, preview_or_abort
 from prpl_tidybot.real_sim import build_planner_env_models
 from prpl_tidybot.recording import RecordingPerceiver, TrajectoryRecorder
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -68,9 +72,13 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
     # Trajectory recording is on whenever we have a place to write it. The
     # shadow sim reuses the env's own sim pipeline yaml (the same one sim
     # mode uses for `real_env`), which keeps kinder-specific construction
-    # out of this file.
+    # out of this file. The single instance is shared with the plan
+    # preview below — kinder env construction is expensive enough that
+    # building it twice per rollout was a visible part of the operator's
+    # preview wait, and both uses are reset + set_state + render.
     resolved_log_dir = _resolve_log_dir(log_dir)
     recorder: TrajectoryRecorder | None = None
+    shadow_sim = None
     record_cfg = cfg.get("record")
     if resolved_log_dir is not None:
         shadow_sim = hydra.utils.instantiate(
@@ -129,7 +137,16 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
     # failure mode where Kortex's high-level controller appears to retain
     # the previous low-level trajectory state).
     try:
+        # The agent plans inside runner.reset (after the env and perceiver
+        # reset), so this is the long silent stretch the operator sees first.
+        _logger.info(
+            "Resetting env and planning (timeout %ss)...", cfg.agent.planning_timeout
+        )
+        reset_start = time.monotonic()
         state = runner.reset(seed=cfg.seed)
+        _logger.info(
+            "Env reset + planning finished in %.1fs.", time.monotonic() - reset_start
+        )
         total_reward = 0.0
         steps = 0
         finish_reason = "max_steps_reached"
@@ -151,12 +168,11 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
             try:
                 preview_or_abort(
                     planned_states=planned_states_from_agent(agent),
-                    shadow_sim=hydra.utils.instantiate(
-                        cfg.env.pipelines.sim.real_env, _convert_="all"
-                    ),
+                    shadow_sim=shadow_sim,
                     log_dir=resolved_log_dir,
                     seed=cfg.seed,
                     fps=int(preview_cfg.get("fps", 10)),
+                    max_frames=preview_cfg.get("max_frames", 50),
                 )
             except AgentFailure as e:
                 finish_reason = f"agent_failure: {e}"

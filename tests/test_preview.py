@@ -169,6 +169,60 @@ def test_rendered_frames_have_consistent_dimensions(tmp_path: Path):
     assert frame.shape[0] >= shape[0] and frame.shape[1] >= shape[1]
 
 
+def test_subsamples_long_trajectories_keeping_first_and_last(tmp_path: Path):
+    """Plans longer than `max_frames` are strided down before rendering: the shadow sim
+    sees at most max_frames + 1 states, always including the first and last, in
+    order."""
+    states = list(range(203))
+    shadow = _StubShadowSim()
+
+    out = preview_or_abort(
+        planned_states=states,  # type: ignore[arg-type]
+        shadow_sim=shadow,
+        log_dir=tmp_path,
+        max_frames=50,
+        prompt_fn=lambda _msg: "y",
+    )
+
+    assert out is not None
+    assert len(shadow.set_states) <= 51
+    assert shadow.set_states[0] == states[0]
+    assert shadow.set_states[-1] == states[-1]
+    assert shadow.set_states == sorted(shadow.set_states)
+
+
+def test_renders_every_state_when_max_frames_is_none(tmp_path: Path):
+    """`max_frames=None` opts out of subsampling entirely."""
+    states = [object() for _ in range(120)]
+    shadow = _StubShadowSim()
+
+    preview_or_abort(
+        planned_states=states,  # type: ignore[arg-type]
+        shadow_sim=shadow,
+        log_dir=tmp_path,
+        max_frames=None,
+        prompt_fn=lambda _msg: "y",
+    )
+
+    assert shadow.set_states == states
+
+
+def test_short_trajectories_are_not_subsampled(tmp_path: Path):
+    """Plans at or under `max_frames` render every state unchanged."""
+    states = [object() for _ in range(10)]
+    shadow = _StubShadowSim()
+
+    preview_or_abort(
+        planned_states=states,  # type: ignore[arg-type]
+        shadow_sim=shadow,
+        log_dir=tmp_path,
+        max_frames=50,
+        prompt_fn=lambda _msg: "y",
+    )
+
+    assert shadow.set_states == states
+
+
 def test_planned_states_from_agent_reads_private_attribute():
     """Helper reads ``_planned_states`` from the agent so the private-attribute reach is
     in one place (easy to swap when upstream grows an accessor)."""

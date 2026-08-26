@@ -45,9 +45,10 @@ from typing import Any, Generic, Protocol, TypeVar
 import cv2 as cv
 import gymnasium
 import numpy as np
-from moviepy import ImageSequenceClip
 from prpl_utils.real_sim import Perceiver
 from relational_structs import ObjectCentricState
+
+from prpl_tidybot.video import write_mp4
 
 _RealObsType = TypeVar("_RealObsType")
 _SENTINEL: Any = object()
@@ -57,8 +58,8 @@ class _ShadowSim(Protocol):
     """Minimal protocol the recorder needs from a shadow sim."""
 
     def reset(self, *, seed: int | None = ...) -> Any:
-        """Reset the underlying sim; gymnasium's order-enforcing wrapper
-        requires this before any render call."""
+        """Reset the underlying sim; gymnasium's order-enforcing wrapper requires this
+        before any render call."""
 
     def set_state(self, state: ObjectCentricState) -> None:
         """Teleport the sim to `state` so the subsequent render shows it."""
@@ -195,9 +196,9 @@ class TrajectoryRecorder:
     def _render_shadows_from_disk(self) -> None:
         """Walk the per-tick dirs and render shadow.png for each saved state.
 
-        Sequential, after the rollout. The shadow sim is touched only here,
-        so there is no thread-safety surface area on it and no concurrent
-        pybullet load on the rollout thread.
+        Sequential, after the rollout. The shadow sim is touched only here, so there is
+        no thread-safety surface area on it and no concurrent pybullet load on the
+        rollout thread.
         """
         for tick_dir in sorted(self._trajectory_dir.iterdir()):
             state_path = tick_dir / "state.pkl"
@@ -229,8 +230,7 @@ class TrajectoryRecorder:
         if not frames:
             return None
         video_path = self._log_dir / "video.mp4"
-        clip = ImageSequenceClip(frames, fps=self._fps)
-        clip.write_videofile(str(video_path), logger=None)
+        write_mp4(frames, video_path, fps=self._fps)
         return video_path
 
 
@@ -269,9 +269,12 @@ class RecordingPerceiver(
 
 
 def _hstack_frames(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """Resize the shorter frame to match heights (preserving aspect ratio), then
-    concat horizontally. Avoids the black padding bands the previous pad-based
-    impl produced when the real and shadow renderers had different resolutions."""
+    """Resize the shorter frame to match heights (preserving aspect ratio), then concat
+    horizontally.
+
+    Avoids the black padding bands the previous pad-based impl produced when the real
+    and shadow renderers had different resolutions.
+    """
     if left.shape[0] != right.shape[0]:
         target_h = max(left.shape[0], right.shape[0])
         left = _resize_to_height(left, target_h)
