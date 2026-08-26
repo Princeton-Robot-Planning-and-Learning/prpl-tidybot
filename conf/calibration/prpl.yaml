@@ -1,0 +1,21 @@
+# Measured calibration-marker layout for the PRPL lab (2026-08-26).
+#
+# Map-frame [x, y] (metres) of each ArUco DICT_4X4_50 marker centre taped
+# to the floor, used by scripts/calibrate_camera_extrinsics.py. These
+# positions define the lab's map frame. Measured by tape from the origin
+# at marker 0; verified by taping the grid diagonals (2<->6 and 4<->8 both
+# 4.272 m).
+#
+# Markers 1, 2, 8 lie in the top camera's half; 4, 5, 6 in the bottom
+# camera's; 0, 3, 7 on the midline visible to both cameras (these drive
+# the cross-camera consistency check).
+marker_positions:
+  0: [0, 0]
+  1: [0, 1.665]
+  2: [1.665, 1.665]
+  3: [1.665, 0]
+  4: [1.665, -1.205]
+  5: [0, -1.205]
+  6: [-1.5, -1.205]
+  7: [-1.5, 0]
+  8: [-1.5, 1.665]
