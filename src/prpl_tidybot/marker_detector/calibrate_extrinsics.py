@@ -1,9 +1,10 @@
 """Calibrate the ceiling cameras' extrinsics from markers on the floor.
 
-Tape ArUco `DICT_4X4_50` markers flat on the floor at known map-frame
-positions (tile intersections are convenient: coordinates are multiples of
-the 0.6096 m tile size) and list marker id -> position in a YAML file (see
-`conf/calibration/markers_example.yaml`). Then run:
+Tape ArUco `DICT_4X4_50` markers flat on the floor (print them with
+`scripts/create_calibration_markers.py`), measure each marker centre's
+map-frame position with a tape measure, and list marker id -> position in
+a YAML file (see `conf/calibration/markers_example.yaml`, which also
+explains how the positions define the map frame). Then run:
 
     python scripts/calibrate_camera_extrinsics.py --lab prpl --markers <yaml>
 
@@ -17,15 +18,17 @@ Marker placement: spread markers across each camera's view and include at
 least two near the floor midline so both cameras see them. Each camera
 needs at least four detected markers (not all in a line); six or more is
 recommended. Avoid the robot-sticker and target ids in
-`DETECTED_MARKER_IDS`. Warm the cameras up for ~10 minutes first — they
-shift slightly after power-on.
+`DETECTED_MARKER_IDS`.
 
-Frames are taken from running camera servers when available (the marker
-detector can stay up), otherwise the cameras are opened directly (stop the
-servers first: `scripts/stop_servers.sh`).
+The cameras shift slightly after power-on and stabilise after ~10 minutes
+of streaming. Frames are taken from running camera servers when available,
+otherwise the cameras are opened directly. If the cameras have not already
+been streaming for a while, pass `--warmup-minutes 10` to stream (and
+discard) frames for that long before capturing.
 """
 
 import argparse
+import time
 from pathlib import Path
 from typing import Any
 
@@ -149,26 +152,36 @@ def _detect_marker_centers(image: np.ndarray) -> dict[int, np.ndarray]:
     }
 
 
-def _capture_frames(serial: str, port: int, num_frames: int) -> list[np.ndarray]:
-    """Grab undistorted frames from a running camera server, else directly."""
+def _capture_frames(
+    serial: str, port: int, num_frames: int, warmup_s: float
+) -> list[np.ndarray]:
+    """Grab undistorted frames from a running camera server, else directly.
+
+    `warmup_s` streams (and discards) frames for that long first, so a
+    cold-started camera can stabilise before the frames that matter.
+    """
     try:
         client = CameraClient(port)
     except ConnectionRefusedError:
         print(f"No camera server on port {port}; opening camera {serial} directly.")
-        return _capture_frames_direct(serial, num_frames)
+        return _capture_frames_direct(serial, num_frames, warmup_s)
     try:
+        _warm_up(client.get_image, warmup_s)
         return [client.get_image().copy() for _ in range(num_frames)]
     finally:
         client.close()
 
 
-def _capture_frames_direct(serial: str, num_frames: int) -> list[np.ndarray]:
+def _capture_frames_direct(
+    serial: str, num_frames: int, warmup_s: float
+) -> list[np.ndarray]:
     image_width, image_height, camera_matrix, dist_coeffs = utils.get_camera_params(
         serial
     )
     cap = utils.get_video_cap(serial, image_width, image_height)
     frames: list[np.ndarray] = []
     try:
+        _warm_up(cap.read, warmup_s)
         while len(frames) < num_frames:
             ok, image = cap.read()
             if ok and image is not None:
@@ -178,15 +191,25 @@ def _capture_frames_direct(serial: str, num_frames: int) -> list[np.ndarray]:
     return frames
 
 
+def _warm_up(read_frame: Any, warmup_s: float) -> None:
+    if warmup_s <= 0:
+        return
+    deadline = time.monotonic() + warmup_s
+    print(f"Warming up the camera for {warmup_s / 60:.1f} min...")
+    while time.monotonic() < deadline:
+        read_frame()
+
+
 def _calibrate_camera(
     serial: str,
     port: int,
     marker_positions: dict[int, tuple[float, float]],
     num_frames: int,
+    warmup_s: float,
 ) -> dict[str, Any]:
     """Capture, detect, solve, save, and print the report for one camera."""
     _, _, camera_matrix, _ = utils.get_camera_params(serial)
-    frames = _capture_frames(serial, port, num_frames)
+    frames = _capture_frames(serial, port, num_frames, warmup_s)
     detected = average_marker_centers(
         [_detect_marker_centers(frame) for frame in frames]
     )
@@ -247,6 +270,7 @@ def main(
     markers_path: Path,
     lab: str | None = None,
     num_frames: int = DEFAULT_NUM_FRAMES,
+    warmup_minutes: float = 0.0,
 ) -> None:
     """Calibrate every ceiling camera and report cross-camera consistency."""
     marker_positions = load_marker_positions(markers_path)
@@ -258,7 +282,9 @@ def main(
         camera_serials = list(CAMERA_SERIALS)
 
     reports = [
-        _calibrate_camera(serial, port, marker_positions, num_frames)
+        _calibrate_camera(
+            serial, port, marker_positions, num_frames, warmup_minutes * 60
+        )
         for serial, port in zip(camera_serials, CAMERA_SERVER_PORTS)
     ]
     if len(reports) > 1:
@@ -298,8 +324,23 @@ def cli() -> None:
         default=DEFAULT_NUM_FRAMES,
         help="Frames to average marker detections over, per camera.",
     )
+    parser.add_argument(
+        "--warmup-minutes",
+        type=float,
+        default=0.0,
+        help=(
+            "Stream (and discard) frames for this long per camera before "
+            "capturing, so cold-started cameras stabilise. Omit if the "
+            "camera servers have already been running for 10+ minutes."
+        ),
+    )
     args = parser.parse_args()
-    main(markers_path=args.markers, lab=args.lab, num_frames=args.num_frames)
+    main(
+        markers_path=args.markers,
+        lab=args.lab,
+        num_frames=args.num_frames,
+        warmup_minutes=args.warmup_minutes,
+    )
 
 
 if __name__ == "__main__":
