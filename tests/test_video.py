@@ -69,6 +69,45 @@ def test_write_mp4_resizes_mismatched_frames(tmp_path: Path):
         cap.release()
 
 
+def test_write_mp4_falls_back_when_preferred_codec_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Builds without an H.264 encoder (avc1 writer fails to open) still write a
+    playable file through the mp4v fallback."""
+    real_writer = cv.VideoWriter
+    attempted: list[int] = []
+
+    class _Unopened:
+        def isOpened(self) -> bool:
+            return False
+
+        def release(self) -> None:
+            pass
+
+    class _FailAvc1Factory:
+        fourcc = staticmethod(real_writer.fourcc)
+
+        def __call__(self, path: str, fourcc: int, fps: int, size: tuple):
+            attempted.append(fourcc)
+            if fourcc == real_writer.fourcc(*"avc1"):
+                return _Unopened()
+            return real_writer(path, fourcc, fps, size)
+
+    import prpl_tidybot.video as video_mod
+
+    monkeypatch.setattr(video_mod.cv, "VideoWriter", _FailAvc1Factory())
+    out = tmp_path / "fallback.mp4"
+
+    write_mp4([_uniform_frame(90)] * 3, out, fps=5)
+
+    assert attempted == [real_writer.fourcc(*"avc1"), real_writer.fourcc(*"mp4v")]
+    cap = cv.VideoCapture(str(out))
+    try:
+        assert int(cap.get(cv.CAP_PROP_FRAME_COUNT)) == 3
+    finally:
+        cap.release()
+
+
 def test_write_mp4_rejects_empty_frame_list(tmp_path: Path):
     """No frames is a caller bug — surfaced as ValueError, not a corrupt file."""
     with pytest.raises(ValueError, match="no frames"):
