@@ -22,6 +22,12 @@ same floor point and a rotation-only camera bump needs corner edits only.
 Run on the perception PC with a display, with the camera servers stopped
 (`scripts/stop_servers.sh`) — the tool opens the camera directly.
 
+Annotation tips: the cameras shift slightly after power-on and stabilize
+after ~10 minutes, so warm them up before annotating; small squares of tape
+on the floor corners make them much easier to click precisely. Only the
+camera intrinsics (the `.yml` files) require a ChArUco board to calibrate —
+this floor alignment needs no board.
+
 Adapted from `yixuanhuang98/tidybot_server/server/camera_alignment.py`.
 """
 
