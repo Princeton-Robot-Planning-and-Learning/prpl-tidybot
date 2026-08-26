@@ -68,6 +68,11 @@ def preview_or_abort(
     if not planned_states:
         return None
     preview_states = _subsample(planned_states, max_frames)
+    _logger.info(
+        "Rendering plan preview (%d of %d planned states)...",
+        len(preview_states),
+        len(planned_states),
+    )
     render_start = time.monotonic()
     shadow_sim.reset(seed=seed)
     frames: list[np.ndarray] = []
