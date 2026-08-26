@@ -88,7 +88,6 @@ exclude = ["venv/*", ".venv/*"]
 module = [
     "matplotlib.*",
     "spatialmath.*",
-    "moviepy.*",
     "pybullet",
 ]
 ignore_missing_imports = true

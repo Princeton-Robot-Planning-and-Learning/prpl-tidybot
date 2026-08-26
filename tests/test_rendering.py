@@ -68,8 +68,8 @@ def test_ceiling_camera_renderer_returns_none_when_no_frame_yet():
 
 
 def test_ceiling_camera_renderer_converts_bgr_to_rgb():
-    """The client returns BGR; render() must convert to RGB so moviepy reads colors
-    right."""
+    """The client returns BGR; render() must convert to RGB so downstream consumers
+    (recorder, video encoder) read colors right."""
     # A single pixel where B=10, G=20, R=30 (BGR ordering).
     bgr = np.array([[[10, 20, 30]]], dtype=np.uint8)
     client = _FakeCeilingImageClient([bgr])

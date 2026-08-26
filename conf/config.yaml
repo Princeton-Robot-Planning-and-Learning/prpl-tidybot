@@ -49,6 +49,11 @@ record:
 #   `preview.enabled=false` to skip the prompt before a real-mode rollout
 #   (unattended demos), or set `preview.enabled=true mode=sim` if you
 #   want a preview for a non-real-mode rollout too.
+# The preview is a gist-check: plans longer than `max_frames` states are
+# strided down to at most that many frames (first and last always kept)
+# before the per-state shadow-sim renders, which are the dominant cost of
+# the preview. Set `preview.max_frames=null` to render every state.
 preview:
   enabled: true
   fps: 10
+  max_frames: 50
