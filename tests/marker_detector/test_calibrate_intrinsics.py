@@ -28,6 +28,24 @@ def test_board_matches_params():
     assert CHARUCO_BOARD_PARAMS["marker_length"] < CHARUCO_BOARD_PARAMS["square_length"]
 
 
+def test_make_board_accepts_custom_geometry():
+    """A purchased target's geometry and dictionary can be specified."""
+    board = make_board(
+        squares_x=12,
+        squares_y=9,
+        square_length=0.015,
+        marker_length=0.011,
+        dict_id=cv.aruco.DICT_5X5_100,
+        legacy=True,
+    )
+    # pylint: disable=unpacking-non-sequence
+    squares_x, squares_y = board.getChessboardSize()
+    # pylint: enable=unpacking-non-sequence
+    assert (squares_x, squares_y) == (12, 9)
+    assert np.isclose(board.getSquareLength(), 0.015)
+    assert board.getLegacyPattern()
+
+
 def _synthetic_views(num_views: int) -> tuple[list, list]:
     """Project the board's chessboard corners through a known camera."""
     board = make_board()

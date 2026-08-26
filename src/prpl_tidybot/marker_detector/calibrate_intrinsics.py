@@ -1,7 +1,10 @@
 """Interactive ChArUco intrinsics calibration for a ceiling camera.
 
 Print `conf/calibration/charuco_board.pdf` at 100% scale (verify the scale
-bar with a ruler) and mount it as flat as possible, e.g. on a clipboard.
+bar with a ruler) and mount it as flat as possible, e.g. on a clipboard —
+or use a purchased rigid target and describe its geometry with the board
+flags (`--squares-x/-y`, `--square-length-mm`, `--marker-length-mm`,
+`--dictionary`, `--legacy`); the values are printed on the target.
 Run this on the perception PC with a display and the camera servers
 stopped — the tool opens the camera directly, since calibration needs raw
 (distorted) frames:
@@ -51,15 +54,30 @@ MIN_CORNERS_PER_VIEW = 8
 RECOMMENDED_VIEWS = 15
 
 
-def make_board() -> Any:
-    """Construct the ChArUco board defined by `CHARUCO_BOARD_PARAMS`."""
+def make_board(
+    squares_x: int = int(CHARUCO_BOARD_PARAMS["squares_x"]),
+    squares_y: int = int(CHARUCO_BOARD_PARAMS["squares_y"]),
+    square_length: float = CHARUCO_BOARD_PARAMS["square_length"],
+    marker_length: float = CHARUCO_BOARD_PARAMS["marker_length"],
+    dict_id: int = MARKER_DICT_ID,
+    legacy: bool = False,
+) -> Any:
+    """Construct a ChArUco board; defaults to `CHARUCO_BOARD_PARAMS`.
+
+    `legacy` selects the pre-OpenCV-4.6 chessboard/marker layout, which
+    boards manufactured before that release (e.g. older calib.io targets)
+    use when their row count is even.
+    """
     aruco: Any = cv.aruco
-    return aruco.CharucoBoard(
-        (CHARUCO_BOARD_PARAMS["squares_x"], CHARUCO_BOARD_PARAMS["squares_y"]),
-        CHARUCO_BOARD_PARAMS["square_length"],
-        CHARUCO_BOARD_PARAMS["marker_length"],
-        aruco.getPredefinedDictionary(MARKER_DICT_ID),
+    board = aruco.CharucoBoard(
+        (squares_x, squares_y),
+        square_length,
+        marker_length,
+        aruco.getPredefinedDictionary(dict_id),
     )
+    if legacy:
+        board.setLegacyPattern(True)
+    return board
 
 
 def calibrate_from_views(
@@ -107,11 +125,11 @@ def write_camera_params(
 
 
 def _capture_views(
-    serial: str, image_width: int, image_height: int
+    serial: str, image_width: int, image_height: int, board: Any
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Interactive live view: collect ChArUco detections until Esc."""
     aruco: Any = cv.aruco
-    detector = aruco.CharucoDetector(make_board())
+    detector = aruco.CharucoDetector(board)
     cap = utils.get_video_cap(serial, image_width, image_height)
     window = f"calibrate intrinsics ({serial})"
     cv.namedWindow(window)
@@ -165,8 +183,9 @@ def _capture_views(
     return captured_corners, captured_ids
 
 
-def main(placement: str, lab: str | None = None) -> None:
+def main(placement: str, lab: str | None = None, board: Any = None) -> None:
     """Run the interactive capture, calibrate, and overwrite the .yml."""
+    board = board if board is not None else make_board()
     serial = _resolve_serial(placement, lab)
     yml_candidates = list(utils.CAMERA_PARAMS_DIR.glob(f"*/{serial}.yml"))
     assert (
@@ -180,7 +199,9 @@ def main(placement: str, lab: str | None = None) -> None:
         f"Capture at least {RECOMMENDED_VIEWS} views: vary tilt and distance "
         "and cover the whole field, especially image corners and edges."
     )
-    captured_corners, captured_ids = _capture_views(serial, image_width, image_height)
+    captured_corners, captured_ids = _capture_views(
+        serial, image_width, image_height, board
+    )
     assert (
         len(captured_ids) >= 4
     ), f"only {len(captured_ids)} views captured; at least 4 required"
@@ -190,7 +211,7 @@ def main(placement: str, lab: str | None = None) -> None:
             f"{RECOMMENDED_VIEWS}+"
         )
     rms_px, camera_matrix, dist_coeffs = calibrate_from_views(
-        captured_corners, captured_ids, (image_width, image_height)
+        captured_corners, captured_ids, (image_width, image_height), board=board
     )
     write_camera_params(
         path, image_width, image_height, camera_matrix, dist_coeffs, rms_px
@@ -232,8 +253,70 @@ def cli() -> None:
             "at import time."
         ),
     )
+    board_group = parser.add_argument_group(
+        "board geometry",
+        "Defaults describe conf/calibration/charuco_board.pdf. For a "
+        "purchased target, copy the values printed on it (e.g. a calib.io "
+        "label 'CharuCo / 9x12 / 15 mm / DICT_5X5' means --squares-x 12 "
+        "--squares-y 9 --square-length-mm 15 --marker-length-mm <printed "
+        "marker size> --dictionary DICT_5X5_100).",
+    )
+    board_group.add_argument(
+        "--squares-x",
+        type=int,
+        default=CHARUCO_BOARD_PARAMS["squares_x"],
+        help="Number of squares along the board's long side.",
+    )
+    board_group.add_argument(
+        "--squares-y",
+        type=int,
+        default=CHARUCO_BOARD_PARAMS["squares_y"],
+        help="Number of squares along the board's short side.",
+    )
+    board_group.add_argument(
+        "--square-length-mm",
+        type=float,
+        default=CHARUCO_BOARD_PARAMS["square_length"] * 1000,
+        help="Side length of one chessboard square, in mm.",
+    )
+    board_group.add_argument(
+        "--marker-length-mm",
+        type=float,
+        default=CHARUCO_BOARD_PARAMS["marker_length"] * 1000,
+        help="Side length of one ArUco marker, in mm.",
+    )
+    board_group.add_argument(
+        "--dictionary",
+        default=None,
+        help=(
+            "ArUco dictionary name, e.g. DICT_5X5_100; default is the "
+            "repo's marker dictionary (DICT_4X4_50)."
+        ),
+    )
+    board_group.add_argument(
+        "--legacy",
+        action="store_true",
+        help=(
+            "Use the pre-OpenCV-4.6 board layout. Needed for boards "
+            "manufactured before that release when the row count is even; "
+            "try this if markers detect but no chessboard corners appear."
+        ),
+    )
     args = parser.parse_args()
-    main(placement=args.placement, lab=args.lab)
+    dict_id = (
+        MARKER_DICT_ID
+        if args.dictionary is None
+        else getattr(cv.aruco, args.dictionary)
+    )
+    board = make_board(
+        squares_x=args.squares_x,
+        squares_y=args.squares_y,
+        square_length=args.square_length_mm / 1000,
+        marker_length=args.marker_length_mm / 1000,
+        dict_id=dict_id,
+        legacy=args.legacy,
+    )
+    main(placement=args.placement, lab=args.lab, board=board)
 
 
 if __name__ == "__main__":
