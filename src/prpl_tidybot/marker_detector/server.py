@@ -2,10 +2,12 @@
 
 Spawns one camera-server process per ceiling camera, then runs an in-process
 detector that fuses ArUco detections from each into a payload of the shape
-`{"poses": {robot_idx: (x, y, theta)}, "targets": {aruco_id: (x, y)}}`.
+`{"poses": {robot_idx: (x, y, theta)}, "targets": {aruco_id: (x, y)},
+"target_residuals": {aruco_id: float}}`.
 Robot stickers (`MARKER_IDS`) fuse into a single robot pose; standalone scene
-markers (`TARGET_MARKER_IDS`) are reported individually at their world-frame
-centre. Clients consume the payload over the publisher socket on
+markers (`TARGET_MARKER_IDS`) are averaged across the cameras that saw them,
+with the cross-camera residual published as a calibration health signal.
+Clients consume the payload over the publisher socket on
 `MARKER_DETECTOR_PORT` — see `MarkerDetectorClient`.
 """
 
@@ -38,6 +40,7 @@ from prpl_tidybot.marker_detector.constants import (
     ROBOT_DIAG,
     ROBOT_HEIGHT,
     TARGET_MARKER_HEIGHT,
+    TARGET_RESIDUAL_WARN_THRESHOLD,
 )
 from prpl_tidybot.marker_detector.publisher import Publisher
 from prpl_tidybot.marker_detector.utils import get_camera_alignment_params
@@ -77,6 +80,36 @@ def _height_corrected_corners(
     ).astype(np.float32)
     corner_ratios = np.repeat(marker_ratios, 4)[:, None]
     return camera_center + corner_ratios * (corners - camera_center)
+
+
+def _merge_target_estimates(
+    per_camera_targets: list[dict[int, tuple[float, float]]],
+) -> tuple[dict[int, tuple[float, float]], dict[int, float]]:
+    """Fuse per-camera target detections into one estimate per marker id.
+
+    Returns `(targets, residuals)`. Each target seen by multiple cameras is
+    averaged, and its residual (the largest pairwise distance between the
+    cameras' estimates) is reported; targets seen by a single camera pass
+    through with no residual entry.
+    """
+    targets: dict[int, tuple[float, float]] = {}
+    residuals: dict[int, float] = {}
+    all_ids = sorted(set().union(*per_camera_targets)) if per_camera_targets else []
+    for aruco_id in all_ids:
+        estimates = [
+            camera_targets[aruco_id]
+            for camera_targets in per_camera_targets
+            if aruco_id in camera_targets
+        ]
+        mean = np.mean(np.array(estimates, dtype=np.float64), axis=0)
+        targets[aruco_id] = (float(mean[0]), float(mean[1]))
+        if len(estimates) > 1:
+            residuals[aruco_id] = max(
+                math.dist(e1, e2)
+                for i, e1 in enumerate(estimates)
+                for e2 in estimates[i + 1 :]
+            )
+    return targets, residuals
 
 
 class Detector:
@@ -299,8 +332,17 @@ class Detector:
 
 class MarkerDetectorServer(Publisher):
     """Fuses per-camera detectors and publishes
-    `{"poses": {robot_idx: (x, y, theta)}, "targets": {aruco_id: (x, y)}}`.
+    `{"poses": {robot_idx: (x, y, theta)}, "targets": {aruco_id: (x, y)},
+    "target_residuals": {aruco_id: float}}`.
+
+    Targets seen by both cameras are averaged; the cross-camera residual is
+    published per marker and a warning is printed (throttled per marker) when
+    it exceeds `TARGET_RESIDUAL_WARN_THRESHOLD`, since a large residual
+    indicates a camera calibration or height-projection error.
     """
+
+    # Seconds between repeated large-residual warnings for the same marker.
+    _RESIDUAL_WARNING_PERIOD = 5.0
 
     def __init__(
         self,
@@ -314,6 +356,7 @@ class MarkerDetectorServer(Publisher):
     ) -> None:
         super().__init__(hostname=hostname, port=port)
         self.debug = debug
+        self._last_residual_warning: dict[int, float] = {}
         camera_serials = camera_serials or CAMERA_SERIALS
         if top_only:
             self.detectors = [
@@ -347,6 +390,7 @@ class MarkerDetectorServer(Publisher):
         data: dict[str, Any] = {"poses": {}, "targets": {}}
         if self.debug:
             data["debug_data"] = []
+        per_camera_targets: list[dict[int, tuple[float, float]]] = []
         for detector in self.detectors:
             new_data = detector.get_poses(debug=self.debug)
             for robot_idx, pose in new_data["poses"].items():
@@ -359,14 +403,33 @@ class MarkerDetectorServer(Publisher):
                     continue
                 # Bottom detector takes precedence by virtue of being second.
                 data["poses"][robot_idx] = pose
-            # Targets: bottom detector wins by virtue of being second (matches
-            # the robot-pose precedence).
-            data["targets"].update(new_data["targets"])
+            per_camera_targets.append(new_data["targets"])
             if "debug_data" in new_data:
                 data["debug_data"].extend(new_data["debug_data"])
+        targets, residuals = _merge_target_estimates(per_camera_targets)
+        data["targets"] = targets
+        data["target_residuals"] = residuals
+        self._warn_on_large_residuals(residuals)
         if self.debug:
             cv.waitKey(1)
         return data
+
+    def _warn_on_large_residuals(self, residuals: dict[int, float]) -> None:
+        now = time.monotonic()
+        for aruco_id, residual in residuals.items():
+            if residual <= TARGET_RESIDUAL_WARN_THRESHOLD:
+                continue
+            last = self._last_residual_warning.get(aruco_id)
+            if last is not None and now - last < self._RESIDUAL_WARNING_PERIOD:
+                continue
+            self._last_residual_warning[aruco_id] = now
+            print(
+                f"WARNING: ceiling cameras disagree on target marker "
+                f"{aruco_id} by {residual:.3f} m "
+                f"(threshold {TARGET_RESIDUAL_WARN_THRESHOLD} m). This "
+                "usually means a camera calibration or height-projection "
+                "error."
+            )
 
     def clean_up(self) -> None:
         for detector in self.detectors:

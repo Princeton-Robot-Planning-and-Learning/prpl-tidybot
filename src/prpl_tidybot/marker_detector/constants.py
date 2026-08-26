@@ -61,3 +61,8 @@ ROBOT_DIAG = 0.665  # m
 # floor; a marker projected at the wrong height slides toward the camera's
 # nadir by (height error / camera height) x its distance from the nadir.
 TARGET_MARKER_HEIGHT = 0.0  # m
+
+# When both ceiling cameras see the same target marker, their estimates should
+# agree to within calibration error. A larger residual indicates a calibration
+# or projection problem (e.g. wrong marker height, stale camera alignment).
+TARGET_RESIDUAL_WARN_THRESHOLD = 0.05  # m
