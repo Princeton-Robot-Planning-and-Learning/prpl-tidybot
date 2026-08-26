@@ -58,7 +58,11 @@ def test_solve_from_detections_recovers_pose_and_reports_residuals():
 
     assert report["marker_ids"] == sorted(marker_positions)
     assert report["rms_px"] < 1e-6
-    assert all(r < 1e-8 for r in report["floor_residuals"].values())
+    assert all(
+        abs(dx) < 1e-8 and abs(dy) < 1e-8
+        for dx, dy in report["floor_residual_vectors"].values()
+    )
+    assert report["homography_rms_px"] < 1e-3
 
 
 def test_solve_from_detections_requires_four_known_markers():

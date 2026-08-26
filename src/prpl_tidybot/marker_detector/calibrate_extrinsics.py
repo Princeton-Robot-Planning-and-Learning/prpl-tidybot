@@ -28,6 +28,7 @@ discard) frames for that long before capturing.
 """
 
 import argparse
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -104,8 +105,12 @@ def solve_from_detections(
     """Solve one camera's pose from averaged marker detections.
 
     Returns a report dict with `rvec`, `tvec`, `rms_px`, the per-marker
-    map-frame `floor_residuals` (metres, detected centre projected to the
-    floor vs. its known position), and the `marker_ids` used.
+    map-frame `floor_residual_vectors` (metres, detected centre projected
+    to the floor minus its known position), the `marker_ids` used, and
+    `homography_rms_px`: the residual of an unconstrained homography fitted
+    to the same correspondences. A homography has enough freedom to absorb
+    a wrong camera matrix while a rigid pose does not, so a homography that
+    fits much better than solvePnP implicates the stored intrinsics.
     """
     marker_ids = sorted(set(detected_centers) & set(marker_positions))
     assert len(marker_ids) >= MIN_MARKERS_PER_CAMERA, (
@@ -118,15 +123,29 @@ def solve_from_detections(
     rvec, tvec, rms_px = solve_extrinsics(floor_xy, pixels, camera_matrix)
     projector = FloorProjector(camera_matrix, rvec, tvec)
     on_floor = projector.project_to_heights(pixels, 0.0)
-    floor_residuals = {
-        marker_id: float(np.linalg.norm(on_floor[i] - floor_xy[i]))
+    floor_residual_vectors = {
+        marker_id: (
+            float(on_floor[i][0] - floor_xy[i][0]),
+            float(on_floor[i][1] - floor_xy[i][1]),
+        )
         for i, marker_id in enumerate(marker_ids)
     }
+    homography, _ = cv.findHomography(floor_xy, pixels)
+    # pylint misreports perspectiveTransform's arity.
+    # pylint: disable=too-many-function-args
+    via_homography = cv.perspectiveTransform(
+        floor_xy.reshape(-1, 1, 2), homography
+    ).reshape(-1, 2)
+    # pylint: enable=too-many-function-args
+    homography_rms_px = float(
+        np.sqrt(np.mean(np.sum((via_homography - pixels) ** 2, axis=1)))
+    )
     return {
         "rvec": rvec,
         "tvec": tvec,
         "rms_px": rms_px,
-        "floor_residuals": floor_residuals,
+        "homography_rms_px": homography_rms_px,
+        "floor_residual_vectors": floor_residual_vectors,
         "marker_ids": marker_ids,
     }
 
@@ -235,7 +254,12 @@ def _calibrate_camera(
         report["tvec"],
         metadata={
             "reprojection_rms_px": report["rms_px"],
+            "homography_rms_px": report["homography_rms_px"],
             "marker_ids": report["marker_ids"],
+            "detected_centers_px": {
+                marker_id: [float(center[0]), float(center[1])]
+                for marker_id, center in detected.items()
+            },
         },
     )
     projector = FloorProjector(camera_matrix, report["rvec"], report["tvec"])
@@ -247,9 +271,22 @@ def _calibrate_camera(
             f"  note: fewer than {RECOMMENDED_MARKERS_PER_CAMERA} markers; "
             "more markers improve accuracy"
         )
-    print(f"  reprojection RMS: {report['rms_px']:.2f} px")
-    for marker_id, residual in sorted(report["floor_residuals"].items()):
-        print(f"  marker {marker_id} floor residual: {residual * 100:.1f} cm")
+    print(
+        f"  reprojection RMS: {report['rms_px']:.2f} px "
+        f"(unconstrained homography: {report['homography_rms_px']:.2f} px)"
+    )
+    if report["homography_rms_px"] < 0.5 * report["rms_px"] and report["rms_px"] > 3:
+        print(
+            "  note: a homography fits these correspondences far better than "
+            "a rigid pose with the stored intrinsics — the camera's .yml "
+            "intrinsics are the likely error source."
+        )
+    for marker_id, (dx, dy) in sorted(report["floor_residual_vectors"].items()):
+        magnitude = math.hypot(dx, dy)
+        print(
+            f"  marker {marker_id} floor residual: {magnitude * 100:.1f} cm "
+            f"(dx={dx * 100:+.1f}, dy={dy * 100:+.1f} cm)"
+        )
     x, y, z = projector.camera_position
     print(f"  derived camera position: x={x:+.3f} m, y={y:+.3f} m, height={z:.3f} m")
 
