@@ -15,13 +15,11 @@ import argparse
 import math
 import time
 from multiprocessing import Process
-from pathlib import Path
 from threading import Thread
 from typing import Any
 
 import cv2 as cv
 import numpy as np
-import yaml  # type: ignore[import-untyped]
 
 from prpl_tidybot.marker_detector.camera_client import CameraClient
 from prpl_tidybot.marker_detector.camera_server import CameraServer
@@ -31,8 +29,6 @@ from prpl_tidybot.marker_detector.constants import (
     CAMERA_SERIALS,
     CAMERA_SERVER_PORTS,
     DETECTED_MARKER_IDS,
-    FLOOR_LENGTH,
-    FLOOR_WIDTH,
     MARKER_DETECTOR_PORT,
     MARKER_DICT_ID,
     MARKER_IDS,
@@ -43,7 +39,11 @@ from prpl_tidybot.marker_detector.constants import (
     TARGET_RESIDUAL_WARN_THRESHOLD,
 )
 from prpl_tidybot.marker_detector.publisher import Publisher
-from prpl_tidybot.marker_detector.utils import get_camera_alignment_params
+from prpl_tidybot.marker_detector.utils import (
+    get_camera_alignment_params,
+    get_floor_corner_coords,
+    load_lab_camera_config,
+)
 
 
 def _get_angle_offsets() -> dict[tuple[int, int], float]:
@@ -168,37 +168,7 @@ class Detector:
         self.inverse_heading = inverse_heading
 
     def _compute_transformation_matrix(self, src_points: np.ndarray) -> np.ndarray:
-        if self.placement == "top":
-            dst_points = np.array(
-                [
-                    [-(FLOOR_WIDTH / 2), FLOOR_LENGTH / 2],
-                    [FLOOR_WIDTH / 2, FLOOR_LENGTH / 2],
-                    [FLOOR_WIDTH / 2, 0],
-                    [-(FLOOR_WIDTH / 2), 0],
-                ],
-                dtype=np.float32,
-            )
-        elif self.placement == "bottom":
-            dst_points = np.array(
-                [
-                    [-(FLOOR_WIDTH / 2), 0],
-                    [FLOOR_WIDTH / 2, 0],
-                    [FLOOR_WIDTH / 2, -(FLOOR_LENGTH / 2)],
-                    [-(FLOOR_WIDTH / 2), -(FLOOR_LENGTH / 2)],
-                ],
-                dtype=np.float32,
-            )
-        else:  # 'top_only'
-            dst_points = np.array(
-                [
-                    [-(FLOOR_WIDTH / 2), FLOOR_LENGTH / 4],
-                    [FLOOR_WIDTH / 2, FLOOR_LENGTH / 4],
-                    [FLOOR_WIDTH / 2, -(FLOOR_LENGTH / 4)],
-                    [-(FLOOR_WIDTH / 2), -(FLOOR_LENGTH / 4)],
-                ],
-                dtype=np.float32,
-            )
-
+        dst_points = get_floor_corner_coords(self.placement)
         return cv.getPerspectiveTransform(src_points, dst_points).astype(np.float32)
 
     def get_poses_from_markers(
@@ -441,13 +411,6 @@ def _start_camera_server(serial: str, port: int) -> None:
     CameraServer(serial, port=port).run()
 
 
-def _load_lab_camera_config(lab: str) -> tuple[list[str], float]:
-    conf_path = Path(__file__).parents[3] / "conf" / "lab" / f"{lab}.yaml"
-    with open(conf_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    return cfg["camera_serials"], cfg["camera_height"]
-
-
 def main(
     host: str = "0.0.0.0",
     top_only: bool = False,
@@ -463,7 +426,7 @@ def main(
     conf/lab/<lab>.yaml; omit to use whatever PRPL_LAB resolves at import time.
     """
     if lab is not None:
-        camera_serials, camera_height = _load_lab_camera_config(lab)
+        camera_serials, camera_height = load_lab_camera_config(lab)
     else:
         camera_serials, camera_height = CAMERA_SERIALS, CAMERA_HEIGHT
 

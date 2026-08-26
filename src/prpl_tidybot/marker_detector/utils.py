@@ -16,15 +16,59 @@ from typing import Any
 
 import cv2 as cv
 import numpy as np
+import yaml  # type: ignore[import-untyped]
 
 from prpl_tidybot.marker_detector.constants import (
     CAMERA_EXPOSURE,
     CAMERA_FOCUS,
     CAMERA_GAIN,
     CAMERA_TEMPERATURE,
+    FLOOR_LENGTH,
+    FLOOR_WIDTH,
 )
 
 CAMERA_PARAMS_DIR = Path(__file__).parent / "camera_params"
+
+
+def load_lab_camera_config(lab: str) -> tuple[list[str], float]:
+    """Load camera serials and mounting height from conf/lab/<lab>.yaml."""
+    conf_path = Path(__file__).parents[3] / "conf" / "lab" / f"{lab}.yaml"
+    with open(conf_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    return cfg["camera_serials"], cfg["camera_height"]
+
+
+def get_floor_corner_coords(placement: str) -> np.ndarray:
+    """Floor-frame `(x, y)` coords of a camera's four annotated floor corners.
+
+    These are the homography destination points for `placement`'s
+    pixel-to-floor transform, ordered to match the annotation order in
+    `camera_params/<lab>/<serial>.json` (image top-left, top-right,
+    bottom-right, bottom-left).
+    """
+    if placement == "top":
+        coords = [
+            [-(FLOOR_WIDTH / 2), FLOOR_LENGTH / 2],
+            [FLOOR_WIDTH / 2, FLOOR_LENGTH / 2],
+            [FLOOR_WIDTH / 2, 0],
+            [-(FLOOR_WIDTH / 2), 0],
+        ]
+    elif placement == "bottom":
+        coords = [
+            [-(FLOOR_WIDTH / 2), 0],
+            [FLOOR_WIDTH / 2, 0],
+            [FLOOR_WIDTH / 2, -(FLOOR_LENGTH / 2)],
+            [-(FLOOR_WIDTH / 2), -(FLOOR_LENGTH / 2)],
+        ]
+    else:
+        assert placement == "top_only"
+        coords = [
+            [-(FLOOR_WIDTH / 2), FLOOR_LENGTH / 4],
+            [FLOOR_WIDTH / 2, FLOOR_LENGTH / 4],
+            [FLOOR_WIDTH / 2, -(FLOOR_LENGTH / 4)],
+            [-(FLOOR_WIDTH / 2), -(FLOOR_LENGTH / 4)],
+        ]
+    return np.array(coords, dtype=np.float32)
 
 
 def get_video_cap(serial: str, frame_width: int, frame_height: int) -> cv.VideoCapture:
