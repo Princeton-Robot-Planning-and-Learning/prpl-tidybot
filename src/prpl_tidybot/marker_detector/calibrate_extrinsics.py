@@ -152,64 +152,77 @@ def _detect_marker_centers(image: np.ndarray) -> dict[int, np.ndarray]:
     }
 
 
-def _capture_frames(
-    serial: str, port: int, num_frames: int, warmup_s: float
-) -> list[np.ndarray]:
-    """Grab undistorted frames from a running camera server, else directly.
+class _FrameSource:
+    """Undistorted-frame reader over a camera server or a direct capture.
 
-    `warmup_s` streams (and discards) frames for that long first, so a
-    cold-started camera can stabilise before the frames that matter.
+    Holding one open per camera lets every camera stream simultaneously,
+    so a single warm-up window covers them all.
     """
-    try:
-        client = CameraClient(port)
-    except ConnectionRefusedError:
-        print(f"No camera server on port {port}; opening camera {serial} directly.")
-        return _capture_frames_direct(serial, num_frames, warmup_s)
-    try:
-        _warm_up(client.get_image, warmup_s)
-        return [client.get_image().copy() for _ in range(num_frames)]
-    finally:
-        client.close()
+
+    def __init__(self, serial: str, port: int) -> None:
+        self._client: CameraClient | None
+        self._cap: cv.VideoCapture | None = None
+        try:
+            self._client = CameraClient(port)
+        except ConnectionRefusedError:
+            print(f"No camera server on port {port}; opening camera {serial} directly.")
+            self._client = None
+            (
+                image_width,
+                image_height,
+                self._camera_matrix,
+                self._dist_coeffs,
+            ) = utils.get_camera_params(serial)
+            self._cap = utils.get_video_cap(serial, image_width, image_height)
+
+    def read(self) -> np.ndarray | None:
+        """Return one undistorted frame, or None on a failed direct read."""
+        if self._client is not None:
+            return self._client.get_image().copy()
+        assert self._cap is not None
+        ok, image = self._cap.read()
+        if not ok or image is None:
+            return None
+        return cv.undistort(image, self._camera_matrix, self._dist_coeffs)
+
+    def close(self) -> None:
+        """Release the server connection or the capture device."""
+        if self._client is not None:
+            self._client.close()
+        elif self._cap is not None:
+            self._cap.release()
 
 
-def _capture_frames_direct(
-    serial: str, num_frames: int, warmup_s: float
-) -> list[np.ndarray]:
-    image_width, image_height, camera_matrix, dist_coeffs = utils.get_camera_params(
-        serial
-    )
-    cap = utils.get_video_cap(serial, image_width, image_height)
-    frames: list[np.ndarray] = []
-    try:
-        _warm_up(cap.read, warmup_s)
-        while len(frames) < num_frames:
-            ok, image = cap.read()
-            if ok and image is not None:
-                frames.append(cv.undistort(image, camera_matrix, dist_coeffs))
-    finally:
-        cap.release()
-    return frames
-
-
-def _warm_up(read_frame: Any, warmup_s: float) -> None:
+def _warm_up_all(sources: list[_FrameSource], warmup_s: float) -> None:
+    """Stream (and discard) frames from every camera at once for `warmup_s`,
+    so cold-started sensors stabilise before the frames that matter."""
     if warmup_s <= 0:
         return
     deadline = time.monotonic() + warmup_s
-    print(f"Warming up the camera for {warmup_s / 60:.1f} min...")
+    print(f"Warming up {len(sources)} camera(s) for {warmup_s / 60:.1f} min...")
+    next_report = time.monotonic() + 60
     while time.monotonic() < deadline:
-        read_frame()
+        for source in sources:
+            source.read()
+        if time.monotonic() >= next_report:
+            remaining = (deadline - time.monotonic()) / 60
+            print(f"  warm-up: {remaining:.1f} min remaining")
+            next_report += 60
 
 
 def _calibrate_camera(
     serial: str,
-    port: int,
+    source: _FrameSource,
     marker_positions: dict[int, tuple[float, float]],
     num_frames: int,
-    warmup_s: float,
 ) -> dict[str, Any]:
     """Capture, detect, solve, save, and print the report for one camera."""
     _, _, camera_matrix, _ = utils.get_camera_params(serial)
-    frames = _capture_frames(serial, port, num_frames, warmup_s)
+    frames: list[np.ndarray] = []
+    while len(frames) < num_frames:
+        frame = source.read()
+        if frame is not None:
+            frames.append(frame)
     detected = average_marker_centers(
         [_detect_marker_centers(frame) for frame in frames]
     )
@@ -281,12 +294,19 @@ def main(
     else:
         camera_serials = list(CAMERA_SERIALS)
 
-    reports = [
-        _calibrate_camera(
-            serial, port, marker_positions, num_frames, warmup_minutes * 60
-        )
+    sources = [
+        _FrameSource(serial, port)
         for serial, port in zip(camera_serials, CAMERA_SERVER_PORTS)
     ]
+    try:
+        _warm_up_all(sources, warmup_minutes * 60)
+        reports = [
+            _calibrate_camera(serial, source, marker_positions, num_frames)
+            for serial, source in zip(camera_serials, sources)
+        ]
+    finally:
+        for source in sources:
+            source.close()
     if len(reports) > 1:
         _print_cross_camera_report(reports)
     print(
@@ -329,9 +349,9 @@ def cli() -> None:
         type=float,
         default=0.0,
         help=(
-            "Stream (and discard) frames for this long per camera before "
-            "capturing, so cold-started cameras stabilise. Omit if the "
-            "camera servers have already been running for 10+ minutes."
+            "Stream (and discard) frames from all cameras together for this "
+            "long before capturing, so cold-started cameras stabilise. Omit "
+            "if the camera servers have already been running for 10+ minutes."
         ),
     )
     args = parser.parse_args()
