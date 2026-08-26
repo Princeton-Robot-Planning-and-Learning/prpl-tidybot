@@ -44,7 +44,6 @@ CAMERA_FOCUS = 0
 CAMERA_TEMPERATURE = 3900
 CAMERA_EXPOSURE = 77  # 77 is best, 156 is slightly worse, 312 gives motion blur
 CAMERA_GAIN = 50  # Increments of 10
-CAMERA_HEIGHT = 2.6  # m, ceiling-to-floor distance for the mounted cameras
 
 # Floor extents in the map frame. Origin is the floor center.
 NUM_FLOOR_TILES_X = 6

@@ -2,17 +2,14 @@
 
 Wraps OpenCV's `VideoCapture` to open the Logitech C930e ceiling cameras with
 fixed focus / white balance / exposure / gain, and loads the per-serial
-intrinsic + floor-alignment files shipped under
-`prpl_tidybot.marker_detector.camera_params`.
+intrinsics files shipped under `prpl_tidybot.marker_detector.camera_params`.
 
 Adapted from the subset of `yixuanhuang98/tidybot_server/server/utils.py`
 that the marker detector actually uses.
 """
 
-import json
 import sys
 from pathlib import Path
-from typing import Any
 
 import cv2 as cv
 import numpy as np
@@ -81,15 +78,3 @@ def get_camera_params(serial: str) -> tuple[int, int, np.ndarray, np.ndarray]:
     dist_coeffs = fs.getNode("distortion_coefficients").mat()
     fs.release()
     return image_width, image_height, camera_matrix, dist_coeffs
-
-
-def get_camera_alignment_params(serial: str) -> tuple[Any, Any]:
-    """Load the floor-corner image annotations used to fit the map homography."""
-    candidates = list(CAMERA_PARAMS_DIR.glob(f"*/{serial}.json"))
-    assert (
-        len(candidates) == 1
-    ), f"expected one camera alignment file for {serial}, found: {candidates}"
-    path = candidates[0]
-    with open(path, "r", encoding="utf-8") as f:
-        labels = json.load(f)
-    return labels["camera_center"], labels["camera_corners"]

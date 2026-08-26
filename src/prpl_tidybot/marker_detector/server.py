@@ -27,12 +27,9 @@ from prpl_tidybot.marker_detector.camera_client import CameraClient
 from prpl_tidybot.marker_detector.camera_server import CameraServer
 from prpl_tidybot.marker_detector.ceiling_image_publisher import CeilingImagePublisher
 from prpl_tidybot.marker_detector.constants import (
-    CAMERA_HEIGHT,
     CAMERA_SERIALS,
     CAMERA_SERVER_PORTS,
     DETECTED_MARKER_IDS,
-    FLOOR_LENGTH,
-    FLOOR_WIDTH,
     MARKER_DETECTOR_PORT,
     MARKER_DICT_ID,
     MARKER_IDS,
@@ -42,8 +39,9 @@ from prpl_tidybot.marker_detector.constants import (
     TARGET_MARKER_HEIGHT,
     TARGET_RESIDUAL_WARN_THRESHOLD,
 )
+from prpl_tidybot.marker_detector.extrinsics import FloorProjector, load_extrinsics
 from prpl_tidybot.marker_detector.publisher import Publisher
-from prpl_tidybot.marker_detector.utils import get_camera_alignment_params
+from prpl_tidybot.marker_detector.utils import get_camera_params
 
 
 def _get_angle_offsets() -> dict[tuple[int, int], float]:
@@ -57,29 +55,6 @@ def _get_angle_offsets() -> dict[tuple[int, int], float]:
                     corner2[1] - corner1[1], corner2[0] - corner1[0]
                 )
     return offsets
-
-
-def _height_corrected_corners(
-    corners: np.ndarray,
-    slot_indices: np.ndarray,
-    camera_center: np.ndarray,
-    num_robot_slots: int,
-    robot_ratio: float,
-    target_ratio: float,
-) -> np.ndarray:
-    """Scale pixel corners toward the camera center by each marker's height ratio.
-
-    `corners` is a `(4 * num_markers, 2)` array of pixel corners in marker
-    order (four consecutive rows per marker); `slot_indices` holds one slot
-    index per marker. Slots below `num_robot_slots` are robot stickers and
-    get `robot_ratio`; the remaining slots are scene targets and get
-    `target_ratio`.
-    """
-    marker_ratios = np.where(
-        slot_indices < num_robot_slots, robot_ratio, target_ratio
-    ).astype(np.float32)
-    corner_ratios = np.repeat(marker_ratios, 4)[:, None]
-    return camera_center + corner_ratios * (corners - camera_center)
 
 
 def _merge_target_estimates(
@@ -117,16 +92,15 @@ class Detector:
 
     def __init__(
         self,
-        placement: str,
         serial: str,
         port: int,
         inverse_heading: bool,
-        camera_height: float = CAMERA_HEIGHT,
     ) -> None:
-        assert placement in {"top", "bottom", "top_only"}
-        self.placement = placement
-
-        self.camera_center, self.camera_corners = get_camera_alignment_params(serial)
+        self.serial = serial
+        # Frames arrive undistorted from the CameraServer, so the intrinsic
+        # matrix plus the calibrated pose fully determine each pixel's ray.
+        _, _, camera_matrix, _ = get_camera_params(serial)
+        self.projector = FloorProjector(camera_matrix, *load_extrinsics(serial))
         self.camera_client = CameraClient(port)
 
         cv.setNumThreads(4)  # tuned for 12 CPUs
@@ -145,61 +119,12 @@ class Detector:
         detector_params.adaptiveThreshWinSizeMin = 23  # all markers same size
         self.detector = aruco.ArucoDetector(marker_dict, detector_params)
 
-        self.transformation_matrix = self._compute_transformation_matrix(
-            np.array(self.camera_corners, dtype=np.float32)
-        )
-        # A marker's apparent pixel offset from the camera center scales with
-        # its height above the floor, so each marker class needs its own
-        # pixel->floor ratio: robot stickers sit at ROBOT_HEIGHT, scene
-        # targets lie on the floor at TARGET_MARKER_HEIGHT. Using one ratio
-        # for both pulls the mis-corrected class toward the camera's nadir
-        # by (height error / camera height) x its distance from the nadir,
-        # and makes the two ceiling cameras disagree about a single static
-        # marker by that fraction of the distance between their nadirs.
-        self.height_ratio = (camera_height - ROBOT_HEIGHT) / camera_height
-        self.target_height_ratio = (
-            camera_height - TARGET_MARKER_HEIGHT
-        ) / camera_height
         self.angle_offsets = _get_angle_offsets()
         self.position_offset = ROBOT_DIAG / 2 - MARKER_PARAMS[
             "sticker_length"
         ] / math.sqrt(2)
 
         self.inverse_heading = inverse_heading
-
-    def _compute_transformation_matrix(self, src_points: np.ndarray) -> np.ndarray:
-        if self.placement == "top":
-            dst_points = np.array(
-                [
-                    [-(FLOOR_WIDTH / 2), FLOOR_LENGTH / 2],
-                    [FLOOR_WIDTH / 2, FLOOR_LENGTH / 2],
-                    [FLOOR_WIDTH / 2, 0],
-                    [-(FLOOR_WIDTH / 2), 0],
-                ],
-                dtype=np.float32,
-            )
-        elif self.placement == "bottom":
-            dst_points = np.array(
-                [
-                    [-(FLOOR_WIDTH / 2), 0],
-                    [FLOOR_WIDTH / 2, 0],
-                    [FLOOR_WIDTH / 2, -(FLOOR_LENGTH / 2)],
-                    [-(FLOOR_WIDTH / 2), -(FLOOR_LENGTH / 2)],
-                ],
-                dtype=np.float32,
-            )
-        else:  # 'top_only'
-            dst_points = np.array(
-                [
-                    [-(FLOOR_WIDTH / 2), FLOOR_LENGTH / 4],
-                    [FLOOR_WIDTH / 2, FLOOR_LENGTH / 4],
-                    [FLOOR_WIDTH / 2, -(FLOOR_LENGTH / 4)],
-                    [-(FLOOR_WIDTH / 2), -(FLOOR_LENGTH / 4)],
-                ],
-                dtype=np.float32,
-            )
-
-        return cv.getPerspectiveTransform(src_points, dst_points).astype(np.float32)
 
     def get_poses_from_markers(
         self, corners: Any, indices: Any, debug: bool = False
@@ -213,22 +138,19 @@ class Detector:
         if indices is None:
             return data
 
-        # Convert marker corners from pixel to real-world coordinates,
-        # correcting each marker for its own height above the floor.
+        # Convert marker corners from pixels to map-frame coordinates by
+        # intersecting each pixel's ray with the plane at its marker's
+        # height: robot stickers sit at ROBOT_HEIGHT, scene targets at
+        # TARGET_MARKER_HEIGHT.
         corners = np.concatenate(corners, axis=1).squeeze(0)
-        camera_center = np.array(self.camera_center, dtype=np.float32)
         indices = indices.squeeze(1)
-        corners = _height_corrected_corners(
-            corners,
-            indices,
-            camera_center,
-            self._num_robot_slots,
-            robot_ratio=self.height_ratio,
-            target_ratio=self.target_height_ratio,
+        corner_heights = np.where(
+            np.repeat(indices, 4) < self._num_robot_slots,
+            ROBOT_HEIGHT,
+            TARGET_MARKER_HEIGHT,
         )
-        corners = np.c_[corners, np.ones(corners.shape[0], dtype=np.float32)]
-        corners = corners @ self.transformation_matrix.T
-        corners = (corners[:, :2] / corners[:, 2:]).reshape(-1, 4, 2)
+        corners = self.projector.project_to_heights(corners, corner_heights)
+        corners = corners.reshape(-1, 4, 2)
 
         centers = corners.mean(axis=1)
         positions = centers.copy()
@@ -325,7 +247,7 @@ class Detector:
             image_copy = image.copy()  # 0.2 ms
             if indices is not None:
                 cv.aruco.drawDetectedMarkers(image_copy, corners, indices)
-            cv.imshow(f"Detections ({self.placement})", image_copy)  # 0.3 ms
+            cv.imshow(f"Detections ({self.serial})", image_copy)  # 0.3 ms
 
         return self.get_poses_from_markers(corners, indices, debug=debug)
 
@@ -352,39 +274,17 @@ class MarkerDetectorServer(Publisher):
         debug: bool = False,
         inverse_heading: bool = True,
         camera_serials: list[str] | None = None,
-        camera_height: float = CAMERA_HEIGHT,
     ) -> None:
         super().__init__(hostname=hostname, port=port)
         self.debug = debug
         self._last_residual_warning: dict[int, float] = {}
         camera_serials = camera_serials or CAMERA_SERIALS
         if top_only:
-            self.detectors = [
-                Detector(
-                    "top_only",
-                    camera_serials[0],
-                    CAMERA_SERVER_PORTS[0],
-                    inverse_heading=inverse_heading,
-                    camera_height=camera_height,
-                )
-            ]
-        else:
-            self.detectors = [
-                Detector(
-                    "top",
-                    camera_serials[0],
-                    CAMERA_SERVER_PORTS[0],
-                    inverse_heading=inverse_heading,
-                    camera_height=camera_height,
-                ),
-                Detector(
-                    "bottom",
-                    camera_serials[1],
-                    CAMERA_SERVER_PORTS[1],
-                    inverse_heading=inverse_heading,
-                    camera_height=camera_height,
-                ),
-            ]
+            camera_serials = camera_serials[:1]
+        self.detectors = [
+            Detector(serial, port_, inverse_heading=inverse_heading)
+            for serial, port_ in zip(camera_serials, CAMERA_SERVER_PORTS)
+        ]
 
     def get_data(self) -> dict:
         data: dict[str, Any] = {"poses": {}, "targets": {}}
@@ -441,11 +341,11 @@ def _start_camera_server(serial: str, port: int) -> None:
     CameraServer(serial, port=port).run()
 
 
-def _load_lab_camera_config(lab: str) -> tuple[list[str], float]:
+def _load_lab_camera_serials(lab: str) -> list[str]:
     conf_path = Path(__file__).parents[3] / "conf" / "lab" / f"{lab}.yaml"
     with open(conf_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    return cfg["camera_serials"], cfg["camera_height"]
+    return cfg["camera_serials"]
 
 
 def main(
@@ -459,13 +359,13 @@ def main(
 
     `host` controls only the marker-detector publisher socket. The camera
     servers stay on localhost since they're consumed in-process.
-    Pass `lab` (e.g. 'prpl') to override camera serials and height from
+    Pass `lab` (e.g. 'prpl') to override camera serials from
     conf/lab/<lab>.yaml; omit to use whatever PRPL_LAB resolves at import time.
     """
     if lab is not None:
-        camera_serials, camera_height = _load_lab_camera_config(lab)
+        camera_serials = _load_lab_camera_serials(lab)
     else:
-        camera_serials, camera_height = CAMERA_SERIALS, CAMERA_HEIGHT
+        camera_serials = list(CAMERA_SERIALS)
 
     for serial, port in [
         (camera_serials[0], CAMERA_SERVER_PORTS[0]),
@@ -494,7 +394,6 @@ def main(
         debug=debug,
         inverse_heading=inverse_heading,
         camera_serials=camera_serials,
-        camera_height=camera_height,
     ).run()
 
 
