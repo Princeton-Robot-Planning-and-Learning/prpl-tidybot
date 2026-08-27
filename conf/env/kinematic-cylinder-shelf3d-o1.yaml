@@ -13,6 +13,7 @@ make_kwargs:
 # (2.0, 2.4, 0.02) and the planner would emit base motion to the wrong place.
 env_model_kwargs:
   num_objects: 1
+  grasp_mode: ${env.grasp_mode}
   config:
     _target_: kinder.envs.kinematic3d.cylinder_shelf3d.CylinderShelf3DEnvConfig
     shelf_pose:
@@ -26,6 +27,15 @@ env_model_kwargs:
     # tall opening above the bottom board; the Pringles can (taller than a
     # regular board gap) is placed there.
     shelf_omitted_layers: [1]
+
+# Canned grasp mode for the pick skill: "side" (default) grips the
+# cylinder's side near its top with a near-horizontal planar approach;
+# "top_down" descends vertically onto it. Override on the CLI with
+# `env.grasp_mode=top_down`. Note: with the current shelf, a
+# top-down-held cylinder cannot be placed — the forearm column above
+# the gripper needs ~0.65 m of clear height, which no shelf opening
+# provides — so top_down currently supports pick-only experiments.
+grasp_mode: side
 
 # The physical cylinder: a Pringles can. Threaded into both the perceiver
 # and the env config above so the perceived state and the planner's

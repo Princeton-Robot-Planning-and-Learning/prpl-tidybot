@@ -20,8 +20,8 @@ dependencies = [
    # kindergarden release.
    "kindergarden @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kindergarden.git@86c55a4e9a19f4f37cd7103d425ee88465042173",
    "hydra-core",
-   "kinder_bilevel_planning @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@39564581f83fcaf97845be1b037b85ebea09c255#subdirectory=kinder-bilevel-planning",
-   "kinder_models @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@39564581f83fcaf97845be1b037b85ebea09c255#subdirectory=kinder-models",
+   "kinder_bilevel_planning @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@281c23688db3aebee3df89837c9cfe5e9b2fbc29#subdirectory=kinder-bilevel-planning",
+   "kinder_models @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@281c23688db3aebee3df89837c9cfe5e9b2fbc29#subdirectory=kinder-models",
    "phoenix6==25.1.0",
    "ruckig",
    "setuptools<81",
