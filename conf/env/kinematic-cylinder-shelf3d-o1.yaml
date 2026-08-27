@@ -18,18 +18,26 @@ env_model_kwargs:
     shelf_pose:
       _target_: pybullet_helpers.geometry.Pose
       position: ${env.shelf_pose}
+    # Real-object geometry, threaded into the planner's internal sim and
+    # the shadow sim so they simulate the physical cylinder.
+    cylinder_radius: ${env.cylinder_radius}
+    cylinder_heights: ["${env.cylinder_height}"]
+    # Our physical shelf has its bottom inner board removed, leaving one
+    # tall opening above the bottom board; the Pringles can (taller than a
+    # regular board gap) is placed there.
+    shelf_omitted_layers: [1]
 
-# The physical cylinder the perceiver reports. Must match the first entry of
-# the env config's cylinder_heights (and cylinder_radius) so the planner's
-# internal sim and the perceived state agree on the geometry.
-cylinder_radius: 0.03
-cylinder_height: 0.2
+# The physical cylinder: a Pringles can. Threaded into both the perceiver
+# and the env config above so the perceived state and the planner's
+# internal sim agree on the geometry.
+cylinder_radius: 0.039
+cylinder_height: 0.233
 
 # Used by the fake-mode target source: where the agent thinks the cylinder
 # is. The z is the cylinder's *center* height, i.e. cylinder_height / 2.
 # (Sim mode reads the cylinder from the kinder env directly; real mode pulls
 # it from the marker detector and ignores this constant.)
-cylinder_pose: [0.5, 0.0, 0.1]
+cylinder_pose: [0.5, 0.0, 0.1165]
 
 # ArUco marker (and the cylinder's center z in the env frame) that the
 # real-mode perceiver reads as the cylinder position. The marker detector
@@ -45,7 +53,7 @@ cylinder_pose: [0.5, 0.0, 0.1]
 # target mid-episode. `cylinder_marker_z` is the standing cylinder's
 # *center* height above the floor (cylinder_height / 2).
 cylinder_marker_id: 23
-cylinder_marker_z: 0.1
+cylinder_marker_z: 0.1165
 
 # Static shelf pose threaded into the perceiver. Matches the value used for
 # the Shelf3D env so the same physical shelf staging works for both;
@@ -64,7 +72,12 @@ agent_max_skill_horizon: 400
 # and cut the pre-grasp -> grasp and pre-place -> place corners.
 arm_advance_radius: 0.15
 arm_arrival_tolerance: 0.4
-arm_gripper_dwell_ticks: 10
+# Ticks the executor holds the arm at the grasp pose after commanding the
+# gripper to close, so the real Robotiq (~1-2 s to close) finishes before
+# the stow begins. ~20 ticks is ~2 s at the real ~0.104 s tick rate. Fake
+# mode runs with control_period 0, so the dwell costs nothing there and
+# no per-mode override is needed.
+arm_gripper_dwell_ticks: 20
 
 pipelines:
   fake:
