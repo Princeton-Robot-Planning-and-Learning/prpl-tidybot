@@ -1,0 +1,35 @@
+# Example marker layout for scripts/calibrate_camera_extrinsics.py.
+#
+# Keys are ArUco DICT_4X4_50 marker ids (print them with
+# scripts/create_calibration_markers.py); values are the map-frame [x, y]
+# (metres) of each marker's centre, taped flat on the floor. Measure to the
+# CENTRE of each marker — the printed sheets have tick marks on the centre
+# axes for lining up with floor marks.
+#
+# The positions define the map frame: wherever you say the markers are is
+# where the world ends up. Measure them with a tape measure from your
+# chosen origin, keeping the origin near the centre of the work area and
+# the axes aligned with the existing map frame (x across the floor width,
+# y along its length, midline between the cameras at y = 0). If your floor
+# has a tile grid, tile intersections save the measuring, but any measured
+# positions work.
+#
+# The values below are placeholders for a ten-marker layout: four spread
+# over each camera's half plus two on the midline that both cameras see
+# (these enable the cross-camera consistency check). Each camera needs at
+# least four detected markers, not all in a line. Avoid the robot-sticker
+# and target ids (10, 13, 17, 21, 23).
+marker_positions:
+  # Top camera's half (y > 0).
+  0: [-1.2, 1.5]
+  1: [1.2, 1.5]
+  2: [-1.2, 0.6]
+  3: [1.2, 0.6]
+  # Midline, visible to both cameras.
+  4: [-0.6, 0.0]
+  5: [0.6, 0.0]
+  # Bottom camera's half (y < 0).
+  6: [-1.2, -0.6]
+  7: [1.2, -0.6]
+  8: [-1.2, -1.5]
+  9: [1.2, -1.5]

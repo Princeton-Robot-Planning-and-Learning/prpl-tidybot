@@ -23,6 +23,18 @@ MARKER_PARAMS = {
 MARKER_DICT_ID = cv.aruco.DICT_4X4_50
 MARKER_IDS = (10, 13, 17, 21)
 
+# ChArUco board used to calibrate camera intrinsics (the per-serial .yml
+# files). 10x7 squares of 24 mm with 18 mm markers: 240 x 168 mm, printable
+# on landscape US letter. The board's markers reuse ids 0-34 of
+# MARKER_DICT_ID, so keep the board out of view during marker detection and
+# extrinsics calibration.
+CHARUCO_BOARD_PARAMS = {
+    "squares_x": 10,
+    "squares_y": 7,
+    "square_length": 0.024,  # 24 mm
+    "marker_length": 0.018,  # 18 mm
+}
+
 # ArUco markers placed in the scene as task targets (currently a single point
 # target used by base_motion3d). Disjoint from MARKER_IDS so detector slots map
 # cleanly to "robot sticker" vs "target".
@@ -44,7 +56,6 @@ CAMERA_FOCUS = 0
 CAMERA_TEMPERATURE = 3900
 CAMERA_EXPOSURE = 77  # 77 is best, 156 is slightly worse, 312 gives motion blur
 CAMERA_GAIN = 50  # Increments of 10
-CAMERA_HEIGHT = 2.6  # m, ceiling-to-floor distance for the mounted cameras
 
 # Floor extents in the map frame. Origin is the floor center.
 NUM_FLOOR_TILES_X = 6
