@@ -4,8 +4,12 @@ import cv2 as cv
 import numpy as np
 
 from prpl_tidybot.marker_detector.calibrate_intrinsics import (
+    AUTO_FALLBACK_INTERVAL_S,
+    AUTO_MIN_INTERVAL_S,
+    AUTO_NOVELTY_PX,
     calibrate_from_views,
     make_board,
+    should_auto_capture,
     write_camera_params,
 )
 from prpl_tidybot.marker_detector.constants import CHARUCO_BOARD_PARAMS
@@ -44,6 +48,22 @@ def test_make_board_accepts_custom_geometry():
     assert (squares_x, squares_y) == (12, 9)
     assert np.isclose(board.getSquareLength(), 0.015)
     assert board.getLegacyPattern()
+
+
+def test_should_auto_capture():
+    """Novel views capture after the interval; stale ones need the fallback."""
+    center = np.array([600.0, 400.0])
+    far = center + [AUTO_NOVELTY_PX + 1, 0.0]
+    near = center + [AUTO_NOVELTY_PX / 4, 0.0]
+    # Too soon after the last capture, regardless of novelty.
+    assert not should_auto_capture(far, [center], AUTO_MIN_INTERVAL_S / 2)
+    # Novel view after the minimum interval.
+    assert should_auto_capture(far, [center], AUTO_MIN_INTERVAL_S + 0.1)
+    # Non-novel view: only after the fallback interval (tilt-in-place).
+    assert not should_auto_capture(near, [center], AUTO_MIN_INTERVAL_S + 0.1)
+    assert should_auto_capture(near, [center], AUTO_FALLBACK_INTERVAL_S)
+    # First capture (no history) happens as soon as the interval allows.
+    assert should_auto_capture(center, [], AUTO_MIN_INTERVAL_S + 0.1)
 
 
 def _synthetic_views(num_views: int) -> tuple[list, list]:

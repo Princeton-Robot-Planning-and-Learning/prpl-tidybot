@@ -17,6 +17,12 @@ calibrates. Capture at least 15 views: vary the tilt (up to ~45 degrees)
 and distance, and cover the whole field of view — the corners and edges of
 the image matter most for fitting distortion.
 
+With `--auto` no key presses are needed (useful when the camera is mounted
+out of reach of the keyboard): good, novel views are captured hands-free
+with a terminal bell on each, and calibration runs by itself after
+`--num-views` views. Start the script, walk under the camera, and move the
+board around until the bell stops.
+
 The result overwrites `camera_params/<lab>/<serial>.yml` (the old file
 stays recoverable via git). Camera extrinsics are solved on top of the
 intrinsics, so re-run `scripts/calibrate_camera_extrinsics.py` afterwards.
@@ -26,6 +32,7 @@ rewritten for the OpenCV 4.7+ aruco API.
 """
 
 import argparse
+import time
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +59,15 @@ CALIBRATION_GAIN = 0
 # be worth keeping; sparser views mostly add noise.
 MIN_CORNERS_PER_VIEW = 8
 RECOMMENDED_VIEWS = 15
+
+# Auto-capture pacing: never capture more often than the minimum interval;
+# capture when the board's mean corner position has moved at least the
+# novelty distance since every previous capture, or — so that tilt-in-place
+# views are also collected — after the fallback interval regardless.
+AUTO_MIN_INTERVAL_S = 1.5
+AUTO_NOVELTY_PX = 40.0
+AUTO_FALLBACK_INTERVAL_S = 6.0
+AUTO_DEFAULT_VIEWS = 20
 
 
 def make_board(
@@ -124,10 +140,35 @@ def write_camera_params(
     fs.release()
 
 
+def should_auto_capture(
+    mean_corner: np.ndarray,
+    captured_means: list[np.ndarray],
+    seconds_since_last: float,
+) -> bool:
+    """Decide whether the auto-capture mode should keep the current view."""
+    if seconds_since_last < AUTO_MIN_INTERVAL_S:
+        return False
+    if seconds_since_last >= AUTO_FALLBACK_INTERVAL_S:
+        return True
+    return all(
+        float(np.linalg.norm(mean_corner - previous)) >= AUTO_NOVELTY_PX
+        for previous in captured_means
+    )
+
+
 def _capture_views(
-    serial: str, image_width: int, image_height: int, board: Any
+    serial: str,
+    image_width: int,
+    image_height: int,
+    board: Any,
+    auto: bool = False,
+    target_views: int = AUTO_DEFAULT_VIEWS,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Interactive live view: collect ChArUco detections until Esc."""
+    """Interactive live view: collect ChArUco detections until Esc.
+
+    With `auto`, views are captured hands-free (terminal bell on each) and
+    the loop ends after `target_views`; Esc still finishes early.
+    """
     aruco: Any = cv.aruco
     detector = aruco.CharucoDetector(board)
     cap = utils.get_video_cap(serial, image_width, image_height)
@@ -135,6 +176,8 @@ def _capture_views(
     cv.namedWindow(window)
     captured_corners: list[np.ndarray] = []
     captured_ids: list[np.ndarray] = []
+    captured_means: list[np.ndarray] = []
+    last_capture_time = -float("inf")
     try:
         while True:
             cap.set(cv.CAP_PROP_EXPOSURE, CALIBRATION_EXPOSURE)
@@ -153,10 +196,19 @@ def _capture_views(
                 aruco.drawDetectedMarkers(display, marker_corners)
             if num_corners:
                 aruco.drawDetectedCornersCharuco(display, charuco_corners, charuco_ids)
+            if auto:
+                status = (
+                    f"auto: {len(captured_ids)}/{target_views} views; "
+                    f"{num_corners} corners in view. Esc finishes early."
+                )
+            else:
+                status = (
+                    f"{len(captured_ids)} views captured; {num_corners} corners "
+                    "in view. 'c' captures, Esc calibrates."
+                )
             cv.putText(
                 display,
-                f"{len(captured_ids)} views captured; {num_corners} corners in "
-                "view. 'c' captures, Esc calibrates.",
+                status,
                 (10, 25),
                 cv.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -167,8 +219,30 @@ def _capture_views(
             key = cv.waitKey(10) & 0xFF
             if key == 27:
                 break
-            if key == ord("c"):
-                if num_corners >= MIN_CORNERS_PER_VIEW:
+
+            good_view = num_corners >= MIN_CORNERS_PER_VIEW
+            if auto:
+                if good_view:
+                    mean_corner = (
+                        np.asarray(charuco_corners).reshape(-1, 2).mean(axis=0)
+                    )
+                    since_last = time.monotonic() - last_capture_time
+                    if should_auto_capture(mean_corner, captured_means, since_last):
+                        captured_corners.append(charuco_corners)
+                        captured_ids.append(charuco_ids)
+                        captured_means.append(mean_corner)
+                        last_capture_time = time.monotonic()
+                        # \a rings the terminal bell so progress is audible
+                        # from under the camera, away from the screen.
+                        print(
+                            f"\aCaptured view {len(captured_ids)}/{target_views} "
+                            f"({num_corners} corners)"
+                        )
+                if len(captured_ids) >= target_views:
+                    print("Target number of views reached; calibrating.")
+                    break
+            elif key == ord("c"):
+                if good_view:
                     captured_corners.append(charuco_corners)
                     captured_ids.append(charuco_ids)
                     print(f"Captured view {len(captured_ids)} ({num_corners} corners)")
@@ -183,7 +257,13 @@ def _capture_views(
     return captured_corners, captured_ids
 
 
-def main(placement: str, lab: str | None = None, board: Any = None) -> None:
+def main(
+    placement: str,
+    lab: str | None = None,
+    board: Any = None,
+    auto: bool = False,
+    target_views: int = AUTO_DEFAULT_VIEWS,
+) -> None:
     """Run the interactive capture, calibrate, and overwrite the .yml."""
     board = board if board is not None else make_board()
     serial = _resolve_serial(placement, lab)
@@ -200,7 +280,7 @@ def main(placement: str, lab: str | None = None, board: Any = None) -> None:
         "and cover the whole field, especially image corners and edges."
     )
     captured_corners, captured_ids = _capture_views(
-        serial, image_width, image_height, board
+        serial, image_width, image_height, board, auto=auto, target_views=target_views
     )
     assert (
         len(captured_ids) >= 4
@@ -302,6 +382,22 @@ def cli() -> None:
             "try this if markers detect but no chessboard corners appear."
         ),
     )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help=(
+            "Capture views hands-free: whenever a good detection is novel "
+            "(the board moved since previous captures, with a time-based "
+            "fallback for tilt-in-place views), ringing the terminal bell "
+            "each time, and calibrate automatically after --num-views."
+        ),
+    )
+    parser.add_argument(
+        "--num-views",
+        type=int,
+        default=AUTO_DEFAULT_VIEWS,
+        help="Views to collect before auto mode stops and calibrates.",
+    )
     args = parser.parse_args()
     dict_id = (
         MARKER_DICT_ID
@@ -316,7 +412,13 @@ def cli() -> None:
         dict_id=dict_id,
         legacy=args.legacy,
     )
-    main(placement=args.placement, lab=args.lab, board=board)
+    main(
+        placement=args.placement,
+        lab=args.lab,
+        board=board,
+        auto=args.auto,
+        target_views=args.num_views,
+    )
 
 
 if __name__ == "__main__":
