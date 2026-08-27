@@ -11,6 +11,11 @@ import abc
 from typing import Any
 
 from kinder.envs.kinematic3d.base_motion3d import BaseMotion3DObjectCentricState
+from kinder.envs.kinematic3d.cylinder_shelf3d import (
+    CYLINDER_OBJECT_TYPE,
+    CylinderShelf3DEnvConfig,
+    CylinderShelf3DObjectCentricState,
+)
 from kinder.envs.kinematic3d.object_types import (
     Kinematic3DCuboidType,
     Kinematic3DEnvTypeFeatures,
@@ -35,6 +40,7 @@ from prpl_tidybot.structs import TidyBotObservation
 
 _DEFAULT_CUBE_HALF_EXTENTS = PrplLab3DEnvConfig().block_half_extents
 _DEFAULT_SHELF_CUBE_HALF_EXTENTS = Shelf3DEnvConfig().block_half_extents
+_DEFAULT_CYLINDER_SHELF_CONFIG = CylinderShelf3DEnvConfig()
 
 
 class KinematicRobotPerceiverBase(
@@ -286,5 +292,85 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
                 "half_extent_x": hx,
                 "half_extent_y": hy,
                 "half_extent_z": hz,
+            },
+        }
+
+
+class CylinderShelf3DPerceiver(KinematicRobotPerceiverBase):
+    """Perceiver for kinder/KinematicCylinderShelf3D-o{N}-v0.
+
+    Emits one cylinder (cylinder0) whose `(x, y, z)` comes from a
+    TargetSource plus a shelf fixture at a fixed pose threaded in from the
+    env yaml — the same pattern as :class:`Shelf3DPerceiver`, with the
+    cube swapped for a vertical cylinder. The cylinder's radius and height
+    default to the env config's first cylinder; override per-lab once the
+    real objects are measured. The marker detector only provides
+    `(x, y, z)` so the cylinder orientation defaults to identity
+    (standing upright), which for a rotationally symmetric cylinder is
+    the only orientation the planner needs. The target is cached once per
+    :meth:`reset` for the same control-loop-latency reason as in
+    :class:`BaseMotion3DPerceiver` — the cylinder is stationary during a
+    rollout by design.
+    """
+
+    def __init__(
+        self,
+        target_source: TargetSource,
+        shelf_pose: tuple[float, float, float],
+        cylinder_radius: float = _DEFAULT_CYLINDER_SHELF_CONFIG.cylinder_radius,
+        cylinder_height: float = _DEFAULT_CYLINDER_SHELF_CONFIG.cylinder_heights[0],
+        robot_name: str = "robot",
+    ) -> None:
+        super().__init__(robot_name=robot_name)
+        self._target_source = target_source
+        self._shelf_pose = tuple(shelf_pose)
+        self._cylinder_radius = cylinder_radius
+        self._cylinder_height = cylinder_height
+        self._cached_cylinder_target: tuple[float, float, float] | None = None
+
+    @property
+    def _state_cls(self) -> type[ObjectCentricState]:
+        return CylinderShelf3DObjectCentricState
+
+    def reset(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> ObjectCentricState:
+        self._cached_cylinder_target = self._target_source.get_target()
+        return super().reset(obs, info)
+
+    def _detect_objects(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> dict[Object, dict[str, float]]:
+        del obs, info
+        if self._cached_cylinder_target is None:
+            # Defensive — reset() should have run first; populate lazily
+            # so callers that call step() before reset() still get a
+            # cylinder.
+            self._cached_cylinder_target = self._target_source.get_target()
+        cyl_x, cyl_y, cyl_z = self._cached_cylinder_target
+        shelf_x, shelf_y, shelf_z = self._shelf_pose
+        return {
+            Object("shelf", Kinematic3DFixtureType): {
+                "pose_x": shelf_x,
+                "pose_y": shelf_y,
+                "pose_z": shelf_z,
+                "pose_qx": 0.0,
+                "pose_qy": 0.0,
+                "pose_qz": 0.0,
+                "pose_qw": 1.0,
+            },
+            Object("cylinder0", Kinematic3DCuboidType): {
+                "pose_x": cyl_x,
+                "pose_y": cyl_y,
+                "pose_z": cyl_z,
+                "pose_qx": 0.0,
+                "pose_qy": 0.0,
+                "pose_qz": 0.0,
+                "pose_qw": 1.0,
+                "grasp_active": 0.0,
+                "object_type": CYLINDER_OBJECT_TYPE,
+                "half_extent_x": self._cylinder_radius,
+                "half_extent_y": self._cylinder_radius,
+                "half_extent_z": self._cylinder_height / 2,
             },
         }
