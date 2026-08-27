@@ -7,6 +7,7 @@ from spatialmath import SE2
 from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
 from prpl_tidybot.real_sim.perceivers.kinematic3d import (
     BaseMotion3DPerceiver,
+    CylinderShelf3DPerceiver,
     PrplLab3DPerceiver,
 )
 from prpl_tidybot.real_sim.perceivers.target_source import ConstantTargetSource
@@ -60,3 +61,26 @@ def test_base_motion3d_perceiver_emits_target_from_source():
     assert state.get(target, "x") == pytest.approx(1.5)
     assert state.get(target, "y") == pytest.approx(-0.5)
     assert state.get(target, "z") == pytest.approx(0.2)
+
+
+def test_cylinder_shelf3d_perceiver_emits_cylinder_and_shelf():
+    """`CylinderShelf3DPerceiver` emits the cylinder at the TargetSource's position with
+    the configured geometry, plus the shelf fixture at the threaded-in pose."""
+    perceiver = CylinderShelf3DPerceiver(
+        target_source=ConstantTargetSource(0.5, 0.0, 0.1),
+        shelf_pose=(1.5, 1.5, 0.02),
+        cylinder_radius=0.03,
+        cylinder_height=0.2,
+    )
+    state = perceiver.step(_make_obs(), {})
+    cylinder = state.get_object_from_name("cylinder0")
+    assert state.get(cylinder, "pose_x") == pytest.approx(0.5)
+    assert state.get(cylinder, "pose_y") == pytest.approx(0.0)
+    assert state.get(cylinder, "pose_z") == pytest.approx(0.1)
+    assert state.get(cylinder, "half_extent_x") == pytest.approx(0.03)
+    assert state.get(cylinder, "half_extent_y") == pytest.approx(0.03)
+    assert state.get(cylinder, "half_extent_z") == pytest.approx(0.1)
+    shelf = state.get_object_from_name("shelf")
+    assert state.get(shelf, "pose_x") == pytest.approx(1.5)
+    assert state.get(shelf, "pose_y") == pytest.approx(1.5)
+    assert state.get(shelf, "pose_z") == pytest.approx(0.02)

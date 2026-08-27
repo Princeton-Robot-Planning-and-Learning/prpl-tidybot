@@ -1,0 +1,138 @@
+# kinder/KinematicCylinderShelf3D-o1-v0 — pick a tall cylinder off the floor
+# (side grasp, any approach angle) and place it upright on a shelf.
+# Bilevel-planning env model lives in
+# kinder_bilevel_planning.env_models.kinematic3d.cylinder_shelf3d.
+
+env_name: cylinder_shelf3d
+make_kwargs:
+  id: kinder/KinematicCylinderShelf3D-o1-v0
+# Threads the perceiver's shelf_pose through to the bilevel-planning agent's
+# internal CylinderShelf3DEnvConfig so the planner reasons about the shelf at
+# the same location the perceiver reports it. Without this the env_model's
+# internal sim would default to CylinderShelf3DEnvConfig.shelf_pose =
+# (2.0, 2.4, 0.02) and the planner would emit base motion to the wrong place.
+env_model_kwargs:
+  num_objects: 1
+  config:
+    _target_: kinder.envs.kinematic3d.cylinder_shelf3d.CylinderShelf3DEnvConfig
+    shelf_pose:
+      _target_: pybullet_helpers.geometry.Pose
+      position: ${env.shelf_pose}
+
+# The physical cylinder the perceiver reports. Must match the first entry of
+# the env config's cylinder_heights (and cylinder_radius) so the planner's
+# internal sim and the perceived state agree on the geometry.
+cylinder_radius: 0.03
+cylinder_height: 0.2
+
+# Used by the fake-mode target source: where the agent thinks the cylinder
+# is. The z is the cylinder's *center* height, i.e. cylinder_height / 2.
+# (Sim mode reads the cylinder from the kinder env directly; real mode pulls
+# it from the marker detector and ignores this constant.)
+cylinder_pose: [0.5, 0.0, 0.1]
+
+# ArUco marker (and the cylinder's center z in the env frame) that the
+# real-mode perceiver reads as the cylinder position. The marker detector
+# must be configured to publish this ID — see
+# `prpl_tidybot.marker_detector.constants.TARGET_MARKER_IDS`. The marker
+# sits on top of the physical cylinder; `cylinder_marker_z` is the
+# cylinder's *center* height above the floor (cylinder_height / 2), NOT the
+# height of the marker itself.
+cylinder_marker_id: 23
+cylinder_marker_z: 0.1
+
+# Static shelf pose threaded into the perceiver. Matches the value used for
+# the Shelf3D env so the same physical shelf staging works for both;
+# override here per-lab once the real shelf is staged.
+shelf_pose: [1.5, 1.5, 0.02]
+
+# The pick skill's planar reach is discretized at ~2.5 cm, so one
+# pick rollout (base navigation + reach + close + stow) runs a few
+# hundred ticks — beyond the global default skill horizon of 100.
+agent_max_skill_horizon: 400
+
+# Streaming arm executor knobs — see conf/env/kinematic-shelf3d-o1.yaml for
+# the full rationale; values are shared with that env.
+arm_advance_radius: 0.4
+arm_arrival_tolerance: 0.4
+arm_gripper_dwell_ticks: 10
+
+pipelines:
+  fake:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      # FakeInterface stores commanded poses, so the executor converges on
+      # the first tick; skip the per-tick sleep to keep tests fast.
+      control_period: 0.0
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.FakeInterface
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.CylinderShelf3DPerceiver
+      target_source:
+        _target_: prpl_tidybot.real_sim.perceivers.target_source.ConstantTargetSource
+        x: ${env.cylinder_pose.0}
+        y: ${env.cylinder_pose.1}
+        z: ${env.cylinder_pose.2}
+      shelf_pose: ${env.shelf_pose}
+      cylinder_radius: ${env.cylinder_radius}
+      cylinder_height: ${env.cylinder_height}
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
+      base_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.base_motion3d.PurePursuitBaseMotion3DPlanExecutor
+      arm_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.StreamingArmMotion3DPlanExecutor
+        distance_fn:
+          _target_: prpl_tidybot.real_sim.plan_executors.distance_factories.create_kinova_distance_fn
+        advance_radius: ${env.arm_advance_radius}
+        arrival_tolerance: ${env.arm_arrival_tolerance}
+        max_iter_total: 300
+        gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
+  sim:
+    real_env:
+      _target_: prpl_tidybot.sim_env.KinderSimEnv
+      env_id: ${env.make_kwargs.id}
+      # Same custom env config as the planner's ref env / internal sim
+      # (see env.env_model_kwargs.config above) so the shadow sim used
+      # by the preview / recorder also stages the shelf at env.shelf_pose
+      # instead of CylinderShelf3DEnvConfig's default (2.0, 2.4, 0.02).
+      # Without this, the planned-trajectory preview shows the shelf in
+      # the wrong place.
+      config: ${env.env_model_kwargs.config}
+      # Enable inner-env `set_state` so this same pipeline can serve as
+      # a shadow sim for the side-by-side video recorder.
+      allow_state_access: true
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.passthrough.PassThroughPerceiver
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.passthrough.PassThroughPlanExecutor
+  real:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.RealInterface
+        # Real arm + real base — the planner commands both for pick/place.
+        # Camera stays faked: perception of the cylinder is via the ceiling
+        # marker detector (see `target_source` below), not the on-robot
+        # cams, and `get_observation` would otherwise hit
+        # NotImplementedError on the real cams.
+        base_interface:
+          _target_: prpl_tidybot.interfaces.base_interface.RealBaseInterface
+          marker_detector_host: ${lab.marker_detector_host}
+        camera_interface:
+          _target_: prpl_tidybot.interfaces.camera_interface.FakeCameraInterface
+      # Off-host render source: subscribes to the JPEG image publisher running
+      # inside the marker-detector daemon. Lets `record.video=true` work on the
+      # real pipeline without the on-robot base camera being wired up.
+      renderer:
+        _target_: prpl_tidybot.rendering.CeilingCameraRenderer
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.CylinderShelf3DPerceiver
+      target_source:
+        _target_: prpl_tidybot.real_sim.perceivers.target_source.MarkerDetectorTargetSource
+        marker_id: ${env.cylinder_marker_id}
+        target_z: ${env.cylinder_marker_z}
+      shelf_pose: ${env.shelf_pose}
+      cylinder_radius: ${env.cylinder_radius}
+      cylinder_height: ${env.cylinder_height}
+    plan_executor: ${env.pipelines.fake.plan_executor}
