@@ -17,6 +17,7 @@ from spatialmath import SE2
 from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
 from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
 from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
+    CarrotArmMotion3DPlanExecutor,
     StreamingArmMotion3DPlanExecutor,
 )
 from prpl_tidybot.structs import TidyBotObservation
@@ -486,3 +487,96 @@ def test_gripper_dwell_holds_arm_at_grasp():
     assert action4.arm_goal[0] == pytest.approx(
         0.0
     ), "arm must retract after dwell ends"
+
+
+# ---------------------------------------------------------------------------
+# CarrotArmMotion3DPlanExecutor
+# ---------------------------------------------------------------------------
+
+
+def _joint1_chain(num_waypoints: int, step: float = 0.1):
+    """Sequential pairs each adding `step` to joint 1."""
+    pairs = []
+    for i in range(num_waypoints):
+        pairs.append(
+            (
+                _make_state(arm_conf=[i * step, 0, 0, 0, 0, 0, 0]),
+                _arm_action(arm_deltas=[step, 0, 0, 0, 0, 0, 0]),
+            )
+        )
+    return pairs
+
+
+def test_carrot_commands_constant_lookahead_point():
+    """The commanded target sits exactly `lookahead` ahead of the perceived
+    joints along the plan polyline, interpolated between waypoints."""
+    executor = CarrotArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05, lookahead=0.25
+    )
+    executor.set_trajectory(_joint1_chain(8))
+    # Waypoints at 0.1, 0.2, ..., 0.8 on joint 1.
+    s = _make_state(arm_conf=[0.12, 0, 0, 0, 0, 0, 0])
+    real_action, _ = executor.step(s)
+    # Cursor advances to the 0.2 waypoint (0.1 is within radius... it is not:
+    # |0.12-0.1|=0.02 <= 0.05, so cursor -> 1 with target 0.2). The carrot sits
+    # 0.25 ahead of 0.12 along the polyline: 0.37, between waypoints 0.3, 0.4.
+    assert real_action.arm_goal[0] == pytest.approx(0.37)
+
+
+def test_carrot_far_from_plan_commands_cursor_waypoint():
+    """When the cursor waypoint is already >= lookahead away, command it
+    unchanged (no interpolation toward the arm)."""
+    executor = CarrotArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05, lookahead=0.25
+    )
+    executor.set_trajectory(_joint1_chain(8))
+    s = _make_state(arm_conf=[-0.5, 0, 0, 0, 0, 0, 0])
+    real_action, _ = executor.step(s)
+    assert real_action.arm_goal[0] == pytest.approx(0.1)
+
+
+def test_carrot_never_commands_past_gripper_waypoint():
+    """The lookahead walk stops at a gripper command; the arm holds there
+    while the dwell runs."""
+    pairs = _joint1_chain(3)  # waypoints 0.1, 0.2, 0.3
+    # A close-gripper pair at the 0.3 posture, then further arm motion.
+    pairs.append(
+        (
+            _make_state(arm_conf=[0.3, 0, 0, 0, 0, 0, 0]),
+            _arm_action(gripper_cmd=-1.0),
+        )
+    )
+    pairs.extend(
+        (
+            _make_state(arm_conf=[(3 + i) * 0.1, 0, 0, 0, 0, 0, 0]),
+            _arm_action(arm_deltas=[0.1, 0, 0, 0, 0, 0, 0]),
+        )
+        for i in range(1, 3)
+    )
+    executor = CarrotArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05, lookahead=0.4
+    )
+    executor.set_trajectory(pairs)
+    s = _make_state(arm_conf=[0.19, 0, 0, 0, 0, 0, 0])
+    real_action, _ = executor.step(s)
+    # A 0.4 lookahead from 0.19 would reach 0.59, but the gripper waypoint at
+    # 0.3 caps the command.
+    assert real_action.arm_goal[0] == pytest.approx(0.3)
+
+
+def test_carrot_caps_at_final_waypoint():
+    """Near the end of the plan the carrot clamps to the final waypoint, so
+    the arm decelerates naturally into it."""
+    executor = CarrotArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05, lookahead=0.5
+    )
+    executor.set_trajectory(_joint1_chain(3))  # waypoints 0.1, 0.2, 0.3
+    s = _make_state(arm_conf=[0.28, 0, 0, 0, 0, 0, 0])
+    real_action, _ = executor.step(s)
+    assert real_action.arm_goal[0] == pytest.approx(0.3)
+
+
+def test_carrot_rejects_nonpositive_lookahead():
+    """lookahead must be positive."""
+    with pytest.raises(ValueError, match="lookahead"):
+        CarrotArmMotion3DPlanExecutor(distance_fn=_l1_distance, lookahead=0.0)
