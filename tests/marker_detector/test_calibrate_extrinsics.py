@@ -28,14 +28,23 @@ def _ground_truth_pose() -> tuple[np.ndarray, np.ndarray]:
 def test_average_marker_centers_averages_and_filters():
     """Centres are averaged; markers seen in under half the frames drop out."""
     per_frame = [
-        {0: np.array([10.0, 10.0]), 1: np.array([50.0, 50.0])},
-        {0: np.array([12.0, 10.0])},
-        {0: np.array([11.0, 13.0])},
-        {0: np.array([11.0, 11.0])},
+        [(0, np.array([10.0, 10.0])), (1, np.array([50.0, 50.0]))],
+        [(0, np.array([12.0, 10.0]))],
+        [(0, np.array([11.0, 13.0]))],
+        [(0, np.array([11.0, 11.0]))],
     ]
-    averaged = average_marker_centers(per_frame)
+    averaged, spreads = average_marker_centers(per_frame)
     assert set(averaged) == {0}  # marker 1: 1/4 frames, below the threshold
     assert np.allclose(averaged[0], [11.0, 11.0])
+    # Farthest observation from the mean: (11, 13) at distance 2.
+    assert np.isclose(spreads[0], 2.0)
+
+
+def test_average_marker_centers_rejects_duplicates_within_a_frame():
+    """The same id twice in one frame (stray duplicate print) is an error."""
+    per_frame = [[(0, np.array([10.0, 10.0])), (0, np.array([500.0, 500.0]))]]
+    with pytest.raises(AssertionError):
+        average_marker_centers(per_frame)
 
 
 def test_solve_from_detections_recovers_pose_and_reports_residuals():

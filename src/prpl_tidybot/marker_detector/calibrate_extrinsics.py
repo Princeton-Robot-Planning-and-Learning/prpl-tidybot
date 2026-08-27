@@ -58,6 +58,9 @@ DEFAULT_NUM_FRAMES = 30
 MIN_DETECTION_FRACTION = 0.5
 MIN_MARKERS_PER_CAMERA = 4
 RECOMMENDED_MARKERS_PER_CAMERA = 6
+# A marker whose detected centre wanders more than this across the capture
+# frames indicates a flapping or borderline detection.
+DETECTION_SPREAD_WARN_PX = 2.0
 
 
 def load_marker_positions(path: Path) -> dict[int, tuple[float, float]]:
@@ -77,24 +80,41 @@ def load_marker_positions(path: Path) -> dict[int, tuple[float, float]]:
 
 
 def average_marker_centers(
-    per_frame_centers: list[dict[int, np.ndarray]],
+    per_frame_detections: list[list[tuple[int, np.ndarray]]],
     min_fraction: float = MIN_DETECTION_FRACTION,
-) -> dict[int, np.ndarray]:
+) -> tuple[dict[int, np.ndarray], dict[int, float]]:
     """Average each marker's pixel centre across frames.
 
-    Markers detected in fewer than `min_fraction` of the frames are
-    discarded as unreliable.
+    Each frame's detections are `(id, centre)` pairs. Markers detected in
+    fewer than `min_fraction` of the frames are discarded as unreliable. A
+    marker detected more than once within a single frame is a hard error —
+    it means a stray duplicate print is in view, and there is no way to
+    tell which copy sits at the calibrated position. Returns
+    `(centers, spreads)` where `spreads[id]` is the marker's maximum pixel
+    deviation from its mean across frames, exposing unstable detections.
     """
-    counts: dict[int, list[np.ndarray]] = {}
-    for centers in per_frame_centers:
-        for marker_id, center in centers.items():
-            counts.setdefault(marker_id, []).append(center)
-    min_count = min_fraction * len(per_frame_centers)
-    return {
-        marker_id: np.mean(observations, axis=0)
-        for marker_id, observations in counts.items()
-        if len(observations) >= min_count
-    }
+    observations: dict[int, list[np.ndarray]] = {}
+    for detections in per_frame_detections:
+        frame_ids = [marker_id for marker_id, _ in detections]
+        duplicated = {i for i in frame_ids if frame_ids.count(i) > 1}
+        assert not duplicated, (
+            f"marker ids {sorted(duplicated)} detected more than once in a "
+            "single frame — is a stray marker print lying in view?"
+        )
+        for marker_id, center in detections:
+            observations.setdefault(marker_id, []).append(center)
+    min_count = min_fraction * len(per_frame_detections)
+    centers: dict[int, np.ndarray] = {}
+    spreads: dict[int, float] = {}
+    for marker_id, observed in observations.items():
+        if len(observed) < min_count:
+            continue
+        mean = np.mean(observed, axis=0)
+        centers[marker_id] = mean
+        spreads[marker_id] = float(
+            max(np.linalg.norm(center - mean) for center in observed)
+        )
+    return centers, spreads
 
 
 def solve_from_detections(
@@ -150,8 +170,12 @@ def solve_from_detections(
     }
 
 
-def _detect_marker_centers(image: np.ndarray) -> dict[int, np.ndarray]:
-    """Detect all DICT_4X4_50 markers in an undistorted frame."""
+def _detect_marker_centers(image: np.ndarray) -> list[tuple[int, np.ndarray]]:
+    """Detect all DICT_4X4_50 markers in an undistorted frame.
+
+    Returns every detection as an `(id, centre)` pair — including repeats
+    of the same id, so duplicate prints in view can be caught upstream.
+    """
     aruco: Any = cv.aruco
     params = aruco.DetectorParameters()
     params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
@@ -162,13 +186,14 @@ def _detect_marker_centers(image: np.ndarray) -> dict[int, np.ndarray]:
     corners, ids, _ = detector.detectMarkers(image)
     # pylint: enable=unpacking-non-sequence
     if ids is None:
-        return {}
-    return {
-        int(marker_id): np.asarray(marker_corners, dtype=np.float64)
-        .reshape(4, 2)
-        .mean(axis=0)
+        return []
+    return [
+        (
+            int(marker_id),
+            np.asarray(marker_corners, dtype=np.float64).reshape(4, 2).mean(axis=0),
+        )
         for marker_id, marker_corners in zip(ids.reshape(-1), corners)
-    }
+    ]
 
 
 class _FrameSource:
@@ -242,7 +267,7 @@ def _calibrate_camera(
         frame = source.read()
         if frame is not None:
             frames.append(frame)
-    detected = average_marker_centers(
+    detected, spreads = average_marker_centers(
         [_detect_marker_centers(frame) for frame in frames]
     )
     report = solve_from_detections(detected, marker_positions, camera_matrix)
@@ -287,6 +312,13 @@ def _calibrate_camera(
             f"  marker {marker_id} floor residual: {magnitude * 100:.1f} cm "
             f"(dx={dx * 100:+.1f}, dy={dy * 100:+.1f} cm)"
         )
+    for marker_id in report["marker_ids"]:
+        spread = spreads[marker_id]
+        if spread > DETECTION_SPREAD_WARN_PX:
+            print(
+                f"  warning: marker {marker_id} centre wandered "
+                f"{spread:.1f} px across frames — unstable detection"
+            )
     x, y, z = projector.camera_position
     print(f"  derived camera position: x={x:+.3f} m, y={y:+.3f} m, height={z:.3f} m")
 
