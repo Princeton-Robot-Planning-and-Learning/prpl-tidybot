@@ -183,7 +183,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             )
         perceived = _perceived_joints(sim_state, self._robot_name)
         self._advance_cursor(perceived)
-        target = self._targets[self._cursor]
+        target = self._command_target(perceived)
         _, sim_action = self._pairs[self._cursor]
         # Remember the most recent explicit open/close so that subsequent "hold"
         # ticks (e.g. the entire retract phase) re-issue the same gripper goal.
@@ -245,6 +245,82 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             <= self._advance_radius
         ):
             self._cursor += 1
+
+    def _command_target(self, perceived: JointPositions) -> JointPositions:
+        """The joint target to command this tick; subclasses may override."""
+        del perceived
+        return self._targets[self._cursor]
+
+
+class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
+    """Streaming executor that commands a constant-lookahead carrot target.
+
+    The discrete crossover advance commands whole waypoints, so with plans
+    whose waypoint spacing is comparable to ``advance_radius`` the commanded
+    lead alternates between roughly one and two waypoint spacings tick to
+    tick, and the OTG's cruise speed surges at that beat — perceived as arm
+    jitter on dense plans (measured ~30% speed ripple on the planar
+    cylinder-shelf trajectories). Here the command is instead a point
+    interpolated along the plan polyline at a fixed ``lookahead`` (in the
+    ``distance_fn`` metric) ahead of the perceived joints, so the lead —
+    and hence the commanded speed — stays constant while cruising. The walk
+    never crosses a gripper waypoint or the final waypoint, which
+    reproduces the parent's hold-and-dwell behavior at those points and the
+    natural deceleration at the end of the plan.
+
+    Linear interpolation between adjacent waypoints is safe because
+    targets are cumulative sums of small per-step deltas (they are not
+    wrapped to [-pi, pi], so consecutive targets never jump across a
+    circular-joint seam).
+    """
+
+    def __init__(
+        self,
+        distance_fn: JointDistanceFn,
+        robot_name: str = "robot",
+        advance_radius: float = 0.2,
+        arrival_tolerance: float = 0.1,
+        max_iter_total: int = 2000,
+        gripper_dwell_ticks: int = 0,
+        lookahead: float = 0.25,
+    ) -> None:
+        super().__init__(
+            distance_fn=distance_fn,
+            robot_name=robot_name,
+            advance_radius=advance_radius,
+            arrival_tolerance=arrival_tolerance,
+            max_iter_total=max_iter_total,
+            gripper_dwell_ticks=gripper_dwell_ticks,
+        )
+        if lookahead <= 0:
+            raise ValueError("lookahead must be > 0")
+        self._lookahead = lookahead
+
+    def _command_target(self, perceived: JointPositions) -> JointPositions:
+        cursor_pair_action = self._pairs[self._cursor][1]
+        cursor_target = self._targets[self._cursor]
+        if _is_gripper_cmd(cursor_pair_action):
+            # Hold at the gripper waypoint while the dwell runs.
+            return cursor_target
+        budget = self._lookahead - self._distance_fn(perceived, cursor_target)
+        if budget <= 0:
+            # The cursor target is already at least a full lookahead away.
+            return cursor_target
+        index = self._cursor
+        while index + 1 < len(self._targets):
+            if _is_gripper_cmd(self._pairs[index][1]):
+                # Never command past a gripper waypoint.
+                return self._targets[index]
+            segment = self._distance_fn(self._targets[index], self._targets[index + 1])
+            if segment > budget:
+                fraction = budget / segment
+                return [
+                    a + fraction * (b - a)
+                    for a, b in zip(self._targets[index], self._targets[index + 1])
+                ]
+            budget -= segment
+            index += 1
+        return self._targets[-1]
 
 
 # ============================================================================
