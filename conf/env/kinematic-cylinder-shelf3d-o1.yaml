@@ -34,10 +34,16 @@ cylinder_pose: [0.5, 0.0, 0.1]
 # ArUco marker (and the cylinder's center z in the env frame) that the
 # real-mode perceiver reads as the cylinder position. The marker detector
 # must be configured to publish this ID — see
-# `prpl_tidybot.marker_detector.constants.TARGET_MARKER_IDS`. The marker
-# sits on top of the physical cylinder; `cylinder_marker_z` is the
-# cylinder's *center* height above the floor (cylinder_height / 2), NOT the
-# height of the marker itself.
+# `prpl_tidybot.marker_detector.constants.TARGET_MARKER_IDS`.
+#
+# Staging protocol: the marker lies flat on the floor where the cylinder
+# will stand, and the physical cylinder is set down on top of it during
+# the preview pause. The marker therefore must be visible when the
+# rollout starts — the perceiver caches the detection once at reset (a
+# covered, never-seen marker fails the rollout with a RuntimeError) —
+# and covering it afterwards is fine because nothing re-queries the
+# target mid-episode. `cylinder_marker_z` is the standing cylinder's
+# *center* height above the floor (cylinder_height / 2).
 cylinder_marker_id: 23
 cylinder_marker_z: 0.1
 
@@ -52,8 +58,11 @@ shelf_pose: [1.5, 1.5, 0.02]
 agent_max_skill_horizon: 400
 
 # Streaming arm executor knobs — see conf/env/kinematic-shelf3d-o1.yaml for
-# the full rationale; values are shared with that env.
-arm_advance_radius: 0.4
+# the full rationale. arm_advance_radius is tighter here than in the shelf
+# env: the planar reach/place plans are remapped at ~0.1 in the weighted
+# joint metric, so the shelf env's 0.4 would jump several via-points ahead
+# and cut the pre-grasp -> grasp and pre-place -> place corners.
+arm_advance_radius: 0.15
 arm_arrival_tolerance: 0.4
 arm_gripper_dwell_ticks: 10
 
