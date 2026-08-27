@@ -32,8 +32,11 @@ rewritten for the OpenCV 4.7+ aruco API.
 """
 
 import argparse
+import pickle
+import tempfile
 import time
 from pathlib import Path
+from threading import Thread
 from typing import Any
 
 import cv2 as cv
@@ -68,6 +71,13 @@ AUTO_MIN_INTERVAL_S = 1.5
 AUTO_NOVELTY_PX = 40.0
 AUTO_FALLBACK_INTERVAL_S = 6.0
 AUTO_DEFAULT_VIEWS = 20
+
+# V4L2 reads can block forever after a USB hiccup; a read that takes longer
+# than this is treated as stalled and the camera is reopened.
+READ_TIMEOUT_S = 2.0
+# Re-latch exposure/gain this often (in frames). Once per frame is control-
+# transfer spam; never re-latching risks silent driver resets.
+SETTINGS_REFRESH_FRAMES = 30
 
 
 def make_board(
@@ -156,6 +166,48 @@ def should_auto_capture(
     )
 
 
+def autosave_path(serial: str) -> Path:
+    """Where in-progress captured views are checkpointed for `--resume`."""
+    return Path(tempfile.gettempdir()) / f"charuco_views_{serial}.pkl"
+
+
+def _save_views(path: Path, corners: list[np.ndarray], ids: list[np.ndarray]) -> None:
+    with open(path, "wb") as f:
+        pickle.dump({"corners": corners, "ids": ids}, f)
+
+
+def _load_views(path: Path) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    return data["corners"], data["ids"]
+
+
+def _apply_capture_settings(cap: Any) -> None:
+    cap.set(cv.CAP_PROP_EXPOSURE, CALIBRATION_EXPOSURE)
+    cap.set(cv.CAP_PROP_GAIN, CALIBRATION_GAIN)
+
+
+def _read_frame(cap: Any, timeout_s: float = READ_TIMEOUT_S) -> np.ndarray | None:
+    """`cap.read()` with a stall watchdog; None means timed out or failed.
+
+    A stalled V4L2 read blocks forever, so it runs in a helper thread; on
+    timeout the caller should release and reopen the camera, which also
+    unblocks the abandoned read.
+    """
+    box: dict[str, Any] = {}
+
+    def worker() -> None:
+        box["result"] = cap.read()
+
+    thread = Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    if thread.is_alive():
+        return None
+    ok, image = box.get("result", (False, None))
+    return image if ok else None
+
+
 def _capture_views(
     serial: str,
     image_width: int,
@@ -163,28 +215,47 @@ def _capture_views(
     board: Any,
     auto: bool = False,
     target_views: int = AUTO_DEFAULT_VIEWS,
+    resume: bool = False,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Interactive live view: collect ChArUco detections until Esc.
 
     With `auto`, views are captured hands-free (terminal bell on each) and
-    the loop ends after `target_views`; Esc still finishes early.
+    the loop ends after `target_views`; Esc still finishes early. Every
+    capture is checkpointed to `autosave_path(serial)`; `resume` reloads a
+    previous session's checkpoint so a crash costs no progress.
     """
     aruco: Any = cv.aruco
     detector = aruco.CharucoDetector(board)
-    cap = utils.get_video_cap(serial, image_width, image_height)
-    window = f"calibrate intrinsics ({serial})"
-    cv.namedWindow(window)
     captured_corners: list[np.ndarray] = []
     captured_ids: list[np.ndarray] = []
     captured_means: list[np.ndarray] = []
+    checkpoint = autosave_path(serial)
+    if resume and checkpoint.exists():
+        captured_corners, captured_ids = _load_views(checkpoint)
+        captured_means = [
+            np.asarray(corners).reshape(-1, 2).mean(axis=0)
+            for corners in captured_corners
+        ]
+        print(f"Resumed {len(captured_ids)} previously captured views.")
+    cap = utils.get_video_cap(serial, image_width, image_height)
+    _apply_capture_settings(cap)
+    window = f"calibrate intrinsics ({serial})"
+    cv.namedWindow(window)
     last_capture_time = -float("inf")
+    frames_since_settings = 0
     try:
         while True:
-            cap.set(cv.CAP_PROP_EXPOSURE, CALIBRATION_EXPOSURE)
-            cap.set(cv.CAP_PROP_GAIN, CALIBRATION_GAIN)
-            ok, image = cap.read()
-            if not ok or image is None:
+            image = _read_frame(cap)
+            if image is None:
+                print("Camera read stalled; reopening the camera...")
+                cap.release()
+                cap = utils.get_video_cap(serial, image_width, image_height)
+                _apply_capture_settings(cap)
                 continue
+            frames_since_settings += 1
+            if frames_since_settings >= SETTINGS_REFRESH_FRAMES:
+                _apply_capture_settings(cap)
+                frames_since_settings = 0
             # pylint: disable=unpacking-non-sequence
             charuco_corners, charuco_ids, marker_corners, _ = detector.detectBoard(
                 image
@@ -232,6 +303,7 @@ def _capture_views(
                         captured_ids.append(charuco_ids)
                         captured_means.append(mean_corner)
                         last_capture_time = time.monotonic()
+                        _save_views(checkpoint, captured_corners, captured_ids)
                         # \a rings the terminal bell so progress is audible
                         # from under the camera, away from the screen.
                         print(
@@ -245,6 +317,7 @@ def _capture_views(
                 if good_view:
                     captured_corners.append(charuco_corners)
                     captured_ids.append(charuco_ids)
+                    _save_views(checkpoint, captured_corners, captured_ids)
                     print(f"Captured view {len(captured_ids)} ({num_corners} corners)")
                 else:
                     print(
@@ -263,6 +336,7 @@ def main(
     board: Any = None,
     auto: bool = False,
     target_views: int = AUTO_DEFAULT_VIEWS,
+    resume: bool = False,
 ) -> None:
     """Run the interactive capture, calibrate, and overwrite the .yml."""
     board = board if board is not None else make_board()
@@ -280,7 +354,13 @@ def main(
         "and cover the whole field, especially image corners and edges."
     )
     captured_corners, captured_ids = _capture_views(
-        serial, image_width, image_height, board, auto=auto, target_views=target_views
+        serial,
+        image_width,
+        image_height,
+        board,
+        auto=auto,
+        target_views=target_views,
+        resume=resume,
     )
     assert (
         len(captured_ids) >= 4
@@ -296,6 +376,7 @@ def main(
     write_camera_params(
         path, image_width, image_height, camera_matrix, dist_coeffs, rms_px
     )
+    autosave_path(serial).unlink(missing_ok=True)
     print(f"Wrote {path}")
     print(f"  reprojection RMS: {rms_px:.3f} px (good calibrations are < 1 px)")
     print(
@@ -398,6 +479,14 @@ def cli() -> None:
         default=AUTO_DEFAULT_VIEWS,
         help="Views to collect before auto mode stops and calibrates.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Reload the views checkpointed by a previous run that crashed "
+            "or was killed (every capture is autosaved)."
+        ),
+    )
     args = parser.parse_args()
     dict_id = (
         MARKER_DICT_ID
@@ -418,6 +507,7 @@ def cli() -> None:
         board=board,
         auto=args.auto,
         target_views=args.num_views,
+        resume=args.resume,
     )
 
 
