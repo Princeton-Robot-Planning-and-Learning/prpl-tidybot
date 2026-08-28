@@ -102,11 +102,18 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
     stored here may lie outside ``[-pi, pi]`` for circular joints —
     that's fine, the distance function handles it). On each tick:
 
-    1. While the perceived joints are within ``advance_radius`` (in the
-       ``distance_fn`` metric) of the current target, advance the cursor
-       to the next pair. Multiple waypoints can be passed in a single
-       tick if they're all already within radius — the cursor jumps
-       straight to the furthest one.
+    1. Advance the cursor past the current target when the perceived
+       joints are within ``advance_radius`` (in the ``distance_fn``
+       metric) of it, **or** when their projection onto the incoming
+       segment (previous waypoint → current target, or the planned start
+       configuration → first target) has passed the target. The
+       projection test is what makes tracking robust to a persistent
+       offset orthogonal to the path: joints the plan never moves but the
+       arm holds slightly off (friction, a nudge during teleoperation)
+       add to the distance to every waypoint and can exceed
+       ``advance_radius`` on their own, which used to stall the cursor
+       for good. Multiple waypoints can be passed in a single tick; the
+       cursor jumps straight to the furthest one.
     2. Command the new cursor's target as the arm goal in the resulting
        :class:`TidyBotAction`. Same target is re-issued every tick as a
        heartbeat (the underlying Kinova controller's watchdog freezes
@@ -116,13 +123,14 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
     Because the cursor advances *before* the OTG has decelerated to
     zero at the current waypoint, Ruckig's mid-flight replan uses the
     current nonzero velocity as initial conditions and the arm rounds
-    through the waypoint at speed. The contract this requires from the
-    planner: **adjacent waypoints in the trajectory must be spaced
-    further apart in the distance metric than** ``advance_radius`` —
-    otherwise the while-loop can skip a waypoint without the arm having
-    visited it. With waypoints intended as via-points (obstacle
-    avoidance, etc.), that gap is what guarantees the via-point is
-    actually reached.
+    through the waypoint at speed. The radius rule can skip a waypoint
+    that is closer than ``advance_radius`` to its predecessor without
+    the arm having visited it; the projection rule only ever advances
+    past waypoints the arm has actually passed.
+
+    If the cursor has not advanced for ``stall_warning_ticks`` ticks a
+    warning is logged once (with the distance to the target and the
+    projection parameter) so a stall is visible live.
 
     If ``max_iter_total`` ticks elapse before the final waypoint is
     reached, :meth:`done` logs a warning with the remaining distances and
@@ -152,6 +160,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         max_iter_total: int = 2000,
         gripper_dwell_ticks: int = 0,
         gripper_close_position: float = 1.0,
+        stall_warning_ticks: int = 50,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if advance_radius <= 0:
@@ -170,10 +179,14 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._max_iter_total = max_iter_total
         self._gripper_dwell_ticks = gripper_dwell_ticks
         self._gripper_close_position = gripper_close_position
+        self._stall_warning_ticks = stall_warning_ticks
 
         self._targets: list[JointPositions] = []
+        self._start_joints: JointPositions = []
         self._cursor: int = 0
         self._tick_count: int = 0
+        self._ticks_since_advance: int = 0
+        self._stall_warned: bool = False
         self._done_latched: bool = False
         self._gripper_cursor: int = -1
         self._gripper_ticks_remaining: int = 0
@@ -184,8 +197,15 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             _absolute_target(state, action, self._robot_name)
             for state, action in self._pairs
         ]
+        self._start_joints = (
+            _perceived_joints(self._pairs[0][0], self._robot_name)
+            if self._pairs
+            else []
+        )
         self._cursor = 0
         self._tick_count = 0
+        self._ticks_since_advance = 0
+        self._stall_warned = False
         self._done_latched = False
         self._gripper_cursor = -1
         self._gripper_ticks_remaining = 0
@@ -272,13 +292,64 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         return False
 
     def _advance_cursor(self, perceived: JointPositions) -> None:
-        while (
-            self._cursor + 1 < len(self._targets)
-            and not _is_gripper_cmd(self._pairs[self._cursor][1])
-            and self._distance_fn(perceived, self._targets[self._cursor])
-            <= self._advance_radius
+        advanced = False
+        while self._cursor + 1 < len(self._targets) and not _is_gripper_cmd(
+            self._pairs[self._cursor][1]
         ):
+            within_radius = (
+                self._distance_fn(perceived, self._targets[self._cursor])
+                <= self._advance_radius
+            )
+            if not within_radius and self._progress(perceived) < 1.0:
+                break
             self._cursor += 1
+            advanced = True
+        if advanced:
+            self._ticks_since_advance = 0
+            self._stall_warned = False
+        else:
+            self._ticks_since_advance += 1
+            if (
+                self._ticks_since_advance >= self._stall_warning_ticks
+                and not self._stall_warned
+            ):
+                self._stall_warned = True
+                _logger.warning(
+                    "%s cursor has not advanced for %d ticks: waypoint %d/%d, "
+                    "distance %.3f to its target (advance_radius %s), path "
+                    "progress %.2f.",
+                    type(self).__name__,
+                    self._ticks_since_advance,
+                    self._cursor + 1,
+                    len(self._targets),
+                    self._distance_fn(perceived, self._targets[self._cursor]),
+                    self._advance_radius,
+                    self._progress(perceived),
+                )
+
+    def _incoming_segment(self) -> tuple[JointPositions, JointPositions]:
+        """The segment ending at the cursor target: (previous waypoint, target)."""
+        previous = (
+            self._start_joints if self._cursor == 0 else self._targets[self._cursor - 1]
+        )
+        return previous, self._targets[self._cursor]
+
+    def _progress(self, perceived: JointPositions) -> float:
+        """Projection parameter of `perceived` onto the incoming segment.
+
+        0 at the previous waypoint, 1 at the cursor target; may fall outside
+        [0, 1]. Computed in joint space with wrap-aware differences, so a
+        constant offset orthogonal to the segment does not change it.
+        """
+        previous, target = self._incoming_segment()
+        return _path_progress(previous, target, perceived)
+
+    def _remaining_to_cursor(self, perceived: JointPositions) -> float:
+        """Path length (distance_fn metric) from the projected point to the cursor
+        target."""
+        previous, target = self._incoming_segment()
+        remaining_fraction = max(0.0, 1.0 - self._progress(perceived))
+        return remaining_fraction * self._distance_fn(previous, target)
 
     def _command_target(self, perceived: JointPositions) -> JointPositions:
         """The joint target to command this tick; subclasses may override."""
@@ -338,7 +409,10 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         if _is_gripper_cmd(cursor_pair_action):
             # Hold at the gripper waypoint while the dwell runs.
             return cursor_target
-        budget = self._lookahead - self._distance_fn(perceived, cursor_target)
+        # Measure the lead along the path from the perceived joints' projection
+        # rather than by raw distance to the cursor target, so an offset
+        # orthogonal to the path does not shrink the lookahead.
+        budget = self._lookahead - self._remaining_to_cursor(perceived)
         if budget <= 0:
             # The cursor target is already at least a full lookahead away.
             return cursor_target
@@ -376,6 +450,25 @@ def _validate_arm_only(action: NDArray[np.floating]) -> None:
             "Arm-motion plan executors require arm-only pairs; got "
             f"base_delta={action[0:3]}."
         )
+
+
+def _wrapped_difference(a: JointPositions, b: JointPositions) -> np.ndarray:
+    """Per-joint ``a - b`` wrapped to [-pi, pi], so continuous joints compare across
+    the seam."""
+    diff = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    return np.arctan2(np.sin(diff), np.cos(diff))
+
+
+def _path_progress(
+    start: JointPositions, end: JointPositions, point: JointPositions
+) -> float:
+    """Projection parameter of `point` onto the segment start→end (0 at start, 1 at
+    end). A degenerate segment counts as passed."""
+    direction = _wrapped_difference(end, start)
+    length_sq = float(direction @ direction)
+    if length_sq < 1e-12:
+        return 1.0
+    return float(_wrapped_difference(point, start) @ direction / length_sq)
 
 
 def _perceived_joints(sim_state: ObjectCentricState, robot_name: str) -> JointPositions:
