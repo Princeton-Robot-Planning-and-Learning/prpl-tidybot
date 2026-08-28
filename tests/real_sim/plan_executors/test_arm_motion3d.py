@@ -20,6 +20,7 @@ from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
 from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
     CarrotArmMotion3DPlanExecutor,
     StreamingArmMotion3DPlanExecutor,
+    _path_progress,
 )
 from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.structs import TidyBotObservation
@@ -617,3 +618,168 @@ def test_constructor_rejects_bad_gripper_close_position():
             StreamingArmMotion3DPlanExecutor(
                 distance_fn=_l1_distance, gripper_close_position=value
             )
+
+
+# ---------------------------------------------------------------------------
+# Path-progress advance (robust to offsets on untracked joints)
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_advances_by_path_progress_despite_untracked_joint_offset():
+    """An offset on a joint the plan never moves exceeds advance_radius on its own,
+    but the cursor still advances once the tracked joint passes each waypoint."""
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05
+    )
+    executor.set_trajectory(_joint1_chain(5))  # joint 1 waypoints 0.1 ... 0.5
+    # Joint 5 sits 0.2 off the plan for the whole trajectory.
+    offset = [0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0]
+
+    real_action, _ = executor.step(_make_state(arm_conf=offset))
+    assert real_action.arm_goal[0] == pytest.approx(0.1)  # cursor 0
+    # Joint 1 has passed the 0.1 and 0.2 waypoints (distance to each is
+    # 0.2 + |dj1| > radius, but the projection is past them).
+    perceived = list(offset)
+    perceived[0] = 0.23
+    real_action, _ = executor.step(_make_state(arm_conf=perceived))
+    assert real_action.arm_goal[0] == pytest.approx(0.3)
+    # Done still needs the final target within arrival_tolerance.
+    perceived[0] = 0.5
+    for _ in range(3):
+        executor.step(_make_state(arm_conf=perceived))
+    assert not executor.done(_make_state(arm_conf=perceived))
+    assert executor.done(_make_state(arm_conf=[0.5, 0, 0, 0, 0.05, 0, 0]))
+
+
+def test_cursor_does_not_advance_on_progress_before_the_target():
+    """A point beside the segment but short of the target does not advance."""
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05
+    )
+    executor.set_trajectory(_joint1_chain(3))
+    perceived = [0.04, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0]
+    real_action, _ = executor.step(_make_state(arm_conf=perceived))
+    assert real_action.arm_goal[0] == pytest.approx(0.1)
+
+
+def test_path_progress_wraps_continuous_joints():
+    """Projection uses wrapped joint differences, so a target on the far side of the
+    +/-pi seam still reads as passed."""
+    start = [3.0, 0, 0, 0, 0, 0, 0]
+    end = [3.3, 0, 0, 0, 0, 0, 0]  # == -2.98 after wrapping
+    assert _path_progress(start, end, [-2.9, 0, 0, 0, 0, 0, 0]) > 1.0
+    assert _path_progress(start, end, [3.15, 0, 0, 0, 0, 0, 0]) == pytest.approx(0.5)
+
+
+def test_carrot_lookahead_measured_along_path_not_raw_distance():
+    """With an orthogonal offset, the carrot still commands a full lookahead ahead
+    along the path (the raw distance to the cursor target would eat into it)."""
+    executor = CarrotArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05, lookahead=0.25
+    )
+    executor.set_trajectory(_joint1_chain(8))
+    s = _make_state(arm_conf=[0.12, 0, 0, 0, 0.2, 0, 0])
+    real_action, _ = executor.step(s)
+    # Same as the no-offset case: 0.25 ahead of 0.12 along the polyline.
+    assert real_action.arm_goal[0] == pytest.approx(0.37)
+
+
+def test_stall_warning_logged_once_after_no_advance(caplog):
+    """If the cursor does not move for stall_warning_ticks ticks a single warning with
+    the distance and progress is logged."""
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05, stall_warning_ticks=3
+    )
+    executor.set_trajectory(_joint1_chain(3))
+    stuck = _make_state(arm_conf=[-0.5, 0, 0, 0, 0, 0, 0])
+    with caplog.at_level(logging.WARNING):
+        for _ in range(6):
+            executor.step(stuck)
+    warnings = [r for r in caplog.records if "has not advanced" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "waypoint 1/3" in warnings[0].getMessage()
+
+
+# ---------------------------------------------------------------------------
+# Stalled arrival (steady-state controller error)
+# ---------------------------------------------------------------------------
+
+
+def _approach_then_open(num_waypoints: int = 4):
+    """Joint-1 approach waypoints followed by a gripper open and one retract pair."""
+    pairs = _joint1_chain(num_waypoints)
+    last = num_waypoints * 0.1
+    pairs.append(
+        (_make_state(arm_conf=[last, 0, 0, 0, 0, 0, 0]), _arm_action(gripper_cmd=1.0))
+    )
+    pairs.append(
+        (
+            _make_state(arm_conf=[last, 0, 0, 0, 0, 0, 0]),
+            _arm_action(arm_deltas=[-0.1, 0, 0, 0, 0, 0, 0]),
+        )
+    )
+    return pairs
+
+
+def test_stationary_stall_before_gripper_command_counts_as_arrival(caplog):
+    """Stopped short of the last approach waypoint (progress >= 0.5) and not moving
+    for stall_advance_ticks ticks, the executor advances to the gripper pair and
+    issues the gripper command."""
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.05,
+        stall_advance_ticks=5,
+        stall_advance_min_progress=0.5,
+    )
+    executor.set_trajectory(_approach_then_open(4))  # waypoints 0.1..0.4, open, retract
+    # Joint 1 at 0.36 (progress 0.6 on 0.3 -> 0.4) with an offset on joint 5 that
+    # keeps the raw distance above advance_radius.
+    stuck = _make_state(arm_conf=[0.36, 0, 0, 0, 0.2, 0, 0])
+    with caplog.at_level(logging.WARNING):
+        # Stillness is counted from the second tick on: five ticks of holding.
+        for _ in range(5):
+            real_action, _ = executor.step(stuck)
+            assert real_action.gripper_goal == pytest.approx(0.4)  # hold perceived
+        real_action, _ = executor.step(stuck)
+    assert real_action.gripper_goal == 0.0  # the open command
+    assert any("treating it as reached" in r.getMessage() for r in caplog.records)
+
+
+def test_stationary_stall_mid_path_advances_one_waypoint():
+    """A stationary stall past half a mid-path segment advances by one waypoint so the
+    carrot leads further; it does not run ahead through the plan."""
+    executor = CarrotArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.05,
+        lookahead=0.15,
+        stall_advance_ticks=3,
+    )
+    executor.set_trajectory(_joint1_chain(6))  # 0.1 .. 0.6
+    stuck = _make_state(arm_conf=[0.16, 0, 0, 0, 0.2, 0, 0])  # progress 0.6 on 0.1->0.2
+    goals = []
+    for _ in range(4):
+        real_action, _ = executor.step(stuck)
+        goals.append(real_action.arm_goal[0])
+    # Before the stall rule fires the carrot leads 0.15 past the projected 0.16:
+    # 0.31. After one stall-advance the cursor is at 0.3 and the lead is measured
+    # from that segment's start (0.2), so the carrot moves out to 0.35.
+    assert goals[0] == pytest.approx(0.31)
+    assert goals[-1] == pytest.approx(0.35)
+
+
+def test_stall_needs_progress_and_stillness():
+    """Short of half the segment, or still moving, a stall does not advance."""
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05, stall_advance_ticks=3
+    )
+    executor.set_trajectory(_approach_then_open(4))
+    early = _make_state(arm_conf=[0.32, 0, 0, 0, 0.2, 0, 0])  # progress 0.2
+    for _ in range(6):
+        real_action, _ = executor.step(early)
+    assert real_action.gripper_goal == pytest.approx(0.4)
+
+    executor.set_trajectory(_approach_then_open(4))
+    for i in range(6):  # creeping within the segment: never still
+        moving = _make_state(arm_conf=[0.36 + 0.006 * i, 0, 0, 0, 0.2, 0, 0])
+        real_action, _ = executor.step(moving)
+    assert real_action.gripper_goal == pytest.approx(0.4)
