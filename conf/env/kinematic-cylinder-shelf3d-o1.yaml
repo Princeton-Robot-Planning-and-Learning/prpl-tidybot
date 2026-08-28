@@ -86,6 +86,10 @@ arm_advance_radius: 0.15
 # perceived as jitter) that discrete waypoint advance produces on this
 # env's densely spaced planar plans.
 arm_lookahead: 0.25
+# Slower lookahead for the settle move right after a teleop hand-back, and
+# the stand-clear countdown (seconds) printed before that move starts.
+settle_arm_lookahead: 0.1
+settle_countdown_seconds: 3.0
 arm_arrival_tolerance: 0.4
 # Ticks the executor holds the arm at the grasp pose after commanding the
 # gripper to close, so the real Robotiq (~1-2 s to close) finishes before
@@ -191,4 +195,17 @@ pipelines:
       gap_executor:
         _target_: prpl_tidybot.real_sim.plan_executors.gap.TeleopGapExecutor
         base_executor: ${env.pipelines.fake.plan_executor.base_executor}
-        arm_executor: ${env.pipelines.fake.plan_executor.arm_executor}
+        # The settle after the hand-back is a single unplanned joint-space
+        # move with the operator nearby, so it runs with a shorter carrot
+        # lookahead than the planned arm segments (slower cruise), after
+        # a stand-clear countdown.
+        arm_executor:
+          _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.CarrotArmMotion3DPlanExecutor
+          distance_fn:
+            _target_: prpl_tidybot.real_sim.plan_executors.distance_factories.create_kinova_distance_fn
+          advance_radius: ${env.arm_advance_radius}
+          arrival_tolerance: ${env.arm_arrival_tolerance}
+          max_iter_total: 300
+          gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
+          lookahead: ${env.settle_arm_lookahead}
+        countdown_seconds: ${env.settle_countdown_seconds}

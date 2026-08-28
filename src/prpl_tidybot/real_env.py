@@ -1,6 +1,7 @@
 """Gymnasium environment for the real TidyBot++."""
 
 import logging
+import math
 import time
 from typing import Any, Callable, SupportsFloat
 
@@ -98,6 +99,7 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, RealAction]):
         finally:
             _logger.info("Re-acquiring the arm from its current configuration.")
             arm.resume()
+        _stand_clear_countdown(action.countdown_seconds)
         obs = self._interface.get_observation()
         self._last_obs = obs
         return obs
@@ -116,3 +118,17 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, RealAction]):
         still in low-level torque-control mode from the previous one.
         """
         self._interface.close()
+
+
+def _stand_clear_countdown(seconds: float) -> None:
+    """Announce that autonomous motion is about to resume, one line per second."""
+    remaining = int(math.ceil(seconds))
+    if remaining <= 0:
+        return
+    print(f"Stand clear: autonomous motion resumes in {remaining} s.", flush=True)
+    while remaining > 0:
+        time.sleep(min(1.0, seconds - (int(math.ceil(seconds)) - remaining)))
+        remaining -= 1
+        if remaining > 0:
+            print(f"  {remaining}...", flush=True)
+    print("Resuming.", flush=True)

@@ -128,7 +128,9 @@ def test_teleop_handoff_releases_prompts_and_resumes():
 
     env = RealTidyBotEnv(interface, control_period=0.0, prompt_fn=_prompt)
     env.reset()
-    obs, reward, terminated, truncated, _ = env.step(TeleopHandoff(prompt="go"))
+    obs, reward, terminated, truncated, _ = env.step(
+        TeleopHandoff(prompt="go", countdown_seconds=0.0)
+    )
 
     assert prompts == ["go"]
     assert arm.events == ["release", "resume"]

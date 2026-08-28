@@ -39,11 +39,14 @@ class TeleopHandoff:
 
     The env releases the arm from its low-level control loop (so the arm's
     own teleoperation, e.g. a gamepad plugged into the Kinova base, takes
-    over), blocks on the operator's confirmation with ``prompt``, then
-    re-acquires the arm from wherever the operator left it. The base holds.
+    over), blocks on the operator's confirmation with ``prompt``, re-acquires
+    the arm from wherever the operator left it, and then counts down
+    ``countdown_seconds`` out loud before returning, so the operator has
+    time to stand clear before autonomous motion resumes. The base holds.
     """
 
     prompt: str
+    countdown_seconds: float = 0.0
 
 
 # Everything the real env can be asked to do in one tick.
