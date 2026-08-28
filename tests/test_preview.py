@@ -1,7 +1,8 @@
 """Tests for `prpl_tidybot.preview`.
 
-Covers the small synchronous behavior of `preview_or_abort` and the helper that reaches
-into a BilevelPlanningAgent for its planned-state sequence. The integration with
+Covers the small synchronous behavior of `preview_or_abort` (including how
+magic-skill gaps are shown) and the helper that reaches into a
+BilevelPlanningAgent for its plan. The integration with
 `pipeline.py` (Hydra-config-driven enable / disable, end-to-end abort path) lives in
 `test_pipeline.py` follow-up tests.
 """
@@ -16,8 +17,10 @@ import cv2 as cv
 import numpy as np
 import pytest
 from kinder_bilevel_planning.agent import AgentFailure
+from kinder_models.structs import SkillCall
+from relational_structs import Object, Type
 
-from prpl_tidybot.preview import planned_states_from_agent, preview_or_abort
+from prpl_tidybot.preview import planned_trajectory_from_agent, preview_or_abort
 
 
 @dataclass
@@ -223,22 +226,127 @@ def test_short_trajectories_are_not_subsampled(tmp_path: Path):
     assert shadow.set_states == states
 
 
-def test_planned_states_from_agent_reads_private_attribute():
-    """Helper reads ``_planned_states`` from the agent so the private-attribute reach is
-    in one place (easy to swap when upstream grows an accessor)."""
+def test_planned_trajectory_from_agent_reads_private_attributes():
+    """Helper reads ``_planned_states`` / ``_planned_actions`` from the agent so the
+    private-attribute reach is in one place (easy to swap when upstream grows an
+    accessor)."""
 
     class _StubAgent:
         def __init__(self):
             self._planned_states = ["a", "b", "c"]
+            self._planned_actions = [1, 2]
 
-    assert planned_states_from_agent(_StubAgent()) == ["a", "b", "c"]
+    assert planned_trajectory_from_agent(_StubAgent()) == (["a", "b", "c"], [1, 2])
 
 
-def test_planned_states_from_agent_returns_empty_when_missing():
-    """An agent without ``_planned_states`` (e.g. before reset()) yields an empty list
-    rather than raising."""
+def test_planned_trajectory_from_agent_returns_empty_when_missing():
+    """An agent without a plan (e.g. before reset()) yields empty lists rather than
+    raising."""
 
     class _BareAgent:
         pass
 
-    assert not planned_states_from_agent(_BareAgent())
+    assert planned_trajectory_from_agent(_BareAgent()) == ([], [])
+
+
+# ---------------------------------------------------------------------------
+# Magic gaps
+# ---------------------------------------------------------------------------
+
+
+def _skill_call(predicted: Any) -> SkillCall:
+    robot_type = Type("robot")
+    return SkillCall(
+        "Pick",
+        (Object("robot", robot_type), Object("cylinder0", robot_type)),
+        np.array([0.8, 0.0]),
+        predicted,
+    )
+
+
+def test_gap_adds_banner_frames_and_lists_gap_in_prompt(tmp_path: Path):
+    """A SkillCall action holds the pre-gap frame under a banner for gap_hold_seconds
+    and the prompt names the gap; the post-gap (predicted) state is rendered too."""
+    states = [object(), object(), object(), object()]
+    actions = [np.zeros(11), _skill_call(states[2]), np.zeros(11)]
+    shadow = _StubShadowSim(shape=(64, 96))
+    prompted: list[str] = []
+
+    def _record(msg: str) -> str:
+        prompted.append(msg)
+        return "y"
+
+    out = preview_or_abort(
+        planned_states=states,  # type: ignore[arg-type]
+        planned_actions=actions,
+        shadow_sim=shadow,
+        log_dir=tmp_path,
+        fps=4,
+        gap_hold_seconds=1.0,
+        prompt_fn=_record,
+    )
+
+    assert out is not None
+    assert shadow.set_states == states
+    cap = cv.VideoCapture(str(out))
+    try:
+        num_frames = int(cap.get(cv.CAP_PROP_FRAME_COUNT))
+    finally:
+        cap.release()
+    # 4 state frames + 4 held banner frames (1 s at 4 fps).
+    assert num_frames == 8
+    assert len(prompted) == 1
+    assert "1 magic gap" in prompted[0]
+    assert "step 1: Pick(robot, cylinder0)" in prompted[0]
+
+
+def test_gap_states_survive_subsampling(tmp_path: Path):
+    """Striding never drops the states on either side of a gap."""
+    states = list(range(200))
+    actions: list[Any] = [np.zeros(11)] * 199
+    actions[77] = _skill_call(states[78])
+    shadow = _StubShadowSim(shape=(32, 32))
+
+    preview_or_abort(
+        planned_states=states,  # type: ignore[arg-type]
+        planned_actions=actions,
+        shadow_sim=shadow,
+        log_dir=tmp_path,
+        max_frames=20,
+        prompt_fn=lambda _msg: "y",
+    )
+
+    assert 77 in shadow.set_states and 78 in shadow.set_states
+    assert shadow.set_states[0] == 0 and shadow.set_states[-1] == 199
+    assert shadow.set_states == sorted(shadow.set_states)
+    assert len(shadow.set_states) <= 24
+
+
+def test_no_gap_prompt_without_skill_calls(tmp_path: Path):
+    """Plain action arrays leave the prompt gap-free."""
+    prompted: list[str] = []
+
+    def _record(msg: str) -> str:
+        prompted.append(msg)
+        return "y"
+
+    preview_or_abort(
+        planned_states=[object(), object()],  # type: ignore[list-item]
+        planned_actions=[np.zeros(11)],
+        shadow_sim=_StubShadowSim(),
+        log_dir=tmp_path,
+        prompt_fn=_record,
+    )
+    assert "magic gap" not in prompted[0]
+
+
+def test_rejects_mismatched_action_count(tmp_path: Path):
+    """The action list must be one shorter than the state list."""
+    with pytest.raises(ValueError, match="planned actions"):
+        preview_or_abort(
+            planned_states=[object(), object()],  # type: ignore[list-item]
+            planned_actions=[np.zeros(11), np.zeros(11)],
+            shadow_sim=_StubShadowSim(),
+            log_dir=tmp_path,
+            prompt_fn=lambda _msg: "y",
+        )
