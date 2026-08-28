@@ -55,6 +55,8 @@ JointPositions = list[float]
 JointDistanceFn = Callable[[JointPositions, JointPositions], float]
 
 _BASE_MOTION_EPS = 1e-4
+# Perceived-joint motion (distance_fn metric) below which a tick counts as still.
+_STILL_EPS = 5e-3
 
 
 class ArmMotion3DPlanExecutor(
@@ -128,6 +130,19 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
     the arm having visited it; the projection rule only ever advances
     past waypoints the arm has actually passed.
 
+    Stalled arrival: the low-level compliant controller settles with a
+    steady-state error of a few hundredths of a radian per joint, which
+    over seven joints can exceed ``advance_radius`` and leave the
+    projection short of 1 on a short segment, with the arm converged as
+    far as it will ever get. So when the perceived joints have not moved
+    for ``stall_advance_ticks`` ticks and the path progress is at least
+    ``stall_advance_min_progress``, the executor logs a warning and
+    advances one waypoint anyway. On a mid-path segment that gives the
+    carrot a longer lead and the arm moves on; at the waypoint before a
+    gripper command it lets the gripper command issue. A genuine
+    obstruction shows up as repeated stall-advance warnings before
+    ``max_iter_total`` raises.
+
     If the cursor has not advanced for ``stall_warning_ticks`` ticks a
     warning is logged once (with the distance to the target and the
     projection parameter) so a stall is visible live.
@@ -161,6 +176,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         gripper_dwell_ticks: int = 0,
         gripper_close_position: float = 1.0,
         stall_warning_ticks: int = 50,
+        stall_advance_ticks: int = 30,
+        stall_advance_min_progress: float = 0.5,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if advance_radius <= 0:
@@ -180,6 +197,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._gripper_dwell_ticks = gripper_dwell_ticks
         self._gripper_close_position = gripper_close_position
         self._stall_warning_ticks = stall_warning_ticks
+        self._stall_advance_ticks = stall_advance_ticks
+        self._stall_advance_min_progress = stall_advance_min_progress
 
         self._targets: list[JointPositions] = []
         self._start_joints: JointPositions = []
@@ -187,6 +206,9 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._tick_count: int = 0
         self._ticks_since_advance: int = 0
         self._stall_warned: bool = False
+        self._last_perceived: JointPositions | None = None
+        self._still_ticks: int = 0
+        self._lead_from_segment_start: bool = False
         self._done_latched: bool = False
         self._gripper_cursor: int = -1
         self._gripper_ticks_remaining: int = 0
@@ -206,6 +228,9 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._tick_count = 0
         self._ticks_since_advance = 0
         self._stall_warned = False
+        self._last_perceived = None
+        self._still_ticks = 0
+        self._lead_from_segment_start = False
         self._done_latched = False
         self._gripper_cursor = -1
         self._gripper_ticks_remaining = 0
@@ -292,6 +317,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         return False
 
     def _advance_cursor(self, perceived: JointPositions) -> None:
+        self._track_stillness(perceived)
         advanced = False
         while self._cursor + 1 < len(self._targets) and not _is_gripper_cmd(
             self._pairs[self._cursor][1]
@@ -303,6 +329,24 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             if not within_radius and self._progress(perceived) < 1.0:
                 break
             self._cursor += 1
+            self._lead_from_segment_start = False
+            advanced = True
+        if not advanced and self._stalled_arrival(perceived):
+            _logger.warning(
+                "%s stalled at waypoint %d/%d: stationary for %d ticks, distance "
+                "%.3f to the target, path progress %.2f; treating it as reached.",
+                type(self).__name__,
+                self._cursor + 1,
+                len(self._targets),
+                self._still_ticks,
+                self._distance_fn(perceived, self._targets[self._cursor]),
+                self._progress(perceived),
+            )
+            self._cursor += 1
+            self._still_ticks = 0
+            # The arm now projects behind the new segment's start; measure the
+            # carrot lead from that start so each stall-advance lengthens it.
+            self._lead_from_segment_start = True
             advanced = True
         if advanced:
             self._ticks_since_advance = 0
@@ -327,6 +371,29 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                     self._progress(perceived),
                 )
 
+    def _track_stillness(self, perceived: JointPositions) -> None:
+        """Count consecutive ticks on which the perceived joints did not move."""
+        if (
+            self._last_perceived is not None
+            and self._distance_fn(perceived, self._last_perceived) < _STILL_EPS
+        ):
+            self._still_ticks += 1
+        else:
+            self._still_ticks = 0
+        self._last_perceived = list(perceived)
+
+    def _stalled_arrival(self, perceived: JointPositions) -> bool:
+        """Whether a stationary stall past half the incoming segment should count as
+        reaching the cursor waypoint (see the class docstring)."""
+        if self._cursor + 1 >= len(self._targets):
+            return False
+        if _is_gripper_cmd(self._pairs[self._cursor][1]):
+            return False
+        return (
+            self._still_ticks >= self._stall_advance_ticks
+            and self._progress(perceived) >= self._stall_advance_min_progress
+        )
+
     def _incoming_segment(self) -> tuple[JointPositions, JointPositions]:
         """The segment ending at the cursor target: (previous waypoint, target)."""
         previous = (
@@ -348,7 +415,10 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         """Path length (distance_fn metric) from the projected point to the cursor
         target."""
         previous, target = self._incoming_segment()
-        remaining_fraction = max(0.0, 1.0 - self._progress(perceived))
+        progress = self._progress(perceived)
+        if self._lead_from_segment_start:
+            progress = max(progress, 0.0)
+        remaining_fraction = max(0.0, 1.0 - progress)
         return remaining_fraction * self._distance_fn(previous, target)
 
     def _command_target(self, perceived: JointPositions) -> JointPositions:
@@ -389,6 +459,9 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         gripper_dwell_ticks: int = 0,
         lookahead: float = 0.25,
         gripper_close_position: float = 1.0,
+        stall_warning_ticks: int = 50,
+        stall_advance_ticks: int = 30,
+        stall_advance_min_progress: float = 0.5,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -398,6 +471,9 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             max_iter_total=max_iter_total,
             gripper_dwell_ticks=gripper_dwell_ticks,
             gripper_close_position=gripper_close_position,
+            stall_warning_ticks=stall_warning_ticks,
+            stall_advance_ticks=stall_advance_ticks,
+            stall_advance_min_progress=stall_advance_min_progress,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")

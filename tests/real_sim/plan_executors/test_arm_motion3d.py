@@ -698,3 +698,88 @@ def test_stall_warning_logged_once_after_no_advance(caplog):
     warnings = [r for r in caplog.records if "has not advanced" in r.getMessage()]
     assert len(warnings) == 1
     assert "waypoint 1/3" in warnings[0].getMessage()
+
+
+# ---------------------------------------------------------------------------
+# Stalled arrival (steady-state controller error)
+# ---------------------------------------------------------------------------
+
+
+def _approach_then_open(num_waypoints: int = 4):
+    """Joint-1 approach waypoints followed by a gripper open and one retract pair."""
+    pairs = _joint1_chain(num_waypoints)
+    last = num_waypoints * 0.1
+    pairs.append(
+        (_make_state(arm_conf=[last, 0, 0, 0, 0, 0, 0]), _arm_action(gripper_cmd=1.0))
+    )
+    pairs.append(
+        (
+            _make_state(arm_conf=[last, 0, 0, 0, 0, 0, 0]),
+            _arm_action(arm_deltas=[-0.1, 0, 0, 0, 0, 0, 0]),
+        )
+    )
+    return pairs
+
+
+def test_stationary_stall_before_gripper_command_counts_as_arrival(caplog):
+    """Stopped short of the last approach waypoint (progress >= 0.5) and not moving
+    for stall_advance_ticks ticks, the executor advances to the gripper pair and
+    issues the gripper command."""
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.05,
+        stall_advance_ticks=5,
+        stall_advance_min_progress=0.5,
+    )
+    executor.set_trajectory(_approach_then_open(4))  # waypoints 0.1..0.4, open, retract
+    # Joint 1 at 0.36 (progress 0.6 on 0.3 -> 0.4) with an offset on joint 5 that
+    # keeps the raw distance above advance_radius.
+    stuck = _make_state(arm_conf=[0.36, 0, 0, 0, 0.2, 0, 0])
+    with caplog.at_level(logging.WARNING):
+        # Stillness is counted from the second tick on: five ticks of holding.
+        for _ in range(5):
+            real_action, _ = executor.step(stuck)
+            assert real_action.gripper_goal == pytest.approx(0.4)  # hold perceived
+        real_action, _ = executor.step(stuck)
+    assert real_action.gripper_goal == 0.0  # the open command
+    assert any("treating it as reached" in r.getMessage() for r in caplog.records)
+
+
+def test_stationary_stall_mid_path_advances_one_waypoint():
+    """A stationary stall past half a mid-path segment advances by one waypoint so the
+    carrot leads further; it does not run ahead through the plan."""
+    executor = CarrotArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.05,
+        lookahead=0.15,
+        stall_advance_ticks=3,
+    )
+    executor.set_trajectory(_joint1_chain(6))  # 0.1 .. 0.6
+    stuck = _make_state(arm_conf=[0.16, 0, 0, 0, 0.2, 0, 0])  # progress 0.6 on 0.1->0.2
+    goals = []
+    for _ in range(4):
+        real_action, _ = executor.step(stuck)
+        goals.append(real_action.arm_goal[0])
+    # Before the stall rule fires the carrot leads 0.15 past the projected 0.16:
+    # 0.31. After one stall-advance the cursor is at 0.3 and the lead is measured
+    # from that segment's start (0.2), so the carrot moves out to 0.35.
+    assert goals[0] == pytest.approx(0.31)
+    assert goals[-1] == pytest.approx(0.35)
+
+
+def test_stall_needs_progress_and_stillness():
+    """Short of half the segment, or still moving, a stall does not advance."""
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, advance_radius=0.05, stall_advance_ticks=3
+    )
+    executor.set_trajectory(_approach_then_open(4))
+    early = _make_state(arm_conf=[0.32, 0, 0, 0, 0.2, 0, 0])  # progress 0.2
+    for _ in range(6):
+        real_action, _ = executor.step(early)
+    assert real_action.gripper_goal == pytest.approx(0.4)
+
+    executor.set_trajectory(_approach_then_open(4))
+    for i in range(6):  # creeping within the segment: never still
+        moving = _make_state(arm_conf=[0.36 + 0.006 * i, 0, 0, 0, 0.2, 0, 0])
+        real_action, _ = executor.step(moving)
+    assert real_action.gripper_goal == pytest.approx(0.4)
