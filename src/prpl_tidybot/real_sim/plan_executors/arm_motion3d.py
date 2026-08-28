@@ -4,8 +4,10 @@ An arm-only trajectory is a sequence of (state, action) pairs whose
 kinder 11-d action holds the base delta at zero, encodes arm joint
 deltas in ``action[3:10]``, and a gripper command in ``action[10]``.
 The mapping from kinder gripper command to TidyBotAction gripper_goal
-is: ``cmd < -0.5`` → close (1.0), ``cmd > 0.5`` → open (0.0), otherwise
-hold the perceived finger state.
+is: ``cmd < -0.5`` → close (``gripper_close_position``, 1.0 by default),
+``cmd > 0.5`` → open (0.0), otherwise hold the perceived finger state.
+A close position below 1.0 stops the fingers short of fully closed so a
+compliant object (a Pringles can) is held rather than crushed.
 
 Currently one concrete subclass is exposed:
 
@@ -121,7 +123,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
     The base + gripper components of the commanded ``TidyBotAction``
     hold at the perceived state for arm pairs that don't move them
     (``action[10]`` in ``[-0.5, 0.5]`` means "hold gripper"); explicit
-    gripper open/close commands surface as ``gripper_goal=0.0/1.0``.
+    gripper open/close commands surface as ``gripper_goal=0.0`` /
+    ``gripper_goal=gripper_close_position``.
 
     Why this strategy works only because of the OTG: if the underlying
     controller were a pre-computed-trajectory follower, re-targeting
@@ -138,6 +141,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         arrival_tolerance: float = 0.1,
         max_iter_total: int = 2000,
         gripper_dwell_ticks: int = 0,
+        gripper_close_position: float = 1.0,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if advance_radius <= 0:
@@ -148,11 +152,14 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             raise ValueError("max_iter_total must be > 0")
         if gripper_dwell_ticks < 0:
             raise ValueError("gripper_dwell_ticks must be >= 0")
+        if not 0.0 < gripper_close_position <= 1.0:
+            raise ValueError("gripper_close_position must be in (0, 1]")
         self._distance_fn = distance_fn
         self._advance_radius = advance_radius
         self._arrival_tolerance = arrival_tolerance
         self._max_iter_total = max_iter_total
         self._gripper_dwell_ticks = gripper_dwell_ticks
+        self._gripper_close_position = gripper_close_position
 
         self._targets: list[JointPositions] = []
         self._cursor: int = 0
@@ -191,9 +198,16 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # (kinder does not update finger_state after close actions), so we cannot
         # rely on the planned state; tracking the last command is authoritative.
         if _is_gripper_cmd(sim_action):
-            self._last_gripper_goal = 1.0 if float(sim_action[10]) < -0.5 else 0.0
+            self._last_gripper_goal = (
+                self._gripper_close_position if float(sim_action[10]) < -0.5 else 0.0
+            )
         action = _build_tidybot_action(
-            sim_state, target, sim_action, self._robot_name, self._last_gripper_goal
+            sim_state,
+            target,
+            sim_action,
+            self._robot_name,
+            self._last_gripper_goal,
+            self._gripper_close_position,
         )
         self._tick_count += 1
         # Advance past a gripper pair after gripper_dwell_ticks extra ticks.
@@ -283,6 +297,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         max_iter_total: int = 2000,
         gripper_dwell_ticks: int = 0,
         lookahead: float = 0.25,
+        gripper_close_position: float = 1.0,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -291,6 +306,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             arrival_tolerance=arrival_tolerance,
             max_iter_total=max_iter_total,
             gripper_dwell_ticks=gripper_dwell_ticks,
+            gripper_close_position=gripper_close_position,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")
@@ -375,6 +391,7 @@ def _build_tidybot_action(
     sim_action: NDArray[np.floating],
     robot_name: str,
     last_gripper_goal: float | None = None,
+    gripper_close_position: float = 1.0,
 ) -> TidyBotAction:
     """Pack the commanded arm goal + held base pose + gripper into a TidyBotAction.
 
@@ -395,7 +412,7 @@ def _build_tidybot_action(
         if last_gripper_goal is not None
         else float(sim_state.get(robot, "finger_state"))
     )
-    gripper_goal = _gripper_target(hold_finger, sim_action)
+    gripper_goal = _gripper_target(hold_finger, sim_action, gripper_close_position)
     return TidyBotAction(
         arm_goal=list(arm_target),
         base_pose_target_map=base_goal,
@@ -403,11 +420,15 @@ def _build_tidybot_action(
     )
 
 
-def _gripper_target(current_finger: float, sim_action: NDArray[np.floating]) -> float:
+def _gripper_target(
+    current_finger: float,
+    sim_action: NDArray[np.floating],
+    gripper_close_position: float = 1.0,
+) -> float:
     """Convert the kinder bipolar gripper command to a TidyBotAction absolute target."""
     gripper_cmd = float(sim_action[10])
     if gripper_cmd < -0.5:
-        return 1.0  # close
+        return gripper_close_position  # close
     if gripper_cmd > 0.5:
         return 0.0  # open
     return current_finger
