@@ -180,4 +180,15 @@ pipelines:
       shelf_pose: ${env.shelf_pose}
       cylinder_radius: ${env.cylinder_radius}
       cylinder_height: ${env.cylinder_height}
-    plan_executor: ${env.pipelines.fake.plan_executor}
+    # Same sub-executors as fake mode, but the magic gap is handed to a
+    # human: the arm is released to the Kinova's own gamepad teleoperation
+    # until the operator presses Enter, then the robot settles to the
+    # skill's predicted configuration.
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
+      base_executor: ${env.pipelines.fake.plan_executor.base_executor}
+      arm_executor: ${env.pipelines.fake.plan_executor.arm_executor}
+      gap_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.gap.TeleopGapExecutor
+        base_executor: ${env.pipelines.fake.plan_executor.base_executor}
+        arm_executor: ${env.pipelines.fake.plan_executor.arm_executor}

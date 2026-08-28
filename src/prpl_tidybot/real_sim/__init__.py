@@ -42,7 +42,10 @@ from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
     PurePursuitBaseMotion3DPlanExecutor,
     SettleBaseMotion3DPlanExecutor,
 )
-from prpl_tidybot.real_sim.plan_executors.gap import SettleGapExecutor
+from prpl_tidybot.real_sim.plan_executors.gap import (
+    SettleGapExecutor,
+    TeleopGapExecutor,
+)
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import (
     Kinematic3DPlanExecutor,
 )
@@ -102,5 +105,6 @@ __all__ = [
     "SettleGapExecutor",
     "SettleBaseMotion3DPlanExecutor",
     "StreamingArmMotion3DPlanExecutor",
+    "TeleopGapExecutor",
     "build_planner_env_models",
 ]

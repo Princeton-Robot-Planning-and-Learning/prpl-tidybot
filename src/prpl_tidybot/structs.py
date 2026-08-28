@@ -31,3 +31,20 @@ class TidyBotAction:
     arm_goal: list[float]  # absolute arm position
     base_pose_target_map: spatialmath.SE2  # absolute base pose target in the map frame
     gripper_goal: float  # absolute
+
+
+@dataclass(frozen=True)
+class TeleopHandoff:
+    """Hand the arm to a human teleoperator until they report done.
+
+    The env releases the arm from its low-level control loop (so the arm's
+    own teleoperation, e.g. a gamepad plugged into the Kinova base, takes
+    over), blocks on the operator's confirmation with ``prompt``, then
+    re-acquires the arm from wherever the operator left it. The base holds.
+    """
+
+    prompt: str
+
+
+# Everything the real env can be asked to do in one tick.
+RealAction = TidyBotAction | TeleopHandoff

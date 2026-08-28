@@ -15,8 +15,11 @@ from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
 from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
     PurePursuitBaseMotion3DPlanExecutor,
 )
-from prpl_tidybot.real_sim.plan_executors.gap import SettleGapExecutor
-from prpl_tidybot.structs import TidyBotObservation
+from prpl_tidybot.real_sim.plan_executors.gap import (
+    SettleGapExecutor,
+    TeleopGapExecutor,
+)
+from prpl_tidybot.structs import TeleopHandoff, TidyBotAction, TidyBotObservation
 
 _CARRY_JOINTS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
 
@@ -107,6 +110,57 @@ def test_rejects_anything_but_a_single_skill_call():
     executor = _executor()
     with pytest.raises(ValueError, match="single"):
         executor.set_trajectory([(s0, call), (s0, call)])
+    with pytest.raises(ValueError, match="single"):
+        executor.set_trajectory([(s0, np.zeros(11))])
+    with pytest.raises(RuntimeError, match="no trajectory"):
+        executor.step(s0)
+
+
+# ---------------------------------------------------------------------------
+# TeleopGapExecutor
+# ---------------------------------------------------------------------------
+
+
+def _teleop_executor() -> TeleopGapExecutor:
+    return TeleopGapExecutor(
+        base_executor=PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3),
+        arm_executor=StreamingArmMotion3DPlanExecutor(
+            distance_fn=_l1_distance, arrival_tolerance=1e-3
+        ),
+    )
+
+
+def test_teleop_gap_hands_off_then_settles_from_where_operator_left_robot():
+    """The first tick is a TeleopHandoff naming the skill; afterwards the executor
+    settles from the first perceived post-handoff state to the predicted one."""
+    s0 = _make_state()
+    predicted = _make_state(arm_conf=_CARRY_JOINTS, gripper=0.6)
+    call = _pick_call(s0, predicted)
+    executor = _teleop_executor()
+    executor.set_trajectory([(s0, call)])
+
+    assert not executor.done(s0)
+    real_action, sim_action = executor.step(s0)
+    assert isinstance(real_action, TeleopHandoff)
+    assert "Pick(robot)" in real_action.prompt
+    assert sim_action is call
+
+    # The operator moved the arm somewhere else; the settle starts from there
+    # and its arm target is still the predicted configuration.
+    after_teleop = _make_state(arm_conf=[0.9] * 7, gripper=0.6)
+    assert not executor.done(after_teleop)
+    real_action, sim_action = executor.step(after_teleop)
+    assert isinstance(real_action, TidyBotAction)
+    assert real_action.arm_goal == pytest.approx(_CARRY_JOINTS)
+    assert real_action.gripper_goal == 1.0
+    assert sim_action is call
+    assert executor.done(predicted)
+
+
+def test_teleop_gap_validation():
+    """Only a single SkillCall pair is accepted, and step needs a trajectory."""
+    s0 = _make_state()
+    executor = _teleop_executor()
     with pytest.raises(ValueError, match="single"):
         executor.set_trajectory([(s0, np.zeros(11))])
     with pytest.raises(RuntimeError, match="no trajectory"):

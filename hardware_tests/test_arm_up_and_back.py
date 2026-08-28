@@ -71,7 +71,7 @@ from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
 )
 from prpl_tidybot.real_sim.plan_executors.distance_factories import create_kinova_robot
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExecutor
-from prpl_tidybot.structs import TidyBotObservation
+from prpl_tidybot.structs import TidyBotAction, TidyBotObservation
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
 from prpl_tidybot.third_party.ik_solver import IKSolver
 
@@ -143,6 +143,7 @@ def _run_trajectory(
     step = 0
     while not executor.done(state):
         real_action, _ = executor.step(state)
+        assert isinstance(real_action, TidyBotAction)
         cmd_str = "  ".join(f"{j:+.3f}" for j in real_action.arm_goal)
         joints_str = "  ".join(f"{j:+.3f}" for j in obs.arm_conf)
         err = float(distance_fn(list(obs.arm_conf), list(target)))

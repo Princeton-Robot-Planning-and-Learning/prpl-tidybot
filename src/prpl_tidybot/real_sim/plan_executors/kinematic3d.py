@@ -47,7 +47,7 @@ from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
     BaseMotion3DPlanExecutor,
     PurePursuitBaseMotion3DPlanExecutor,
 )
-from prpl_tidybot.structs import TidyBotAction
+from prpl_tidybot.structs import RealAction
 
 # A planned action: a kinder 11-d delta, or a SkillCall marking a magic gap.
 SimAction = NDArray[np.floating] | SkillCall[ObjectCentricState]
@@ -73,9 +73,7 @@ class _Segment:
     pairs: list[tuple[ObjectCentricState, Any]]
 
 
-class Kinematic3DPlanExecutor(
-    PlanExecutor[SimAction, TidyBotAction, ObjectCentricState]
-):
+class Kinematic3DPlanExecutor(PlanExecutor[SimAction, RealAction, ObjectCentricState]):
     """Dispatch a kinematic3d trajectory between base, arm, and gap sub-executors."""
 
     def __init__(
@@ -83,7 +81,7 @@ class Kinematic3DPlanExecutor(
         base_executor: BaseMotion3DPlanExecutor | None = None,
         arm_executor: ArmMotion3DPlanExecutor | None = None,
         gap_executor: (
-            PlanExecutor[SimAction, TidyBotAction, ObjectCentricState] | None
+            PlanExecutor[SimAction, RealAction, ObjectCentricState] | None
         ) = None,
     ) -> None:
         self._base_executor = base_executor or PurePursuitBaseMotion3DPlanExecutor()
@@ -91,7 +89,7 @@ class Kinematic3DPlanExecutor(
         self._gap_executor = gap_executor
         self._segments: list[_Segment] = []
         self._segment_idx: int = 0
-        self._active: PlanExecutor[Any, TidyBotAction, ObjectCentricState] | None = None
+        self._active: PlanExecutor[Any, Any, ObjectCentricState] | None = None
         self._done_latched: bool = False
 
     # ------------------------------------------------------------------ Public
@@ -110,7 +108,7 @@ class Kinematic3DPlanExecutor(
         if self._segments:
             self._load_current_segment()
 
-    def step(self, sim_state: ObjectCentricState) -> tuple[TidyBotAction, SimAction]:
+    def step(self, sim_state: ObjectCentricState) -> tuple[RealAction, SimAction]:
         if self._done_latched or self._segment_idx >= len(self._segments):
             raise RuntimeError(
                 "Kinematic3DPlanExecutor.step called after the trajectory finished"
