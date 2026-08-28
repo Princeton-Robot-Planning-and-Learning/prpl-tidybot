@@ -99,16 +99,17 @@ def test_run_planner_omits_video_when_record_video_false(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("mode", ["sim", "fake"])
-def test_run_planner_with_magic_pick(mode: str) -> None:
-    """With Pick planned as a magic skill, the cylinder-shelf rollout runs end to end:
-    the SkillCall is carried out by a teleport in sim mode and by settling to the
-    predicted configuration in fake mode, and the planned place follows."""
+def test_run_planner_with_magic_grasp(mode: str) -> None:
+    """With Grasp planned as a magic skill, the cylinder-shelf rollout runs end to end:
+    the planned MoveToPreGrasp executes, the SkillCall is carried out by a teleport in
+    sim mode and by settling to the predicted configuration in fake mode, and the
+    planned place follows."""
     overrides = [
         "env=kinematic-cylinder-shelf3d-o1",
         f"mode={mode}",
         "max_eval_steps=1",
         "seed=0",
-        "env.magic_skills=[Pick]",
+        "env.magic_skills=[Grasp]",
     ]
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
         cfg = compose(config_name="config", overrides=overrides)

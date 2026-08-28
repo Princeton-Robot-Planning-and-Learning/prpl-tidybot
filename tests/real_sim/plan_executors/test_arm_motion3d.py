@@ -580,3 +580,34 @@ def test_carrot_rejects_nonpositive_lookahead():
     """lookahead must be positive."""
     with pytest.raises(ValueError, match="lookahead"):
         CarrotArmMotion3DPlanExecutor(distance_fn=_l1_distance, lookahead=0.0)
+
+
+def test_gripper_close_position_caps_the_close_and_the_hold():
+    """A close command targets `gripper_close_position` instead of 1.0, and later hold
+    ticks keep re-issuing that same partial close."""
+    state = _make_state(gripper=0.0, arm_conf=[0.0] * 7)
+    pairs = [
+        (state, _arm_action(gripper_cmd=-1.0)),
+        (state, _arm_action(arm_deltas=[0.5] + [0.0] * 6)),
+    ]
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance, gripper_close_position=0.7
+    )
+    executor.set_trajectory(pairs)
+    real_action, _ = executor.step(state)
+    assert real_action.gripper_goal == pytest.approx(0.7)
+    real_action, _ = executor.step(state)
+    assert real_action.gripper_goal == pytest.approx(0.7)
+    # Open is unaffected.
+    executor.set_trajectory([(state, _arm_action(gripper_cmd=1.0))])
+    real_action, _ = executor.step(state)
+    assert real_action.gripper_goal == 0.0
+
+
+def test_constructor_rejects_bad_gripper_close_position():
+    """gripper_close_position must be in (0, 1]."""
+    for value in (0.0, 1.5):
+        with pytest.raises(ValueError, match="gripper_close_position"):
+            StreamingArmMotion3DPlanExecutor(
+                distance_fn=_l1_distance, gripper_close_position=value
+            )

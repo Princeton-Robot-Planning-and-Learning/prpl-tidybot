@@ -32,7 +32,10 @@ env_model_kwargs:
 # planner records a SkillCall carrying the skill's predicted outcome, and
 # the pipeline's gap executor carries the skill out at execution time (a
 # teleport in sim mode; settling the robot to the predicted configuration
-# in fake mode). Override on the CLI with `env.magic_skills=[Pick]`.
+# in fake mode). The intended use is `env.magic_skills=[Grasp]`: the robot
+# drives and reaches to the pre-grasp pose with planned motion and only
+# the last mile (approach, close, stow) is left to the gap executor.
+# "MoveToPreGrasp" and "Place" can be listed too.
 magic_skills: []
 
 # The physical cylinder: a Pringles can. Threaded into both the perceiver
@@ -97,6 +100,11 @@ arm_arrival_tolerance: 0.4
 # mode runs with control_period 0, so the dwell costs nothing there and
 # no per-mode override is needed.
 arm_gripper_dwell_ticks: 20
+# Gripper position commanded for a "close" (1.0 = fully closed). The
+# Pringles can is compliant and a full close crushes it, so stop short:
+# tune so the fingers squeeze just enough to hold the can. Override on the
+# CLI with `env.gripper_close_position=0.8`.
+gripper_close_position: 0.7
 
 pipelines:
   fake:
@@ -130,6 +138,7 @@ pipelines:
         max_iter_total: 300
         gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
         lookahead: ${env.arm_lookahead}
+        gripper_close_position: ${env.gripper_close_position}
       # Handles the SkillCall left by a magic skill: drives the base and
       # arm to the skill's predicted configuration with the same
       # sub-executor types as above (instantiated separately).
