@@ -32,7 +32,10 @@ env_model_kwargs:
 # planner records a SkillCall carrying the skill's predicted outcome, and
 # the pipeline's gap executor carries the skill out at execution time (a
 # teleport in sim mode; settling the robot to the predicted configuration
-# in fake mode). Override on the CLI with `env.magic_skills=[Pick]`.
+# in fake mode). The intended use is `env.magic_skills=[Grasp]`: the robot
+# drives and reaches to the pre-grasp pose with planned motion and only
+# the last mile (approach, close, stow) is left to the gap executor.
+# "MoveToPreGrasp" and "Place" can be listed too.
 magic_skills: []
 
 # The physical cylinder: a Pringles can. Threaded into both the perceiver
