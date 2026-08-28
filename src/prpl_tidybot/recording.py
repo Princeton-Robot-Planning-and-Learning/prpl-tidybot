@@ -22,18 +22,27 @@ PyBullet's Python bindings don't reliably release the GIL during those
 calls, so running them on a background thread during the rollout still
 starves the control loop — visible on real hardware as a per-step pause
 identical to the issue this recorder was meant to fix (#45). Rendering
-every captured state in one sequential sweep after the rollout is the
-only configuration that's been verified to not slow the control loop.
+in one sequential sweep after the rollout is the only configuration
+that's been verified to not slow the control loop.
+
+That sweep is the slow part of ending a rollout, so it is kept short:
+at most ``max_frames`` ticks are rendered (a stride over the rollout,
+first and last tick always kept, same as the plan preview), ticks whose
+state is identical to the previously rendered one reuse its frame, and
+progress is logged as it goes. The resulting ``video.mp4`` is a gist of
+the rollout at ``fps``, not a real-time replay; the per-tick
+``state.pkl`` / ``real.png`` are still written for every tick.
 
 Trajectory capture is always on whenever a log dir is supplied; the
 boolean `record.video` config flag controls only whether `finish()`
-also composes the per-tick `(real, shadow)` panels into a single
-`video.mp4` alongside the trajectory dir.
+also composes the `(real, shadow)` panels into `video.mp4` alongside
+the trajectory dir.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import pickle
 import queue
 import threading
@@ -48,10 +57,12 @@ import numpy as np
 from prpl_utils.real_sim import Perceiver
 from relational_structs import ObjectCentricState
 
-from prpl_tidybot.video import write_mp4
+from prpl_tidybot.video import subsample_indices, write_mp4
 
 _RealObsType = TypeVar("_RealObsType")
 _SENTINEL: Any = object()
+_logger = logging.getLogger(__name__)
+_PROGRESS_EVERY = 25
 
 
 class _ShadowSim(Protocol):
@@ -95,9 +106,10 @@ class TrajectoryRecorder:
     so even a background-thread shadow worker starves the control loop
     (#45 follow-up).
 
-    With ``compose_video=True`` :meth:`finish` additionally composes the
-    per-tick ``(real, shadow)`` panels into ``video.mp4`` alongside the
-    trajectory dir.
+    With ``compose_video=True`` :meth:`finish` additionally renders shadow
+    frames for at most ``max_frames`` ticks (``None`` renders every tick)
+    and composes the ``(real, shadow)`` panels of those ticks into
+    ``video.mp4`` alongside the trajectory dir.
     """
 
     _TICK_DIR_FORMAT = "{:06d}"
@@ -110,6 +122,7 @@ class TrajectoryRecorder:
         seed: int = 0,
         fps: int = 10,
         compose_video: bool = False,
+        max_frames: int | None = 100,
     ) -> None:
         self._log_dir = Path(log_dir)
         self._trajectory_dir = self._log_dir / "trajectory"
@@ -118,6 +131,7 @@ class TrajectoryRecorder:
         self._real_env = real_env
         self._fps = fps
         self._compose_video = compose_video
+        self._max_frames = max_frames
         # Prime the shadow sim: gymnasium's order-enforcing wrapper raises
         # if render is called before reset. Same seed as the rollout so any
         # static / non-state-set env content (camera positions, world
@@ -167,11 +181,19 @@ class TrajectoryRecorder:
         self._serialize_thread.join()
         if not self._compose_video:
             # Shadow rendering only feeds the mp4. Skipping it when no video
-            # was requested keeps `finish()` fast — the pybullet sweep over
-            # every captured state was the dominant cost otherwise.
+            # was requested keeps `finish()` fast — the pybullet sweep was
+            # the dominant cost otherwise.
             return None
-        self._render_shadows_from_disk()
-        return self._compose_video_from_disk()
+        tick_dirs = [
+            d
+            for d in sorted(self._trajectory_dir.iterdir())
+            if (d / "state.pkl").exists()
+        ]
+        selected = [
+            tick_dirs[i] for i in subsample_indices(len(tick_dirs), self._max_frames)
+        ]
+        self._render_shadows_from_disk(selected, len(tick_dirs))
+        return self._compose_video_from_disk(selected)
 
     def _serialize_loop(self) -> None:
         while True:
@@ -193,31 +215,59 @@ class TrajectoryRecorder:
         with open(tick_dir / "meta.json", "w", encoding="utf-8") as f:
             json.dump({"idx": payload.idx, "timestamp": payload.timestamp}, f)
 
-    def _render_shadows_from_disk(self) -> None:
-        """Walk the per-tick dirs and render shadow.png for each saved state.
+    def _render_shadows_from_disk(self, tick_dirs: list[Path], num_ticks: int) -> None:
+        """Render shadow.png for the saved state in each of `tick_dirs`.
 
         Sequential, after the rollout. The shadow sim is touched only here, so there is
         no thread-safety surface area on it and no concurrent pybullet load on the
-        rollout thread.
+        rollout thread. A tick whose state equals the previously rendered state reuses
+        that frame instead of rendering again (long holds render identically).
         """
-        for tick_dir in sorted(self._trajectory_dir.iterdir()):
-            state_path = tick_dir / "state.pkl"
-            if not state_path.exists():
-                continue
-            with open(state_path, "rb") as f:
+        _logger.info(
+            "Rendering %d of %d recorded ticks through the shadow sim...",
+            len(tick_dirs),
+            num_ticks,
+        )
+        start = time.monotonic()
+        last_state: ObjectCentricState | None = None
+        last_frame: np.ndarray | None = None
+        rendered = 0
+        for count, tick_dir in enumerate(tick_dirs, start=1):
+            with open(tick_dir / "state.pkl", "rb") as f:
                 state = pickle.load(f)
-            self._shadow_sim.set_state(state)
-            frame = self._shadow_sim.render()
+            if last_state is not None and state == last_state:
+                frame = last_frame
+            else:
+                self._shadow_sim.set_state(state)
+                raw = self._shadow_sim.render()
+                frame = None if raw is None else np.asarray(raw, dtype=np.uint8)
+                rendered += 1
+            last_state, last_frame = state, frame
             if frame is None:
                 continue
             cv.imwrite(
-                str(tick_dir / "shadow.png"),
-                cv.cvtColor(np.asarray(frame, dtype=np.uint8), cv.COLOR_RGB2BGR),
+                str(tick_dir / "shadow.png"), cv.cvtColor(frame, cv.COLOR_RGB2BGR)
             )
+            if count % _PROGRESS_EVERY == 0:
+                elapsed = time.monotonic() - start
+                _logger.info(
+                    "  shadow frames %d/%d (%.0fs elapsed, ~%.0fs left)",
+                    count,
+                    len(tick_dirs),
+                    elapsed,
+                    elapsed / count * (len(tick_dirs) - count),
+                )
+        _logger.info(
+            "Shadow sweep done: %d rendered, %d reused, %.1fs.",
+            rendered,
+            len(tick_dirs) - rendered,
+            time.monotonic() - start,
+        )
 
-    def _compose_video_from_disk(self) -> Path | None:
+    def _compose_video_from_disk(self, tick_dirs: list[Path]) -> Path | None:
+        start = time.monotonic()
         frames: list[np.ndarray] = []
-        for tick_dir in sorted(self._trajectory_dir.iterdir()):
+        for tick_dir in tick_dirs:
             real_path = tick_dir / "real.png"
             shadow_path = tick_dir / "shadow.png"
             if not real_path.exists() or not shadow_path.exists():
@@ -228,9 +278,17 @@ class TrajectoryRecorder:
             shadow_rgb = cv.cvtColor(shadow_bgr, cv.COLOR_BGR2RGB)
             frames.append(_hstack_frames(real_rgb, shadow_rgb))
         if not frames:
+            _logger.info("No (real, shadow) frame pairs; skipping video.mp4.")
             return None
         video_path = self._log_dir / "video.mp4"
         write_mp4(frames, video_path, fps=self._fps)
+        _logger.info(
+            "Wrote %s (%d frames at %d fps, %.1fs).",
+            video_path,
+            len(frames),
+            self._fps,
+            time.monotonic() - start,
+        )
         return video_path
 
 

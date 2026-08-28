@@ -31,7 +31,6 @@ follow-ups.
 from __future__ import annotations
 
 import logging
-import math
 import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -42,7 +41,7 @@ from kinder_models.structs import SkillCall
 from prpl_utils.utils import render_textbox_on_image
 from relational_structs import ObjectCentricState
 
-from prpl_tidybot.video import write_mp4
+from prpl_tidybot.video import subsample_indices, write_mp4
 
 # Default prompt indirection so tests can swap a fake stdin without
 # monkeypatching the `input` builtin.
@@ -91,10 +90,10 @@ def preview_or_abort(
     if not planned_states:
         return None
     gaps = _find_gaps(planned_states, planned_actions)
-    keep = {0, len(planned_states) - 1}
+    keep: set[int] = set()
     for index in gaps:
         keep.update({index, index + 1})
-    selected = _subsample_indices(len(planned_states), max_frames, keep)
+    selected = subsample_indices(len(planned_states), max_frames, keep)
     _logger.info(
         "Rendering plan preview (%d of %d planned states, %d magic gap(s))...",
         len(selected),
@@ -152,23 +151,6 @@ def _find_gaps(
         for index, action in enumerate(planned_actions)
         if isinstance(action, SkillCall)
     }
-
-
-def _subsample_indices(
-    num_states: int, max_frames: int | None, keep: set[int]
-) -> list[int]:
-    """Indices to render: a stride over all states plus every index in `keep`.
-
-    With ``max_frames=None`` or a short plan every index is returned. Otherwise the
-    stride yields at most ``max_frames`` indices and the kept indices are merged in,
-    so the result may exceed ``max_frames`` by the size of ``keep``.
-    """
-    if max_frames is None or num_states <= max_frames:
-        return list(range(num_states))
-    if max_frames < 1:
-        raise ValueError(f"max_frames must be positive, got {max_frames}.")
-    stride = math.ceil(num_states / max_frames)
-    return sorted(set(range(0, num_states, stride)) | keep)
 
 
 def _gap_banner(frame: np.ndarray, call: SkillCall, index: int) -> np.ndarray:

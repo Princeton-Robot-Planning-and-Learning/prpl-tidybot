@@ -6,6 +6,7 @@ a trajectory dir + optional video lives in `test_pipeline.py`.
 """
 
 import json
+import logging
 import pickle
 import time
 from dataclasses import dataclass
@@ -86,6 +87,7 @@ def _make_recorder(
     shadow_color: int = 20,
     compose_video: bool = False,
     fps: int = 5,
+    max_frames: int | None = 100,
 ) -> tuple[TrajectoryRecorder, _StubRealEnv, _StubShadowSim]:
     real = _StubRealEnv(color=real_color)
     shadow = _StubShadowSim(color=shadow_color)
@@ -95,6 +97,7 @@ def _make_recorder(
         real_env=real,
         fps=fps,
         compose_video=compose_video,
+        max_frames=max_frames,
     )
     return recorder, real, shadow
 
@@ -295,3 +298,83 @@ def test_recorder_trajectory_dir_property(tmp_path: Path) -> None:
         assert recorder.trajectory_dir.is_dir()
     finally:
         recorder.finish()
+
+
+class _CountingShadowSim(_StubShadowSim):
+    """Shadow sim that counts render calls."""
+
+    def __init__(self, color: int = 20) -> None:
+        super().__init__(color=color)
+        self.renders = 0
+
+    def render(self) -> np.ndarray:
+        self.renders += 1
+        return super().render()
+
+
+def test_finish_subsamples_shadow_frames_to_max_frames(tmp_path: Path) -> None:
+    """With more ticks than `max_frames`, only a strided subset (first and last always
+    included) gets a shadow.png and makes it into the video."""
+    real = _StubRealEnv(color=10)
+    shadow = _CountingShadowSim()
+    recorder = TrajectoryRecorder(
+        log_dir=tmp_path,
+        shadow_sim=shadow,
+        real_env=real,
+        fps=5,
+        compose_video=True,
+        max_frames=10,
+    )
+    for idx in range(53):
+        recorder.capture(idx, _StubState(str(idx)))  # type: ignore[arg-type]
+    out = recorder.finish()
+
+    assert out is not None
+    shadow_ticks = sorted(
+        int(d.name)
+        for d in (tmp_path / "trajectory").iterdir()
+        if (d / "shadow.png").exists()
+    )
+    assert shadow_ticks[0] == 0 and shadow_ticks[-1] == 52
+    assert len(shadow_ticks) <= 11
+    assert shadow.renders == len(shadow_ticks)
+    cap = cv.VideoCapture(str(out))
+    try:
+        assert int(cap.get(cv.CAP_PROP_FRAME_COUNT)) == len(shadow_ticks)
+    finally:
+        cap.release()
+
+
+def test_finish_reuses_shadow_frame_for_identical_states(tmp_path: Path) -> None:
+    """Consecutive ticks with equal states render once and share the frame."""
+    real = _StubRealEnv(color=10)
+    shadow = _CountingShadowSim()
+    recorder = TrajectoryRecorder(
+        log_dir=tmp_path,
+        shadow_sim=shadow,
+        real_env=real,
+        fps=5,
+        compose_video=True,
+        max_frames=None,
+    )
+    for idx in range(6):
+        state = _StubState("a" if idx < 4 else "b")
+        recorder.capture(idx, state)  # type: ignore[arg-type]
+    recorder.finish()
+
+    assert shadow.renders == 2
+    for idx in range(6):
+        assert (tmp_path / "trajectory" / f"{idx:06d}" / "shadow.png").exists()
+
+
+def test_finish_logs_progress_and_output(tmp_path: Path, caplog) -> None:
+    """The shadow sweep and the mp4 write are announced in the log."""
+    recorder, _, _ = _make_recorder(tmp_path, compose_video=True)
+    for idx in range(3):
+        recorder.capture(idx, _StubState(str(idx)))  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="prpl_tidybot.recording"):
+        recorder.finish()
+    messages = "\n".join(caplog.messages)
+    assert "Rendering 3 of 3 recorded ticks" in messages
+    assert "Shadow sweep done" in messages
+    assert "video.mp4" in messages
