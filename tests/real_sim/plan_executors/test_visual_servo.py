@@ -1,0 +1,323 @@
+"""Tests for the cylinder visual-servo gap executor.
+
+Two levels: a synthetic camera whose frame is generated from the tool pose (fast,
+deterministic, exercises the state machine and failure modes), and the kinder
+simulator's own wrist camera rendered at a real pre-grasp state (slower, exercises the
+edge detector on rendered images and the lateral sign convention end to end).
+"""
+
+from __future__ import annotations
+
+from typing import Sequence
+
+import numpy as np
+import pytest
+from kinder.envs.kinematic3d.cylinder_shelf3d import ObjectCentricCylinderShelf3DEnv
+from kinder_models.kinematic3d.cylinder_shelf3d.parameterized_skills import (
+    create_lifted_controllers,
+)
+from kinder_models.structs import SkillCall
+from pybullet_helpers.geometry import matrix_from_quat
+from spatialmath import SE2
+
+from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
+from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
+from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
+    StreamingArmMotion3DPlanExecutor,
+)
+from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
+    PurePursuitBaseMotion3DPlanExecutor,
+)
+from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
+from prpl_tidybot.real_sim.plan_executors.visual_servo import (
+    ALIGN,
+    APPROACH,
+    CLOSE,
+    SETTLE,
+    CylinderVisualServoGapExecutor,
+)
+from prpl_tidybot.structs import TidyBotAction, TidyBotObservation
+from prpl_tidybot.visual_servo.image_sources import KinderEECameraSource
+from prpl_tidybot.visual_servo.tool_frame import ToolFrameStepper
+
+_PRE_GRASP_JOINTS = [0.002, 1.887, 3.142, -1.623, 0.0, 1.678, 1.571]
+_IMAGE_W, _IMAGE_H = 320, 240
+_M_PER_PX = 0.0005  # synthetic camera scale at the pre-grasp standoff
+
+
+def _l1(q1: Sequence[float], q2: Sequence[float]) -> float:
+    return float(np.sum(np.abs(np.array(q1) - np.array(q2))))
+
+
+def _state(joints: Sequence[float], gripper: float = 0.0):
+    obs = TidyBotObservation(
+        arm_conf=list(joints),
+        base_pose=SE2(x=0.0, y=0.0, theta=0.0),
+        map_base_pose=SE2(x=0.0, y=0.0, theta=0.0),
+        gripper=gripper,
+        wrist_camera=np.zeros(WRIST_CAMERA_DIMS, dtype=np.uint8),
+        base_camera=np.zeros(BASE_CAMERA_DIMS, dtype=np.uint8),
+    )
+    return PrplLab3DPerceiver().step(obs, {})
+
+
+class _SyntheticCanCamera:
+    """Renders a red bar whose horizontal position follows the tool's lateral offset
+    from a virtual can, using the stepper's forward kinematics on the arm's current
+    joints (which the fake arm sets to whatever was last commanded)."""
+
+    def __init__(self, stepper: ToolFrameStepper, joints_fn, can_offset_m: float):
+        self._stepper = stepper
+        self._joints_fn = joints_fn
+        self._reference = stepper.end_effector_pose(_PRE_GRASP_JOINTS)
+        self._can_offset = can_offset_m
+        self.frames = 0
+
+    def lateral_offset(self) -> float:
+        """Tool-x displacement of the end effector from its reference pose."""
+        pose = self._stepper.end_effector_pose(self._joints_fn())
+        moved = np.array(pose.position) - np.array(self._reference.position)
+        return float(moved @ matrix_from_quat(self._reference.orientation)[:, 0])
+
+    def get_image(self):
+        """Render the virtual can for the current tool pose."""
+        self.frames += 1
+        # The can sits `can_offset` along +tool-x; moving the tool +x brings it to
+        # the image center. The camera's horizontal axis runs opposite to tool x
+        # (a can further along +x appears further left), matching the sim camera.
+        relative = self._can_offset - self.lateral_offset()
+        center = 0.5 * (_IMAGE_W - 1) - relative / _M_PER_PX
+        image = np.full((_IMAGE_H, _IMAGE_W, 3), (190, 150, 90), dtype=np.uint8)
+        left, right = int(round(center - 30)), int(round(center + 30))
+        image[:, max(0, left) : max(0, right)] = (200, 40, 40)
+        return image
+
+
+class _FakeArm:
+    """Tracks the last commanded joints exactly, like FakeArmInterface."""
+
+    def __init__(self, joints: Sequence[float]) -> None:
+        self.joints = list(joints)
+        self.gripper = 0.0
+
+    def apply(self, action: TidyBotAction) -> None:
+        """Adopt the commanded joints and gripper."""
+        self.joints = list(action.arm_goal)
+        self.gripper = action.gripper_goal
+
+
+def _run(executor, arm: _FakeArm, max_ticks: int = 400) -> list[TidyBotAction]:
+    actions = []
+    for _ in range(max_ticks):
+        state = _state(arm.joints, arm.gripper)
+        if executor.done(state):
+            break
+        action, sim_action = executor.step(state)
+        assert isinstance(sim_action, SkillCall)
+        assert isinstance(action, TidyBotAction)
+        arm.apply(action)
+        actions.append(action)
+    return actions
+
+
+def _make_executor(image_source, stepper, **kwargs) -> CylinderVisualServoGapExecutor:
+    return CylinderVisualServoGapExecutor(
+        image_source=image_source,
+        base_executor=PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3),
+        arm_executor=StreamingArmMotion3DPlanExecutor(
+            distance_fn=_l1, arrival_tolerance=1e-3
+        ),
+        stepper=stepper,
+        gripper_dwell_ticks=3,
+        **kwargs,
+    )
+
+
+def _skill_call(pre_state, predicted) -> SkillCall:
+    robot = pre_state.get_object_from_name("robot")
+    return SkillCall("Grasp", (robot,), np.zeros(0), predicted)
+
+
+@pytest.fixture(name="stepper", scope="module")
+def _stepper() -> ToolFrameStepper:
+    return ToolFrameStepper()
+
+
+def test_aligns_approaches_closes_and_settles(stepper: ToolFrameStepper):
+    """Starting 3 cm off the can laterally, the executor centers it, advances the
+    approach distance, closes the gripper, and settles to the predicted joints."""
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    camera = _SyntheticCanCamera(stepper, lambda: arm.joints, can_offset_m=0.03)
+    executor = _make_executor(
+        camera,
+        stepper,
+        lateral_gain=0.0004,
+        approach_distance=0.06,
+        approach_step=0.02,
+        gripper_close_position=0.7,
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    # The predicted post-grasp configuration: the carrying pose (gripper closed).
+    predicted = _state([0.002, 0.628, 3.142, -2.495, 0.0, 0.291, 1.571], gripper=0.7)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, predicted))])
+
+    actions = _run(executor, arm)
+
+    phases = [entry.phase for entry in executor.trace]
+    assert ALIGN in phases and APPROACH in phases and CLOSE in phases
+    assert executor.phase == SETTLE
+    # Aligned: by the time the approach ran, the can was within tolerance of the
+    # image center (8 px at 0.5 mm/px is 4 mm).
+    approach_errors = [
+        e.lateral_error_px
+        for e in executor.trace
+        if e.phase == APPROACH and e.lateral_error_px is not None
+    ]
+    assert approach_errors and max(abs(x) for x in approach_errors) <= 8.0
+    # Approached: the tool advanced the requested distance along its z axis before
+    # the settle took over (measured on the last approach-phase target).
+    last_approach = next(
+        e for e in reversed(executor.trace) if e.phase == APPROACH and e.target_joints
+    )
+    assert last_approach.target_joints is not None
+    reference = stepper.end_effector_pose(_PRE_GRASP_JOINTS)
+    approach_axis = matrix_from_quat(reference.orientation)[:, 2]
+    final_pose = stepper.end_effector_pose(list(last_approach.target_joints))
+    moved = np.array(final_pose.position) - np.array(reference.position)
+    assert moved @ approach_axis == pytest.approx(0.06, abs=0.004)
+    # The gripper was closed to the configured position during the close phase.
+    assert any(a.gripper_goal == pytest.approx(0.7) for a in actions)
+    # And the settle drove the arm to the predicted joints.
+    predicted_robot = predicted.get_object_from_name("robot")
+    predicted_joints = [
+        predicted.get(predicted_robot, f"joint_{j + 1}") for j in range(7)
+    ]
+    assert np.allclose(arm.joints, predicted_joints, atol=1e-3)
+
+
+def test_already_aligned_skips_lateral_moves(stepper: ToolFrameStepper):
+    """With the can centered, no lateral step is ever commanded."""
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    camera = _SyntheticCanCamera(stepper, lambda: arm.joints, can_offset_m=0.0)
+    executor = _make_executor(
+        camera, stepper, approach_distance=0.04, approach_step=0.02
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    _run(executor, arm)
+    lateral = [e.delta_tool[0] for e in executor.trace if e.delta_tool is not None]
+    assert lateral and all(abs(d) < 1e-9 for d in lateral)
+
+
+def test_lost_cylinder_raises(stepper: ToolFrameStepper):
+    """Frames without a cylinder for more than max_missed_detections ticks fail."""
+
+    class _Blank:
+        def get_image(self):
+            """A featureless frame."""
+            return np.full((_IMAGE_H, _IMAGE_W, 3), 120, dtype=np.uint8)
+
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    executor = _make_executor(_Blank(), stepper, max_missed_detections=2)
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    with pytest.raises(ExecutionFailure, match="lost the cylinder"):
+        _run(executor, arm)
+
+
+def test_missing_image_raises(stepper: ToolFrameStepper):
+    """An image source that yields nothing is an execution failure."""
+
+    class _NoImage:
+        def get_image(self):
+            """No frame available."""
+            return None
+
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    executor = _make_executor(_NoImage(), stepper)
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    with pytest.raises(ExecutionFailure, match="no wrist image"):
+        _run(executor, arm)
+
+
+def test_tick_budget_raises(stepper: ToolFrameStepper):
+    """A can that never centers (zero gain) exhausts max_ticks."""
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    camera = _SyntheticCanCamera(stepper, lambda: arm.joints, can_offset_m=0.05)
+    executor = _make_executor(camera, stepper, lateral_gain=0.0, max_ticks=15)
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    with pytest.raises(ExecutionFailure, match="gave up after 15 ticks"):
+        _run(executor, arm)
+
+
+def test_validation():
+    """Bad axes and a non-SkillCall trajectory are rejected."""
+    with pytest.raises(ValueError, match="axis"):
+        CylinderVisualServoGapExecutor(
+            image_source=None, lateral_axis="w"  # type: ignore[arg-type]
+        )
+    executor = CylinderVisualServoGapExecutor(
+        image_source=None, stepper=None  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError, match="SkillCall"):
+        executor.set_trajectory([(_state(_PRE_GRASP_JOINTS), np.zeros(11))])
+    with pytest.raises(RuntimeError, match="no trajectory"):
+        executor.step(_state(_PRE_GRASP_JOINTS))
+
+
+# ---------------------------------------------------------------------------
+# End to end against the simulator's wrist camera
+# ---------------------------------------------------------------------------
+
+
+def test_servo_on_kinder_wrist_camera(stepper: ToolFrameStepper):
+    """From the planned pre-grasp pose with the cylinder shifted 3 cm sideways, the
+    executor centers the cylinder in the rendered wrist image and approaches; this
+    checks the detector on real renders and the lateral sign convention together."""
+    env = ObjectCentricCylinderShelf3DEnv(num_cylinders=1, allow_state_access=True)
+    try:
+        init_state, _ = env.reset(seed=456)
+        sim = ObjectCentricCylinderShelf3DEnv(num_cylinders=1, allow_state_access=True)
+        controllers = create_lifted_controllers(
+            env.action_space, sim  # type: ignore[arg-type]
+        )
+        robot = init_state.get_object_from_name("robot")
+        target = init_state.get_object_from_name("cylinder0")
+        stage = controllers["move_to_pre_grasp"].ground((robot, target))
+        pre = stage.predict_outcome(  # type: ignore[attr-defined]
+            init_state, np.array([0.8, 0.0])
+        )
+        # Shift the cylinder sideways (base faces +x here, so +y is lateral).
+        shifted = pre.copy()
+        shifted.set(target, "pose_y", shifted.get(target, "pose_y") + 0.03)
+
+        arm = _FakeArm(list(pre.joint_positions))
+        camera = KinderEECameraSource(env, shifted, lambda: arm.joints)
+        executor = _make_executor(
+            camera,
+            stepper,
+            lateral_gain=0.0004,
+            lateral_tolerance_px=6.0,
+            approach_distance=0.04,
+            approach_step=0.02,
+        )
+        pre_state = _state(list(pre.joint_positions))
+        executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+        _run(executor, arm)
+
+        assert executor.phase == SETTLE
+        errors = [
+            e.lateral_error_px for e in executor.trace if e.lateral_error_px is not None
+        ]
+        assert abs(errors[0]) > 40, "the shifted cylinder starts well off center"
+        aligned_errors = [
+            e.lateral_error_px
+            for e in executor.trace
+            if e.phase == APPROACH and e.lateral_error_px is not None
+        ]
+        assert aligned_errors and max(abs(x) for x in aligned_errors) <= 12.0
+        sim.close()
+    finally:
+        env.close()
