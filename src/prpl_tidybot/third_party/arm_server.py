@@ -34,23 +34,7 @@ class Arm:
         self.ik_solver = IKSolver(ee_offset=0.12)
 
     def reset(self, reset_arm: bool = True):
-        # Stop low-level control
-        if self.arm.cyclic_running:
-            time.sleep(0.75)  # Wait for arm to stop moving
-            self.arm.stop_cyclic()
-
-        # Drain any leftover commands from the previous session. The
-        # command_queue is reused across resets (passed into each new
-        # JointCompliantController), so a stale (qpos, gripper) item from
-        # the previous rollout would otherwise be the first thing the new
-        # controller reads, briefly steering the OTG toward the previous
-        # session's target before the current session's first command
-        # arrives. Mirrors issue #54's pattern for the base.
-        while not self.command_queue.empty():
-            try:
-                self.command_queue.get_nowait()
-            except queue.Empty:
-                break
+        self.release()
 
         # Clear faults
         self.arm.clear_faults()
@@ -61,7 +45,32 @@ class Arm:
             self.arm.open_gripper()
             self.arm.retract()
 
-        # Create new instance of controller
+        self.resume()
+
+    def release(self):
+        # Stop low-level control. The arm returns to high-level servoing,
+        # where its onboard controller (and any gamepad plugged into the
+        # Kinova base) is in charge.
+        if self.arm.cyclic_running:
+            time.sleep(0.75)  # Wait for arm to stop moving
+            self.arm.stop_cyclic()
+
+    def resume(self):
+        # Drain any leftover commands from the previous session. The
+        # command_queue is reused across sessions (passed into each new
+        # JointCompliantController), so a stale (qpos, gripper) item from
+        # the previous session would otherwise be the first thing the new
+        # controller reads, briefly steering the OTG toward the previous
+        # session's target before the current session's first command
+        # arrives. Mirrors issue #54's pattern for the base.
+        while not self.command_queue.empty():
+            try:
+                self.command_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # Create new instance of controller; it initialises at the arm's
+        # current configuration, so the arm holds wherever it is.
         self.controller = JointCompliantController(self.command_queue)
 
         # Start low-level control

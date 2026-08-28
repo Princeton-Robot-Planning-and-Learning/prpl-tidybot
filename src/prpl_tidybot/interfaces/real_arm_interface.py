@@ -25,6 +25,15 @@ class RealArmInterface(ArmInterface):
     def execute_action(self, arm_goal: list[float], gripper_goal: float) -> None:
         self.arm.execute_action_angular(qpos=arm_goal, gripper_pos=gripper_goal)
 
+    def release(self) -> None:
+        """Stop the low-level loop; the Kinova returns to high-level servoing, where its
+        onboard controller and any gamepad plugged into the base take over."""
+        self.arm.release()
+
+    def resume(self) -> None:
+        """Restart the low-level loop from the arm's current configuration."""
+        self.arm.resume()
+
     def close(self) -> None:
         """Tear down the RPC connection and stop the low-level arm control loop."""
         self.arm.close()

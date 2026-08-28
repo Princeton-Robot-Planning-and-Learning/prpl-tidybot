@@ -1,7 +1,9 @@
 """Gymnasium environment for the real TidyBot++."""
 
+import logging
+import math
 import time
-from typing import Any, SupportsFloat
+from typing import Any, Callable, SupportsFloat
 
 import gymnasium
 from gymnasium.core import RenderFrame
@@ -9,11 +11,13 @@ from gymnasium.core import RenderFrame
 from prpl_tidybot.coord_converter import CoordFrameConverter
 from prpl_tidybot.interfaces.interface import Interface
 from prpl_tidybot.rendering import Renderer
-from prpl_tidybot.structs import TidyBotAction, TidyBotObservation
+from prpl_tidybot.structs import RealAction, TeleopHandoff, TidyBotObservation
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD
 
+_logger = logging.getLogger(__name__)
 
-class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
+
+class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, RealAction]):
     """Gymnasium environment for the real TidyBot++.
 
     `step` issues one command to each sub-interface and returns a fresh
@@ -24,6 +28,11 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
     tolerances and any inner settle loop — lives in the configured
     `PlanExecutor`, not here.
 
+    A `TeleopHandoff` action instead releases the arm to its onboard
+    controller, blocks on `prompt_fn` until the operator reports done, and
+    re-acquires the arm; the observation returned is taken after the
+    hand-back. `prompt_fn` defaults to stdin.
+
     Reward is always 0 and terminated / truncated are always False: the real
     environment has no task semantics. Convergence is the executor's call.
     """
@@ -33,12 +42,14 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         interface: Interface,
         control_period: float = POLICY_CONTROL_PERIOD,
         renderer: Renderer | None = None,
+        prompt_fn: Callable[[str], str] = input,
     ) -> None:
         self._interface = interface
         self._control_period = control_period
         self._converter: CoordFrameConverter | None = None
         self._last_obs: TidyBotObservation | None = None
         self._renderer = renderer
+        self._prompt_fn = prompt_fn
 
     def reset(
         self,
@@ -53,10 +64,12 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         return obs, {}
 
     def step(
-        self, action: TidyBotAction
+        self, action: RealAction
     ) -> tuple[TidyBotObservation, SupportsFloat, bool, bool, dict[str, Any]]:
         if self._converter is None or self._last_obs is None:
             raise RuntimeError("RealTidyBotEnv.step called before reset")
+        if isinstance(action, TeleopHandoff):
+            return self._hand_off_arm(action), 0.0, False, False, {}
         # Re-calibrate from the obs we already have on hand (set by reset or
         # the previous step). Skipping a second get_observation here is what
         # keeps the gap between consecutive base commands inside the base
@@ -76,6 +89,21 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         self._last_obs = obs
         return obs, 0.0, False, False, {}
 
+    def _hand_off_arm(self, action: TeleopHandoff) -> TidyBotObservation:
+        """Release the arm, wait for the operator, re-acquire, and observe."""
+        arm = self._interface.arm_interface
+        _logger.info("Releasing the arm for teleoperation.")
+        arm.release()
+        try:
+            self._prompt_fn(action.prompt)
+        finally:
+            _logger.info("Re-acquiring the arm from its current configuration.")
+            arm.resume()
+        _stand_clear_countdown(action.countdown_seconds)
+        obs = self._interface.get_observation()
+        self._last_obs = obs
+        return obs
+
     def render(self) -> RenderFrame | list[RenderFrame] | None:
         if self._renderer is not None:
             return self._renderer.render()
@@ -90,3 +118,17 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, TidyBotAction]):
         still in low-level torque-control mode from the previous one.
         """
         self._interface.close()
+
+
+def _stand_clear_countdown(seconds: float) -> None:
+    """Announce that autonomous motion is about to resume, one line per second."""
+    remaining = int(math.ceil(seconds))
+    if remaining <= 0:
+        return
+    print(f"Stand clear: autonomous motion resumes in {remaining} s.", flush=True)
+    while remaining > 0:
+        time.sleep(min(1.0, seconds - (int(math.ceil(seconds)) - remaining)))
+        remaining -= 1
+        if remaining > 0:
+            print(f"  {remaining}...", flush=True)
+    print("Resuming.", flush=True)

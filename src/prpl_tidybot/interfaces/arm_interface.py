@@ -26,6 +26,19 @@ class ArmInterface(abc.ABC):
     def execute_action(self, arm_goal: list[float], gripper_goal: float) -> None:
         """Send a single arm + gripper command (1 is open, 0 is closed)."""
 
+    def release(self) -> None:
+        """Give the arm back to its onboard controller for manual teleoperation.
+
+        After this, ``execute_action`` must not be called until ``resume``.
+        Real-resource subclasses override; the default is a no-op.
+        """
+
+    def resume(self) -> None:
+        """Re-take control of the arm from wherever it currently is.
+
+        Real-resource subclasses override; the default is a no-op.
+        """
+
     def close(self) -> None:
         """Tear down hardware connections; real-resource subclasses override."""
 
