@@ -8,6 +8,7 @@ Distance function for tests is a plain L1 (no wrap), built to be easy to reason 
 Production wires in pybullet-helpers' weighted joint distance.
 """
 
+import logging
 from typing import Sequence
 
 import numpy as np
@@ -20,6 +21,7 @@ from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
     CarrotArmMotion3DPlanExecutor,
     StreamingArmMotion3DPlanExecutor,
 )
+from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.structs import TidyBotObservation
 
 
@@ -279,9 +281,10 @@ def test_done_is_sticky():
     assert executor.done(_make_state(arm_conf=[0.0] * 7)) is True
 
 
-def test_done_true_at_max_iter_total_even_without_convergence():
-    """Done flips True once max_iter_total ticks elapse, even if perceived joints never
-    reach the final waypoint."""
+def test_done_raises_execution_failure_at_max_iter_total(caplog):
+    """Once max_iter_total ticks elapse without reaching the final waypoint, done()
+    logs a warning with the remaining distances and raises ExecutionFailure instead of
+    reporting the segment complete."""
     pairs = [
         (
             _make_state(arm_conf=[0.0] * 7),
@@ -295,7 +298,10 @@ def test_done_true_at_max_iter_total_even_without_convergence():
 
     for _ in range(3):
         executor.step(_make_state(arm_conf=[0.0] * 7))
-    assert executor.done(_make_state(arm_conf=[0.0] * 7)) is True
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ExecutionFailure, match="gave up after 3 ticks"):
+            executor.done(_make_state(arm_conf=[0.0] * 7))
+    assert "distance 0.500 to the cursor target" in caplog.text
 
 
 # ---------------------------------------------------------------------------

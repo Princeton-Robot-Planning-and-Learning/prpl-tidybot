@@ -5,6 +5,8 @@ tracking strategies and have separate test sections below. Shared concerns (base
 validation, empty trajectory, etc.) are also tested against both subclasses.
 """
 
+import logging
+
 import numpy as np
 import pytest
 from spatialmath import SE2
@@ -15,6 +17,7 @@ from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
     PurePursuitBaseMotion3DPlanExecutor,
     SettleBaseMotion3DPlanExecutor,
 )
+from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.structs import TidyBotObservation
 
 
@@ -217,16 +220,46 @@ def test_settle_advances_when_within_tolerance():
     assert cmd.base_pose_target_map.x == pytest.approx(1.0)
 
 
-def test_settle_advances_at_max_iter_even_without_convergence():
-    """If max_iter_per_pair ticks elapse without convergence, the executor still
-    advances; this caps the rollout if a target is unreachable."""
+def test_settle_advances_past_intermediate_pair_at_max_iter(caplog):
+    """If max_iter_per_pair ticks elapse without convergence on an intermediate pair,
+    the executor warns and advances to the next pair."""
     s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
-    action = _base_action(dx=0.5)
     executor = SettleBaseMotion3DPlanExecutor(
         position_tolerance=1e-9, max_iter_per_pair=3
     )
-    executor.set_trajectory([(s0, action)])
+    executor.set_trajectory([(s0, _base_action(dx=0.5)), (s0, _base_action(dx=1.0))])
 
     for _ in range(3):
         executor.step(s0)
-    assert executor.done(s0) is True
+    with caplog.at_level(logging.WARNING):
+        assert executor.done(s0) is False
+    assert "gave up on pair 1/2" in caplog.text
+    assert "Advancing to the next pair" in caplog.text
+
+
+def test_settle_raises_at_max_iter_on_final_pair():
+    """Running out of ticks on the final pair raises ExecutionFailure."""
+    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
+    executor = SettleBaseMotion3DPlanExecutor(
+        position_tolerance=1e-9, max_iter_per_pair=3
+    )
+    executor.set_trajectory([(s0, _base_action(dx=0.5))])
+    for _ in range(3):
+        executor.step(s0)
+    with pytest.raises(ExecutionFailure, match="gave up on pair 1/1"):
+        executor.done(s0)
+
+
+def test_pure_pursuit_raises_when_tick_budget_exhausted():
+    """Pure pursuit raises ExecutionFailure once max_iter_per_pair * num_waypoints
+    ticks elapse without reaching the final waypoint (one pair flattens to two
+    waypoints: the start pose and the implied final pose)."""
+    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
+    executor = PurePursuitBaseMotion3DPlanExecutor(
+        position_tolerance=1e-9, max_iter_per_pair=2
+    )
+    executor.set_trajectory([(s0, _base_action(dx=0.5))])
+    for _ in range(4):
+        executor.step(s0)
+    with pytest.raises(ExecutionFailure, match="gave up after 4 ticks"):
+        executor.done(s0)
