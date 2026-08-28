@@ -208,4 +208,5 @@ pipelines:
           max_iter_total: 300
           gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
           lookahead: ${env.settle_arm_lookahead}
+          gripper_close_position: ${env.gripper_close_position}
         countdown_seconds: ${env.settle_countdown_seconds}
