@@ -96,3 +96,28 @@ def test_run_planner_omits_video_when_record_video_false(tmp_path: Path) -> None
     assert result.video_path is None
     assert not (tmp_path / "video.mp4").exists()
     assert result.trajectory_dir == tmp_path / "trajectory"
+
+
+@pytest.mark.parametrize("mode", ["sim", "fake"])
+def test_run_planner_with_magic_pick(mode: str) -> None:
+    """With Pick planned as a magic skill, the cylinder-shelf rollout runs end to end:
+    the SkillCall is carried out by a teleport in sim mode and by settling to the
+    predicted configuration in fake mode, and the planned place follows."""
+    overrides = [
+        "env=kinematic-cylinder-shelf3d-o1",
+        f"mode={mode}",
+        "max_eval_steps=1",
+        "seed=0",
+        "env.magic_skills=[Pick]",
+    ]
+    with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
+        cfg = compose(config_name="config", overrides=overrides)
+    result = run_planner(cfg)
+    assert result.steps == 1
+    if mode == "sim":
+        # The kinder env's goal check fires once the cylinder is on the shelf.
+        assert result.finish_reason == "terminated"
+    else:
+        assert result.finish_reason == "max_steps_reached"
+        robot = result.final_state.get_object_from_name("robot")
+        assert result.final_state.get(robot, "finger_state") == pytest.approx(0.0)

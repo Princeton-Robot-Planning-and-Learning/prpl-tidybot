@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from kinder_models.structs import SkillCall
 
 from prpl_tidybot.sim_env import KinderSimEnv
 
@@ -41,3 +42,22 @@ def test_step_returns_devectorized_state(env):
     assert isinstance(terminated, bool)
     assert isinstance(truncated, bool)
     assert isinstance(info, dict)
+
+
+def test_step_with_skill_call_teleports_to_predicted_state():
+    """A SkillCall action is carried out by teleporting the sim to the call's predicted
+    state, with no reward and no simulation."""
+    env = KinderSimEnv("kinder/PrplLab3D-o1-v0", allow_state_access=True)
+    try:
+        state, _ = env.reset(seed=0)
+        robot = state.get_object_from_name("robot")
+        predicted = state.copy()
+        predicted.set(robot, "pos_base_x", 1.5)
+        call = SkillCall("Pick", (robot,), np.array([0.8, 0.0]), predicted)
+        next_state, reward, terminated, truncated, _ = env.step(call)
+        assert next_state.get(robot, "pos_base_x") == pytest.approx(1.5)
+        assert reward == 0.0
+        assert terminated is False
+        assert truncated is False
+    finally:
+        env.close()

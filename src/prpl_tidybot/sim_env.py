@@ -15,6 +15,7 @@ from typing import Any, SupportsFloat
 import gymnasium
 import kinder
 from gymnasium.core import RenderFrame
+from kinder_models.structs import SkillCall
 from numpy.typing import NDArray
 from relational_structs import ObjectCentricState
 from relational_structs.spaces import ObjectCentricBoxSpace
@@ -60,8 +61,14 @@ class KinderSimEnv(
         return self._obs_space.devectorize(obs_vec), info
 
     def step(
-        self, action: NDArray
+        self, action: NDArray | SkillCall[ObjectCentricState]
     ) -> tuple[ObjectCentricState, SupportsFloat, bool, bool, dict[str, Any]]:
+        if isinstance(action, SkillCall):
+            # A magic skill is carried out in sim by teleporting to the
+            # state its option model predicted; nothing is simulated.
+            self.set_state(action.predicted_state)
+            inner = self._inner_env
+            return inner.get_state(), 0.0, bool(inner.goal_reached()), False, {}
         obs_vec, reward, terminated, truncated, info = self._env.step(action)
         return (
             self._obs_space.devectorize(obs_vec),
@@ -79,10 +86,16 @@ class KinderSimEnv(
 
         Requires the env to be constructed with `allow_state_access=True`
         (see the sim pipeline yaml). Used by the recording layer to
-        render the agent's perceived state on a shadow sim.
+        render the agent's perceived state on a shadow sim, and by `step`
+        to carry out a `SkillCall`.
         """
-        self._env.unwrapped._object_centric_env.set_state(  # type: ignore[attr-defined]  # pylint: disable=protected-access
-            state
+        self._inner_env.set_state(state)
+
+    @property
+    def _inner_env(self) -> Any:
+        """The object-centric kinder env behind gymnasium's wrappers."""
+        return (
+            self._env.unwrapped._object_centric_env  # type: ignore[attr-defined]  # pylint: disable=protected-access
         )
 
     def close(self) -> None:

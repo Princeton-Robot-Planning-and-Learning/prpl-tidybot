@@ -3,9 +3,11 @@
 For fake / real backends, compose a `RealTidyBotEnv`, a kinematic3d
 perceiver (`PrplLab3DPerceiver` or `BaseMotion3DPerceiver`),
 `Kinematic3DPlanExecutor` (which dispatches per-segment to a
-`BaseMotion3DPlanExecutor` subclass for base motion and to an
+`BaseMotion3DPlanExecutor` subclass for base motion, to an
 `ArmMotion3DPlanExecutor` subclass — currently
-`StreamingArmMotion3DPlanExecutor` — for arm/gripper motion), and a
+`StreamingArmMotion3DPlanExecutor` — for arm/gripper motion, and to a
+gap executor such as `SettleGapExecutor` for the `SkillCall` a magic
+skill leaves in the plan), and a
 `prpl_utils.planning_agent.PlanningAgent` with
 `prpl_utils.real_sim.Runner`. For sim, swap in `KinderSimEnv` plus
 `PassThroughPerceiver` / `PassThroughPlanExecutor` — the env already
@@ -40,6 +42,7 @@ from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
     PurePursuitBaseMotion3DPlanExecutor,
     SettleBaseMotion3DPlanExecutor,
 )
+from prpl_tidybot.real_sim.plan_executors.gap import SettleGapExecutor
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import (
     Kinematic3DPlanExecutor,
 )
@@ -96,6 +99,7 @@ __all__ = [
     "PassThroughPlanExecutor",
     "PrplLab3DPerceiver",
     "PurePursuitBaseMotion3DPlanExecutor",
+    "SettleGapExecutor",
     "SettleBaseMotion3DPlanExecutor",
     "StreamingArmMotion3DPlanExecutor",
     "build_planner_env_models",

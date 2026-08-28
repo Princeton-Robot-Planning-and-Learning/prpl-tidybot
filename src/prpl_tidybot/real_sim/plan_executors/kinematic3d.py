@@ -19,6 +19,12 @@ each segment to the appropriate sub-executor:
   is set without one configured. This avoids silently importing
   pybullet (needed to construct the streaming arm executor's distance
   function) for base-only callers.
+* magic segments — a single ``SkillCall`` pair standing in for a skill
+  the planner did not simulate — → a ``gap_executor`` (e.g.
+  :class:`SettleGapExecutor`), which decides how the skill is actually
+  carried out. Like the arm executor it must be wired in explicitly;
+  a trajectory containing a ``SkillCall`` raises
+  :class:`NotImplementedError` when no gap executor is configured.
 
 The dispatcher takes the sub-executors as constructor arguments so
 Hydra can instantiate the desired concrete classes directly via
@@ -28,8 +34,10 @@ Hydra can instantiate the desired concrete classes directly via
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Sequence
 
 import numpy as np
+from kinder_models.structs import SkillCall
 from numpy.typing import NDArray
 from prpl_utils.real_sim import PlanExecutor
 from relational_structs import ObjectCentricState
@@ -41,52 +49,60 @@ from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
 )
 from prpl_tidybot.structs import TidyBotAction
 
+# A planned action: a kinder 11-d delta, or a SkillCall marking a magic gap.
+SimAction = NDArray[np.floating] | SkillCall[ObjectCentricState]
+
 _BASE_MOTION_EPS = 1e-4
 _ARM_MOTION_EPS = 1e-4
 
 
 @dataclass
 class _Segment:
-    """A maximal run of (state, action) pairs that all move the same component.
+    """A maximal run of (state, action) pairs handled by one sub-executor.
 
-    ``kind`` is ``"base"`` (each pair has nontrivial base motion only) or
+    ``kind`` is ``"base"`` (each pair has nontrivial base motion only),
     ``"arm"`` (each pair has no base motion; arm and/or gripper may
-    move). Pairs that move neither also land in ``"arm"`` — they would
-    fall through to the arm sub-executor's NotImplementedError, but the
-    planner does not produce such pairs in practice.
+    move), or ``"magic"`` (exactly one ``SkillCall`` pair; consecutive
+    calls form separate segments). Pairs that move neither base nor arm
+    land in ``"arm"`` — they would fall through to the arm sub-executor's
+    NotImplementedError, but the planner does not produce such pairs in
+    practice.
     """
 
     kind: str
-    pairs: list[tuple[ObjectCentricState, NDArray[np.floating]]]
+    pairs: list[tuple[ObjectCentricState, Any]]
 
 
 class Kinematic3DPlanExecutor(
-    PlanExecutor[NDArray[np.floating], TidyBotAction, ObjectCentricState]
+    PlanExecutor[SimAction, TidyBotAction, ObjectCentricState]
 ):
-    """Dispatch a kinematic3d trajectory between base and arm sub-executors."""
+    """Dispatch a kinematic3d trajectory between base, arm, and gap sub-executors."""
 
     def __init__(
         self,
         base_executor: BaseMotion3DPlanExecutor | None = None,
         arm_executor: ArmMotion3DPlanExecutor | None = None,
+        gap_executor: (
+            PlanExecutor[SimAction, TidyBotAction, ObjectCentricState] | None
+        ) = None,
     ) -> None:
         self._base_executor = base_executor or PurePursuitBaseMotion3DPlanExecutor()
         self._arm_executor = arm_executor
+        self._gap_executor = gap_executor
         self._segments: list[_Segment] = []
         self._segment_idx: int = 0
-        self._active: (
-            PlanExecutor[NDArray[np.floating], TidyBotAction, ObjectCentricState] | None
-        ) = None
+        self._active: PlanExecutor[Any, TidyBotAction, ObjectCentricState] | None = None
         self._done_latched: bool = False
 
     # ------------------------------------------------------------------ Public
 
     def set_trajectory(
         self,
-        trajectory: list[tuple[ObjectCentricState, NDArray[np.floating]]],
+        trajectory: Sequence[tuple[ObjectCentricState, SimAction]],
     ) -> None:
         for _, action in trajectory:
-            _validate_no_mixed_motion(action)
+            if not isinstance(action, SkillCall):
+                _validate_no_mixed_motion(action)
         self._segments = _build_segments(trajectory)
         self._segment_idx = 0
         self._done_latched = False
@@ -94,9 +110,7 @@ class Kinematic3DPlanExecutor(
         if self._segments:
             self._load_current_segment()
 
-    def step(
-        self, sim_state: ObjectCentricState
-    ) -> tuple[TidyBotAction, NDArray[np.floating]]:
+    def step(self, sim_state: ObjectCentricState) -> tuple[TidyBotAction, SimAction]:
         if self._done_latched or self._segment_idx >= len(self._segments):
             raise RuntimeError(
                 "Kinematic3DPlanExecutor.step called after the trajectory finished"
@@ -127,6 +141,15 @@ class Kinematic3DPlanExecutor(
         segment = self._segments[self._segment_idx]
         if segment.kind == "base":
             self._active = self._base_executor
+        elif segment.kind == "magic":
+            if self._gap_executor is None:
+                raise NotImplementedError(
+                    "Kinematic3DPlanExecutor reached a SkillCall (magic skill) but "
+                    "no gap_executor was configured. Pass a gap executor (e.g. "
+                    "SettleGapExecutor) to the constructor or the Hydra "
+                    "plan_executor config."
+                )
+            self._active = self._gap_executor
         else:
             if self._arm_executor is None:
                 raise NotImplementedError(
@@ -165,20 +188,26 @@ def _validate_no_mixed_motion(action: NDArray[np.floating]) -> None:
 
 
 def _build_segments(
-    trajectory: list[tuple[ObjectCentricState, NDArray[np.floating]]],
+    trajectory: Sequence[tuple[ObjectCentricState, SimAction]],
 ) -> list[_Segment]:
     """Split into maximal runs of same-kind pairs.
 
-    A pair is ``"base"`` if any base-delta component is nontrivial,
-    otherwise ``"arm"``. The validator in
+    A ``SkillCall`` pair is ``"magic"`` and always forms its own segment.
+    Otherwise a pair is ``"base"`` if any base-delta component is
+    nontrivial and ``"arm"`` if not. The validator in
     :meth:`Kinematic3DPlanExecutor.set_trajectory` already rejects pairs
     that move both groups, so the classification is unambiguous.
     """
     segments: list[_Segment] = []
     current: _Segment | None = None
     for state, action in trajectory:
-        kind = "base" if np.any(np.abs(action[0:3]) > _BASE_MOTION_EPS) else "arm"
-        if current is None or current.kind != kind:
+        if isinstance(action, SkillCall):
+            kind = "magic"
+        elif np.any(np.abs(action[0:3]) > _BASE_MOTION_EPS):
+            kind = "base"
+        else:
+            kind = "arm"
+        if current is None or current.kind != kind or kind == "magic":
             if current is not None:
                 segments.append(current)
             current = _Segment(kind=kind, pairs=[])
