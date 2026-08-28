@@ -9,6 +9,7 @@ NotImplementedError surface is covered in test_arm_motion3d.py.
 
 import numpy as np
 import pytest
+from kinder_models.structs import SkillCall
 from spatialmath import SE2
 
 from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
@@ -161,3 +162,76 @@ def test_done_is_sticky():
     assert executor.done(_make_state(base_xytheta=(1.0, 0.0, 0.0))) is True
     # Drifted reading would have undone done() pre-latch.
     assert executor.done(_make_state(base_xytheta=(0.9, 0.0, 0.0))) is True
+
+
+# ---------------------------------------------------------------------------
+# Magic (SkillCall) segments
+# ---------------------------------------------------------------------------
+
+
+class _RecordingGapExecutor:
+    """Gap executor stub that records what it was handed and finishes at once."""
+
+    def __init__(self) -> None:
+        self.trajectories: list = []
+
+    def set_trajectory(self, trajectory) -> None:
+        """Record the handed-over pairs."""
+        self.trajectories.append(list(trajectory))
+
+    def step(self, sim_state):
+        """Never reached: the gap reports done before any tick."""
+        raise AssertionError(f"step should not be called (state={sim_state})")
+
+    def done(self, sim_state) -> bool:
+        """Finish immediately."""
+        del sim_state
+        return True
+
+
+def _skill_call(state) -> SkillCall:
+    robot = state.get_object_from_name("robot")
+    return SkillCall("Pick", (robot,), np.array([0.8, 0.0]), state)
+
+
+def test_skill_call_pair_is_routed_to_gap_executor():
+    """A SkillCall pair forms a magic segment handled by the gap executor, and the
+    trajectory continues with the surrounding base segments."""
+    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
+    s1 = _make_state(base_xytheta=(1.0, 0.0, 0.0))
+    gap = _RecordingGapExecutor()
+    executor = Kinematic3DPlanExecutor(
+        base_executor=PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3),
+        gap_executor=gap,
+    )
+    call = _skill_call(s1)
+    executor.set_trajectory(
+        [(s0, _base_action(dx=1.0)), (s1, call), (s1, _base_action(dx=1.0))]
+    )
+    # Base segment first; the gap has not been loaded yet.
+    assert not gap.trajectories
+    assert not executor.done(s0)
+    # Base arrives: the gap loads and (being done at once) yields to the
+    # trailing base segment.
+    assert not executor.done(s1)
+    assert gap.trajectories == [[(s1, call)]]
+    assert executor.done(_make_state(base_xytheta=(2.0, 0.0, 0.0)))
+
+
+def test_consecutive_skill_calls_are_separate_segments():
+    """Each SkillCall is its own gap, even when two are adjacent in the plan."""
+    s0 = _make_state()
+    gap = _RecordingGapExecutor()
+    executor = Kinematic3DPlanExecutor(gap_executor=gap)
+    first, second = _skill_call(s0), _skill_call(s0)
+    executor.set_trajectory([(s0, first), (s0, second)])
+    assert executor.done(s0)
+    assert gap.trajectories == [[(s0, first)], [(s0, second)]]
+
+
+def test_skill_call_without_gap_executor_raises():
+    """A magic segment with no gap executor configured is a clear error."""
+    s0 = _make_state()
+    executor = Kinematic3DPlanExecutor()
+    with pytest.raises(NotImplementedError, match="gap_executor"):
+        executor.set_trajectory([(s0, _skill_call(s0))])

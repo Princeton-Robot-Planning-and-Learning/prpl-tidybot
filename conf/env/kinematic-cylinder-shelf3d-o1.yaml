@@ -13,6 +13,7 @@ make_kwargs:
 # (2.0, 2.4, 0.02) and the planner would emit base motion to the wrong place.
 env_model_kwargs:
   num_objects: 1
+  magic_skills: ${env.magic_skills}
   config:
     _target_: kinder.envs.kinematic3d.cylinder_shelf3d.CylinderShelf3DEnvConfig
     shelf_pose:
@@ -26,6 +27,13 @@ env_model_kwargs:
     # tall opening above the bottom board; the Pringles can (taller than a
     # regular board gap) is placed there.
     shelf_omitted_layers: [1]
+
+# Skills planned as "magic": their low-level policy is not simulated. The
+# planner records a SkillCall carrying the skill's predicted outcome, and
+# the pipeline's gap executor carries the skill out at execution time (a
+# teleport in sim mode; settling the robot to the predicted configuration
+# in fake mode). Override on the CLI with `env.magic_skills=[Pick]`.
+magic_skills: []
 
 # The physical cylinder: a Pringles can. Threaded into both the perceiver
 # and the env config above so the perceived state and the planner's
@@ -118,6 +126,13 @@ pipelines:
         max_iter_total: 300
         gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
         lookahead: ${env.arm_lookahead}
+      # Handles the SkillCall left by a magic skill: drives the base and
+      # arm to the skill's predicted configuration with the same
+      # sub-executor types as above (instantiated separately).
+      gap_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.gap.SettleGapExecutor
+        base_executor: ${env.pipelines.fake.plan_executor.base_executor}
+        arm_executor: ${env.pipelines.fake.plan_executor.arm_executor}
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv
