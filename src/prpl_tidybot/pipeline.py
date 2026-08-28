@@ -20,6 +20,7 @@ from relational_structs import ObjectCentricState
 
 from prpl_tidybot.preview import planned_trajectory_from_agent, preview_or_abort
 from prpl_tidybot.real_sim import build_planner_env_models
+from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.recording import RecordingPerceiver, TrajectoryRecorder
 
 _logger = logging.getLogger(__name__)
@@ -33,6 +34,8 @@ class RolloutSummary:
     mode: str
     seed: int
     steps: int
+    # "terminated", "truncated", "max_steps_reached", "agent_failure: ...",
+    # or "executor_failure: ..." (an executor gave up before its target).
     finish_reason: str
     total_reward: float
     final_state: ObjectCentricState
@@ -205,6 +208,13 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
                 # natural rollout end (the fake has no goal-detection to
                 # terminate the env).
                 finish_reason = f"agent_failure: {e}"
+                break
+            except ExecutionFailure as e:
+                # An executor ran out of ticks before reaching its target. The
+                # rest of the plan assumes that target was reached, so stop
+                # here; the robot holds its last commanded target.
+                _logger.warning("Rollout stopped: %s", e)
+                finish_reason = f"executor_failure: {e}"
                 break
             steps += 1
             total_reward += float(reward)

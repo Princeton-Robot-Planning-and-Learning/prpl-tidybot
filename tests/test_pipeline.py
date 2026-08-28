@@ -12,6 +12,8 @@ import pytest
 from hydra import compose, initialize_config_dir
 
 from prpl_tidybot.pipeline import run_planner
+from prpl_tidybot.real_sim.plan_executors import base_motion3d
+from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
 
@@ -122,3 +124,20 @@ def test_run_planner_with_magic_grasp(mode: str) -> None:
         assert result.finish_reason == "max_steps_reached"
         robot = result.final_state.get_object_from_name("robot")
         assert result.final_state.get(robot, "finger_state") == pytest.approx(0.0)
+
+
+def test_run_planner_reports_executor_failure(monkeypatch) -> None:
+    """An executor that gives up ends the rollout with an executor_failure reason
+    rather than continuing the plan."""
+
+    def _give_up(self, sim_state):
+        del self, sim_state
+        raise ExecutionFailure("base gave up")
+
+    monkeypatch.setattr(
+        base_motion3d.PurePursuitBaseMotion3DPlanExecutor, "done", _give_up
+    )
+    cfg = _compose("base_motion3d", "fake", max_eval_steps=5)
+    result = run_planner(cfg)
+    assert result.finish_reason == "executor_failure: base gave up"
+    assert result.steps == 0

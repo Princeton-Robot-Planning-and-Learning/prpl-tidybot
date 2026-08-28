@@ -33,6 +33,7 @@ and feeds each homogeneous segment to the appropriate sub-executor.
 from __future__ import annotations
 
 import abc
+import logging
 from typing import Callable
 
 import numpy as np
@@ -41,7 +42,10 @@ from prpl_utils.real_sim import PlanExecutor
 from relational_structs import ObjectCentricState
 from spatialmath import SE2
 
+from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.structs import TidyBotAction
+
+_logger = logging.getLogger(__name__)
 
 JointPositions = list[float]
 # Matches pybullet-helpers' create_joint_distance_fn return type. list (not
@@ -119,6 +123,12 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
     visited it. With waypoints intended as via-points (obstacle
     avoidance, etc.), that gap is what guarantees the via-point is
     actually reached.
+
+    If ``max_iter_total`` ticks elapse before the final waypoint is
+    reached, :meth:`done` logs a warning with the remaining distances and
+    raises :class:`ExecutionFailure` rather than reporting the segment
+    complete, so the rest of the plan does not run from a configuration it
+    was not refined for.
 
     The base + gripper components of the commanded ``TidyBotAction``
     hold at the perceived state for arm pairs that don't move them
@@ -234,8 +244,18 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             self._done_latched = True
             return True
         if self._tick_count >= self._max_iter_total:
-            self._done_latched = True
-            return True
+            perceived = _perceived_joints(sim_state, self._robot_name)
+            to_cursor = self._distance_fn(perceived, self._targets[self._cursor])
+            to_final = self._distance_fn(perceived, self._targets[-1])
+            message = (
+                f"{type(self).__name__} gave up after {self._tick_count} ticks: "
+                f"cursor at waypoint {self._cursor + 1}/{len(self._targets)}, "
+                f"distance {to_cursor:.3f} to the cursor target (advance_radius "
+                f"{self._advance_radius}), {to_final:.3f} to the final target "
+                f"(arrival_tolerance {self._arrival_tolerance})."
+            )
+            _logger.warning(message)
+            raise ExecutionFailure(message)
         # Require the cursor to have reached the last waypoint before declaring
         # done. Without this guard, done() returns True immediately when the
         # final target (the retract/home position) happens to equal the robot's

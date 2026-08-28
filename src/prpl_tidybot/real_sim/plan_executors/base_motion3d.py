@@ -26,6 +26,7 @@ and feeds each homogeneous segment to the appropriate sub-executor.
 from __future__ import annotations
 
 import abc
+import logging
 import math
 from dataclasses import dataclass
 
@@ -35,7 +36,10 @@ from prpl_utils.real_sim import PlanExecutor
 from relational_structs import ObjectCentricState
 from spatialmath import SE2
 
+from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.structs import TidyBotAction
+
+_logger = logging.getLogger(__name__)
 
 _BASE_MOTION_EPS = 1e-4
 _ARM_MOTION_EPS = 1e-4
@@ -104,7 +108,10 @@ class SettleBaseMotion3DPlanExecutor(BaseMotion3DPlanExecutor):
     tick of each pair and reissues the same target every tick until
     either the perceived base lands within
     ``position_tolerance`` / ``angle_tolerance`` of it, or
-    ``max_iter_per_pair`` ticks elapse. Then advances to the next pair.
+    ``max_iter_per_pair`` ticks elapse. Then advances to the next pair,
+    logging a warning when it was the tick budget rather than convergence;
+    running out of ticks on the final pair raises :class:`ExecutionFailure`
+    instead.
     """
 
     def __init__(
@@ -154,10 +161,36 @@ class SettleBaseMotion3DPlanExecutor(BaseMotion3DPlanExecutor):
             exhausted = self._tick_on_pair >= self._max_iter_per_pair
             if not (converged or exhausted):
                 return False
+            if exhausted and not converged:
+                error = self._describe_error(sim_state, self._cached_target)
+                message = (
+                    f"{type(self).__name__} gave up on pair "
+                    f"{self._pair_idx + 1}/{len(self._pairs)} after "
+                    f"{self._tick_on_pair} ticks: {error}."
+                )
+                if self._pair_idx == len(self._pairs) - 1:
+                    _logger.warning(message)
+                    raise ExecutionFailure(message)
+                _logger.warning("%s Advancing to the next pair.", message)
             self._pair_idx += 1
             self._tick_on_pair = 0
             self._cached_target = None
         return True
+
+    def _describe_error(
+        self, sim_state: ObjectCentricState, target: TidyBotAction
+    ) -> str:
+        robot = sim_state.get_object_from_name(self._robot_name)
+        goal = target.base_pose_target_map
+        dx = sim_state.get(robot, "pos_base_x") - goal.x
+        dy = sim_state.get(robot, "pos_base_y") - goal.y
+        angle_err = abs(
+            _wrap_angle(sim_state.get(robot, "pos_base_rot") - goal.theta())
+        )
+        return (
+            f"{math.hypot(dx, dy):.3f} m (tolerance {self._position_tolerance}) and "
+            f"{angle_err:.3f} rad (tolerance {self._angle_tolerance}) from the target"
+        )
 
     def _ground_target(
         self,
@@ -279,16 +312,22 @@ class PurePursuitBaseMotion3DPlanExecutor(BaseMotion3DPlanExecutor):
             return True
         if self._done_latched:
             return True
-        if self._tick_count >= self._max_iter_per_pair * len(self._waypoints):
-            self._done_latched = True
-            return True
         robot = sim_state.get_object_from_name(self._robot_name)
         final = self._waypoints[-1]
         dx = sim_state.get(robot, "pos_base_x") - final.x
         dy = sim_state.get(robot, "pos_base_y") - final.y
+        angle_err = abs(_wrap_angle(sim_state.get(robot, "pos_base_rot") - final.theta))
+        if self._tick_count >= self._max_iter_per_pair * len(self._waypoints):
+            message = (
+                f"{type(self).__name__} gave up after {self._tick_count} ticks: "
+                f"{math.hypot(dx, dy):.3f} m (tolerance {self._position_tolerance}) "
+                f"and {angle_err:.3f} rad (tolerance {self._angle_tolerance}) from "
+                f"the final waypoint."
+            )
+            _logger.warning(message)
+            raise ExecutionFailure(message)
         if math.hypot(dx, dy) > self._position_tolerance:
             return False
-        angle_err = abs(_wrap_angle(sim_state.get(robot, "pos_base_rot") - final.theta))
         if angle_err > self._angle_tolerance:
             return False
         self._done_latched = True
