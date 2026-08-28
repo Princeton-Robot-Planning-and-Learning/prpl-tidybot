@@ -37,9 +37,14 @@ agent:
 # mp4 from those frames at the end of the rollout. The shadow sim is the
 # env's own sim pipeline (`cfg.env.pipelines.sim.real_env`), re-instantiated
 # alongside the active real_env regardless of which mode the run is in.
+# The shadow render at the end of the rollout is the slow part (one pybullet
+# render per tick), so the video is a gist: at most `record.max_frames`
+# ticks are rendered (strided, first and last always kept) and played back
+# at `record.fps`. Set `record.max_frames=null` to render every tick.
 record:
   video: false
   fps: 10
+  max_frames: 100
 
 # Plan preview gate. When true and `mode=real`, after the agent finishes
 # planning (and before the executor starts driving the real env), the

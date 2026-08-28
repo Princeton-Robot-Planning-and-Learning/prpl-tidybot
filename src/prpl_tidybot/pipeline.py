@@ -93,6 +93,9 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
             compose_video=(
                 bool(record_cfg.get("video")) if record_cfg is not None else False
             ),
+            max_frames=(
+                record_cfg.get("max_frames", 100) if record_cfg is not None else 100
+            ),
         )
         perceiver = RecordingPerceiver(perceiver, recorder)
 
@@ -212,6 +215,12 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
                 finish_reason = "truncated"
                 break
 
+        _logger.info(
+            "Rollout finished after %d step(s) (%s)%s.",
+            steps,
+            finish_reason,
+            "; finishing the recording" if recorder is not None else "",
+        )
         trajectory_dir = recorder.trajectory_dir if recorder is not None else None
         video_path = recorder.finish() if recorder is not None else None
 

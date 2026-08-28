@@ -1,4 +1,5 @@
-"""Mp4 encoding shared by the plan preview and the trajectory recorder.
+"""Mp4 encoding and frame subsampling shared by the plan preview and the
+trajectory recorder.
 
 `cv2.VideoWriter` writes the file directly, which is markedly faster for
 short clips than going through moviepy's Python-side ffmpeg wrapper —
@@ -8,6 +9,7 @@ the encode used to be a visible chunk of the operator's wait for
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import cv2 as cv
@@ -48,3 +50,24 @@ def write_mp4(frames_rgb: list[np.ndarray], out_path: Path, fps: int) -> None:
             writer.write(cv.cvtColor(frame, cv.COLOR_RGB2BGR))
     finally:
         writer.release()
+
+
+def subsample_indices(
+    num_frames: int, max_frames: int | None, keep: set[int] | None = None
+) -> list[int]:
+    """Indices to render: a stride over all frames plus every index in `keep`.
+
+    With ``max_frames=None`` or ``num_frames <= max_frames`` every index is
+    returned. Otherwise the stride yields at most ``max_frames`` indices and the
+    kept indices (always including the first and last) are merged in, so the
+    result may exceed ``max_frames`` by the size of ``keep``.
+    """
+    if num_frames <= 0:
+        return []
+    if max_frames is None or num_frames <= max_frames:
+        return list(range(num_frames))
+    if max_frames < 1:
+        raise ValueError(f"max_frames must be positive, got {max_frames}.")
+    stride = math.ceil(num_frames / max_frames)
+    must_keep = {0, num_frames - 1} | (keep or set())
+    return sorted(set(range(0, num_frames, stride)) | must_keep)
