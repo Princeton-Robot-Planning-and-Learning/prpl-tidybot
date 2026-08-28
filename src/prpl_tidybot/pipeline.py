@@ -18,7 +18,7 @@ from omegaconf import DictConfig
 from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
-from prpl_tidybot.preview import planned_states_from_agent, preview_or_abort
+from prpl_tidybot.preview import planned_trajectory_from_agent, preview_or_abort
 from prpl_tidybot.real_sim import build_planner_env_models
 from prpl_tidybot.recording import RecordingPerceiver, TrajectoryRecorder
 
@@ -152,8 +152,9 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
         finish_reason = "max_steps_reached"
 
         # Optional plan-preview gate. Render the agent's planned trajectory
-        # through a shadow sim into preview.mp4 under the log dir and prompt
-        # the operator before any real motion is commanded. Rejection raises
+        # through a shadow sim into preview.mp4 under the log dir (with any
+        # magic-skill gaps marked) and prompt the operator before any real
+        # motion is commanded. Rejection raises
         # AgentFailure, which the main loop's existing handler treats as a
         # clean rollout end (the executor never gets a chance to step). Gated
         # on `cfg.mode == "real"` even when enabled — sim / fake / test runs
@@ -165,9 +166,11 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
             and cfg.mode == "real"
             and resolved_log_dir is not None
         ):
+            planned_states, planned_actions = planned_trajectory_from_agent(agent)
             try:
                 preview_or_abort(
-                    planned_states=planned_states_from_agent(agent),
+                    planned_states=planned_states,
+                    planned_actions=planned_actions,
                     shadow_sim=shadow_sim,
                     log_dir=resolved_log_dir,
                     seed=cfg.seed,
