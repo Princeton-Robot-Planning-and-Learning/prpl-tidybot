@@ -23,6 +23,8 @@ import numpy as np
 from prpl_utils.structs import Image
 from relational_structs import ObjectCentricState
 
+from prpl_tidybot.third_party.cameras import KinovaCamera
+
 
 class ImageSource(Protocol):
     """Anything that can produce the current wrist image."""
@@ -56,10 +58,6 @@ class KinovaWristCameraSource:
     def get_image(self) -> Image | None:
         """The latest wrist frame, opening the stream on first use."""
         if self._camera is None:
-            from prpl_tidybot.third_party.cameras import (  # pylint: disable=import-outside-toplevel
-                KinovaCamera,
-            )
-
             self._camera = KinovaCamera()  # type: ignore[no-untyped-call]
         image = self._camera.get_image()
         return None if image is None else np.asarray(image, dtype=np.uint8)

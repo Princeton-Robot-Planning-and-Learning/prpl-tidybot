@@ -25,6 +25,10 @@ from pybullet_helpers.inverse_kinematics import (
 )
 from pybullet_helpers.robots.single_arm import SingleArmPyBulletRobot
 
+from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+    create_kinova_robot,
+)
+
 JointPositions = list[float]
 
 _AXES = {"x": 0, "y": 1, "z": 2}
@@ -38,15 +42,7 @@ class ToolFrameStepper:
     """FK / IK helper for tool-frame translations of the 7-DOF Kinova arm."""
 
     def __init__(self, robot: SingleArmPyBulletRobot | None = None) -> None:
-        if robot is None:
-            # Imported here: the plan-executor package imports this module, so a
-            # module-level import would be circular.
-            from prpl_tidybot.real_sim.plan_executors.distance_factories import (  # pylint: disable=import-outside-toplevel
-                create_kinova_robot,
-            )
-
-            robot = create_kinova_robot()
-        self._robot = robot
+        self._robot = robot or create_kinova_robot()
 
     def end_effector_pose(self, joints: Sequence[float]) -> Pose:
         """Tool pose (arm-base frame) at `joints`."""

@@ -30,12 +30,14 @@ from typing import Any
 
 import cv2 as cv
 import numpy as np
+from kinder.envs.kinematic3d.cylinder_shelf3d import ObjectCentricCylinderShelf3DEnv
 
 from prpl_tidybot.visual_servo.cylinder_edges import (
     EdgeDetectorParams,
     detect_cylinder_edges,
     render_edge_overlay,
 )
+from prpl_tidybot.visual_servo.image_sources import KinovaWristCameraSource
 
 
 def _parse_params(overrides: list[str]) -> EdgeDetectorParams:
@@ -52,10 +54,6 @@ def _parse_params(overrides: list[str]) -> EdgeDetectorParams:
 
 
 def _load_image_from_state(state_path: Path) -> np.ndarray:
-    from kinder.envs.kinematic3d.cylinder_shelf3d import (  # pylint: disable=import-outside-toplevel
-        ObjectCentricCylinderShelf3DEnv,
-    )
-
     with open(state_path, "rb") as f:
         state = pickle.load(f)
     env = ObjectCentricCylinderShelf3DEnv(num_cylinders=1, allow_state_access=True)
@@ -101,10 +99,6 @@ def main() -> int:
     params = _parse_params(args.param)
 
     if args.camera:
-        from prpl_tidybot.visual_servo.image_sources import (  # pylint: disable=import-outside-toplevel
-            KinovaWristCameraSource,
-        )
-
         camera = KinovaWristCameraSource()
         out = args.out or Path("cylinder_edges.png")
         try:

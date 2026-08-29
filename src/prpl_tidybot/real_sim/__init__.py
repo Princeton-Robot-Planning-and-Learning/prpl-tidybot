@@ -52,9 +52,6 @@ from prpl_tidybot.real_sim.plan_executors.kinematic3d import (
 from prpl_tidybot.real_sim.plan_executors.passthrough import (
     PassThroughPlanExecutor,
 )
-from prpl_tidybot.real_sim.plan_executors.visual_servo import (
-    CylinderVisualServoGapExecutor,
-)
 
 
 def build_planner_env_models(
@@ -99,7 +96,6 @@ __all__ = [
     "ArmMotion3DPlanExecutor",
     "BaseMotion3DPerceiver",
     "BaseMotion3DPlanExecutor",
-    "CylinderVisualServoGapExecutor",
     "Kinematic3DPlanExecutor",
     "KinematicRobotPerceiverBase",
     "PassThroughPerceiver",
