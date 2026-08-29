@@ -17,6 +17,7 @@ make_kwargs:
 env_model_kwargs:
   num_objects: ${env.num_cylinders}
   magic_skills: ${env.magic_skills}
+  place_params: ${pluck:place,${env.cylinders}}
   config:
     _target_: kinder.envs.kinematic3d.cylinder_shelf3d.CylinderShelf3DEnvConfig
     shelf_pose:
@@ -32,6 +33,13 @@ env_model_kwargs:
     # tall opening above the bottom board; the Pringles can (taller than a
     # regular board gap) is placed there.
     shelf_omitted_layers: [1]
+    # Where the base motion planner may put the base (it samples poses
+    # uniformly inside this box; the default is +-10 m). The map frame is
+    # centred on the 6 x 6 tiles of 2 ft floor, so the floor edge is at
+    # +-1.83 m; this keeps the sampled waypoints on the tiles, with room
+    # for the place staging pose next to the shelf (x up to ~1.65).
+    robot_base_pose_lower_bound: ${env.base_pose_lower_bound}
+    robot_base_pose_upper_bound: ${env.base_pose_upper_bound}
 
 # Skills planned as "magic": their low-level policy is not simulated. The
 # planner records a SkillCall carrying the skill's predicted outcome, and
@@ -47,8 +55,23 @@ magic_skills: []
 # cylinder1, ...). Each entry gives the ArUco marker taped flat on the
 # floor under it (real mode; print them from
 # conf/calibration/cylinder_markers.pdf), its radius and height in metres,
-# and where fake mode pretends it stands (fake_xy; the centre height is
-# derived from the height). Sim mode samples its own cylinder poses.
+# where fake mode pretends it stands (fake_xy; the centre height is
+# derived from the height), and how the planner places it on the shelf
+# (place). Sim mode samples its own cylinder poses.
+#
+# place is [x, y, base_distance]: the cylinder's resting spot relative to
+# the shelf (x along the shelf's width from its centre, y along its depth
+# from 5 cm in front of its centre, positive = deeper in) and how far
+# back the base stands for the place. With all three given the Place
+# skill has nothing left to sample, so planning gets by with one abstract
+# plan and one sample per step (`agent.max_abstract_plans=1
+# agent.samples_per_step=1` on the CLI, ~1 s instead of ~10 s); [x, y]
+# alone leaves the base distance to the sampler, and null samples
+# everything.
+# Keep |x| < 0.15 (the OnFixture predicate's tolerance about the shelf
+# centre) and y <= 0 (deeper spots are unreachable: the held cylinder
+# hits the board above). The base distance must be >= 0.84 for the short
+# can and >= 0.80 for the tall ones; 0.86 works for all three.
 #
 # Staging protocol (real mode): every marker must be visible when the
 # rollout starts — the perceiver reads all of them once at reset (a
@@ -56,11 +79,27 @@ magic_skills: []
 # the cylinders are set down on their markers during the preview pause.
 # Covering the markers afterwards is fine; nothing re-queries them.
 cylinders:
-  - {marker_id: 35, radius: 0.039, height: 0.233, fake_xy: [0.5, 0.0]} # tall Pringles can
-  - {marker_id: 36, radius: 0.039, height: 0.120, fake_xy: [0.3, 0.6]} # short Pringles can
-  - {marker_id: 37, radius: 0.040, height: 0.210, fake_xy: [0.3, -0.6]} # Lysol can
+  # tall Pringles can
+  - {marker_id: 35, radius: 0.039, height: 0.233, fake_xy: [0.5, 0.0], place: [-0.12, -0.05, 0.86]}
+  # short Pringles can
+  - {marker_id: 36, radius: 0.039, height: 0.120, fake_xy: [0.3, 0.6], place: [0.0, -0.05, 0.86]}
+  # Lysol can
+  - {marker_id: 37, radius: 0.040, height: 0.210, fake_xy: [0.3, -0.6], place: [0.12, -0.05, 0.86]}
 # Radius the simulator uses for every cylinder (see env_model_kwargs).
 sim_cylinder_radius: 0.039
+
+# Base motion planning box (see env_model_kwargs.config): SE2 poses the
+# base motion planner is allowed to sample. Rotation bounds are +-pi.
+base_pose_lower_bound:
+  _target_: pybullet_helpers.geometry.SE2Pose
+  x: -1.5
+  y: -1.5
+  rot: -3.141592653589793
+base_pose_upper_bound:
+  _target_: pybullet_helpers.geometry.SE2Pose
+  x: 1.7
+  y: 1.5
+  rot: 3.141592653589793
 
 # Static shelf pose threaded into the perceiver. Matches the value used for
 # the Shelf3D env so the same physical shelf staging works for both;
