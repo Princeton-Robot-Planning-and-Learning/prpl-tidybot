@@ -48,7 +48,10 @@ class EdgeDetectorParams:
     per-row background interpolated between the margins by more than
     ``min_brightness_contrast`` in most rows, or its vertical standard
     deviation exceeds ``texture_factor`` times the background's (and
-    ``min_texture``). Gaps of
+    ``min_texture``); the background's texture is the smaller of the margins'
+    and the ``background_texture_percentile`` of all columns, so a cylinder
+    reaching into a margin, or a grout line crossing it, cannot inflate the
+    threshold past the cylinder's own texture. Gaps of
     up to ``gap_px`` object-free columns inside a run are closed. Each run
     boundary is snapped to the strongest gradient peak within
     ``refine_px`` when that peak carries at least ``min_boundary_response`` of
@@ -72,6 +75,7 @@ class EdgeDetectorParams:
     min_brightness_contrast: float = 35.0
     texture_factor: float = 2.5
     min_texture: float = 6.0
+    background_texture_percentile: float = 25.0
     gap_px: int = 12
     refine_px: int = 14
     min_boundary_response: float = 0.25
@@ -249,6 +253,15 @@ def object_columns(
     by_saturation = (
         np.abs(saturation - background_saturation) > params.min_saturation_contrast
     )
+    # The floor's texture is what the smoothest columns show; a cylinder
+    # reaching into a margin (a white can staged at the frame's edge, whose
+    # white body has no colour or brightness contrast against a light floor)
+    # or a grout line crossing it would otherwise raise the threshold above
+    # the cylinder's own texture and hide it.
+    background_std = min(
+        background_std,
+        float(np.percentile(stds, params.background_texture_percentile)),
+    )
     texture_threshold = max(params.min_texture, params.texture_factor * background_std)
     by_texture = stds > texture_threshold
     differs = np.abs(value - row_background) > params.min_brightness_contrast
@@ -412,6 +425,11 @@ def _snap_to_peak(profile: np.ndarray, column: int, params: EdgeDetectorParams) 
     best = int(lo + np.argmax(profile[lo:hi]))
     if profile[best] < params.min_boundary_response:
         return int(np.clip(column, 0, len(profile) - 1))
+    # A maximum on the window's rim is a slope towards a peak outside the
+    # window, not an edge here: keep the segmentation boundary.
+    on_rim = (best == lo and lo > 0) or (best == hi - 1 and hi < len(profile))
+    if on_rim:
+        return int(np.clip(column, 0, len(profile) - 1))
     return best
 
 
@@ -423,4 +441,7 @@ def _refine_peak(profile: np.ndarray, index: int) -> float:
     denominator = left - 2.0 * center + right
     if abs(denominator) < 1e-9:
         return float(index)
-    return float(index + 0.5 * (left - right) / denominator)
+    # A true peak's vertex lies within half a pixel of the sample; anything
+    # further means the samples are not a peak (a slope), so stay put.
+    offset = float(np.clip(0.5 * (left - right) / denominator, -0.5, 0.5))
+    return float(index + offset)
