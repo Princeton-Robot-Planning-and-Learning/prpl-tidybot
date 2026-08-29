@@ -18,6 +18,7 @@ from omegaconf import DictConfig
 from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
+import prpl_tidybot.config_resolvers  # noqa: F401  # pylint: disable=unused-import
 from prpl_tidybot.preview import planned_trajectory_from_agent, preview_or_abort
 from prpl_tidybot.real_sim import build_planner_env_models
 from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure

@@ -1,18 +1,21 @@
-# kinder/KinematicCylinderShelf3D-o1-v0 — pick a tall cylinder off the floor
-# (side grasp, any approach angle) and place it upright on a shelf.
-# Bilevel-planning env model lives in
+# kinder/KinematicCylinderShelf3D-o{N}-v0 — pick cylinders off the floor
+# (side grasp, any approach angle) and place them upright on a shelf. The
+# cylinders are the `cylinders` list below; everything else (the kinder
+# variant, the planner's object count, the simulator's cylinder heights,
+# both perceivers) derives from it. Bilevel-planning env model lives in
 # kinder_bilevel_planning.env_models.kinematic3d.cylinder_shelf3d.
 
 env_name: cylinder_shelf3d
+num_cylinders: ${len:${env.cylinders}}
 make_kwargs:
-  id: kinder/KinematicCylinderShelf3D-o1-v0
+  id: kinder/KinematicCylinderShelf3D-o${env.num_cylinders}-v0
 # Threads the perceiver's shelf_pose through to the bilevel-planning agent's
 # internal CylinderShelf3DEnvConfig so the planner reasons about the shelf at
 # the same location the perceiver reports it. Without this the env_model's
 # internal sim would default to CylinderShelf3DEnvConfig.shelf_pose =
 # (2.0, 2.4, 0.02) and the planner would emit base motion to the wrong place.
 env_model_kwargs:
-  num_objects: 1
+  num_objects: ${env.num_cylinders}
   magic_skills: ${env.magic_skills}
   config:
     _target_: kinder.envs.kinematic3d.cylinder_shelf3d.CylinderShelf3DEnvConfig
@@ -20,9 +23,11 @@ env_model_kwargs:
       _target_: pybullet_helpers.geometry.Pose
       position: ${env.shelf_pose}
     # Real-object geometry, threaded into the planner's internal sim and
-    # the shadow sim so they simulate the physical cylinder.
-    cylinder_radius: ${env.cylinder_radius}
-    cylinder_heights: ["${env.cylinder_height}"]
+    # the shadow sim so they simulate the physical cylinders. The kinder
+    # env has one radius for all cylinders; the perceiver still reports
+    # each cylinder's own radius, so use the most common one here.
+    cylinder_radius: ${env.sim_cylinder_radius}
+    cylinder_heights: ${pluck:height,${env.cylinders}}
     # Our physical shelf has its bottom inner board removed, leaving one
     # tall opening above the bottom board; the Pringles can (taller than a
     # regular board gap) is placed there.
@@ -38,33 +43,24 @@ env_model_kwargs:
 # "MoveToPreGrasp" and "Place" can be listed too.
 magic_skills: []
 
-# The physical cylinder: a Pringles can. Threaded into both the perceiver
-# and the env config above so the perceived state and the planner's
-# internal sim agree on the geometry.
-cylinder_radius: 0.039
-cylinder_height: 0.233
-
-# Used by the fake-mode target source: where the agent thinks the cylinder
-# is. The z is the cylinder's *center* height, i.e. cylinder_height / 2.
-# (Sim mode reads the cylinder from the kinder env directly; real mode pulls
-# it from the marker detector and ignores this constant.)
-cylinder_pose: [0.5, 0.0, 0.1165]
-
-# ArUco marker (and the cylinder's center z in the env frame) that the
-# real-mode perceiver reads as the cylinder position. The marker detector
-# must be configured to publish this ID — see
-# `prpl_tidybot.marker_detector.constants.TARGET_MARKER_IDS`.
+# The physical cylinders, in the order the planner names them (cylinder0,
+# cylinder1, ...). Each entry gives the ArUco marker taped flat on the
+# floor under it (real mode; print them from
+# conf/calibration/cylinder_markers.pdf), its radius and height in metres,
+# and where fake mode pretends it stands (fake_xy; the centre height is
+# derived from the height). Sim mode samples its own cylinder poses.
 #
-# Staging protocol: the marker lies flat on the floor where the cylinder
-# will stand, and the physical cylinder is set down on top of it during
-# the preview pause. The marker therefore must be visible when the
-# rollout starts — the perceiver caches the detection once at reset (a
-# covered, never-seen marker fails the rollout with a RuntimeError) —
-# and covering it afterwards is fine because nothing re-queries the
-# target mid-episode. `cylinder_marker_z` is the standing cylinder's
-# *center* height above the floor (cylinder_height / 2).
-cylinder_marker_id: 23
-cylinder_marker_z: 0.1165
+# Staging protocol (real mode): every marker must be visible when the
+# rollout starts — the perceiver reads all of them once at reset (a
+# covered, never-seen marker fails the rollout with a RuntimeError) — and
+# the cylinders are set down on their markers during the preview pause.
+# Covering the markers afterwards is fine; nothing re-queries them.
+cylinders:
+  - {marker_id: 35, radius: 0.039, height: 0.233, fake_xy: [0.5, 0.0]} # tall Pringles can
+  - {marker_id: 36, radius: 0.039, height: 0.120, fake_xy: [0.3, 0.6]} # short Pringles can
+  - {marker_id: 37, radius: 0.040, height: 0.210, fake_xy: [0.3, -0.6]} # Lysol can
+# Radius the simulator uses for every cylinder (see env_model_kwargs).
+sim_cylinder_radius: 0.039
 
 # Static shelf pose threaded into the perceiver. Matches the value used for
 # the Shelf3D env so the same physical shelf staging works for both;
@@ -123,14 +119,11 @@ pipelines:
         _target_: prpl_tidybot.interfaces.interface.FakeInterface
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.CylinderShelf3DPerceiver
-      target_source:
-        _target_: prpl_tidybot.real_sim.perceivers.target_source.ConstantTargetSource
-        x: ${env.cylinder_pose.0}
-        y: ${env.cylinder_pose.1}
-        z: ${env.cylinder_pose.2}
+      cylinders: ${env.cylinders}
+      targets:
+        _target_: prpl_tidybot.real_sim.perceivers.target_source.ConstantCylinderTargets
+        cylinders: ${env.cylinders}
       shelf_pose: ${env.shelf_pose}
-      cylinder_radius: ${env.cylinder_radius}
-      cylinder_height: ${env.cylinder_height}
     plan_executor:
       _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
       base_executor:
@@ -197,13 +190,11 @@ pipelines:
         _target_: prpl_tidybot.rendering.CeilingCameraRenderer
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.CylinderShelf3DPerceiver
-      target_source:
-        _target_: prpl_tidybot.real_sim.perceivers.target_source.MarkerDetectorTargetSource
-        marker_id: ${env.cylinder_marker_id}
-        target_z: ${env.cylinder_marker_z}
+      cylinders: ${env.cylinders}
+      targets:
+        _target_: prpl_tidybot.real_sim.perceivers.target_source.MarkerDetectorCylinderTargets
+        cylinders: ${env.cylinders}
       shelf_pose: ${env.shelf_pose}
-      cylinder_radius: ${env.cylinder_radius}
-      cylinder_height: ${env.cylinder_height}
     # Same sub-executors as fake mode; the magic gap goes to the executor
     # selected by `env.real_gap` (see `real_gap_executors` below).
     plan_executor:

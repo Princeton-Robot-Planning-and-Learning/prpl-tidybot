@@ -3,8 +3,12 @@
 import pytest
 
 from prpl_tidybot.real_sim.perceivers.target_source import (
+    ConstantCylinderTargets,
     ConstantTargetSource,
+    CylinderSpec,
+    MarkerDetectorCylinderTargets,
     MarkerDetectorTargetSource,
+    parse_cylinder_specs,
 )
 
 
@@ -100,3 +104,70 @@ def test_marker_detector_target_source_close_propagates_to_client():
     )
     src.close()
     assert client.closed
+
+
+def test_cylinder_spec_from_mapping_and_center_z():
+    """Config mappings become specs; the centre sits at half the height."""
+    specs = parse_cylinder_specs(
+        [
+            {"marker_id": 35, "radius": 0.039, "height": 0.233, "fake_xy": [0.5, 0.0]},
+            CylinderSpec(radius=0.04, height=0.21),
+        ]
+    )
+    assert specs[0].marker_id == 35 and specs[0].fake_xy == (0.5, 0.0)
+    assert specs[0].center_z == pytest.approx(0.1165)
+    assert specs[1].marker_id is None and specs[1].fake_xy is None
+    with pytest.raises(ValueError):
+        parse_cylinder_specs([])
+
+
+def test_constant_cylinder_targets_use_fake_xy_and_half_height():
+    """Fake-mode targets are each spec's fake_xy at its centre height, in order."""
+    targets = ConstantCylinderTargets(
+        [
+            {"radius": 0.039, "height": 0.233, "fake_xy": [0.5, 0.0]},
+            {"radius": 0.040, "height": 0.210, "fake_xy": [0.3, -0.6]},
+        ]
+    )
+    assert targets.get_targets() == [(0.5, 0.0, 0.1165), (0.3, -0.6, 0.105)]
+    with pytest.raises(ValueError, match="fake_xy"):
+        ConstantCylinderTargets([{"radius": 0.03, "height": 0.2}])
+
+
+def test_marker_detector_cylinder_targets_read_each_marker():
+    """Real-mode targets pair each spec's marker (x, y) with its centre height and reuse
+    the last detection for a marker that drops out."""
+    client = _FakeMarkerDetectorClient(
+        [
+            {"targets": {35: (0.5, 0.0), 36: (0.3, 0.6)}},
+            {"targets": {36: (0.31, 0.6)}},
+        ]
+    )
+    targets = MarkerDetectorCylinderTargets(
+        [
+            {"marker_id": 35, "radius": 0.039, "height": 0.233},
+            {"marker_id": 36, "radius": 0.039, "height": 0.120},
+        ],
+        client=client,  # type: ignore[arg-type]
+    )
+    assert targets.get_targets() == [(0.5, 0.0, 0.1165), (0.3, 0.6, 0.06)]
+    # Second payload: marker 35 dropped out (cached), 36 moved.
+    assert targets.get_targets() == [(0.5, 0.0, 0.1165), (0.31, 0.6, 0.06)]
+    with pytest.raises(ValueError, match="marker_id"):
+        MarkerDetectorCylinderTargets(
+            [{"radius": 0.03, "height": 0.2}], client=client  # type: ignore[arg-type]
+        )
+
+
+def test_marker_detector_cylinder_targets_raise_for_a_never_seen_marker():
+    """If any configured marker has never been reported, get_targets raises."""
+    client = _FakeMarkerDetectorClient([{"targets": {35: (0.5, 0.0)}}])
+    targets = MarkerDetectorCylinderTargets(
+        [
+            {"marker_id": 35, "radius": 0.039, "height": 0.233},
+            {"marker_id": 36, "radius": 0.039, "height": 0.120},
+        ],
+        client=client,  # type: ignore[arg-type]
+    )
+    with pytest.raises(RuntimeError, match=r"\[36\]"):
+        targets.get_targets()

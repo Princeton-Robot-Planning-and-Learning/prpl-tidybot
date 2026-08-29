@@ -21,7 +21,7 @@ max_eval_steps: 100
 
 # BilevelPlanningAgent knobs. Env yamls override the skill horizon by
 # setting `agent_max_skill_horizon` at their top level (see
-# kinematic-cylinder-shelf3d-o1.yaml, whose finely discretized pick
+# kinematic-cylinder-shelf3d.yaml, whose finely discretized pick
 # needs more ticks than the default cap).
 agent:
   max_abstract_plans: 10

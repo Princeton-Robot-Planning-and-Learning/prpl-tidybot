@@ -103,11 +103,13 @@ def test_run_planner_omits_video_when_record_video_false(tmp_path: Path) -> None
 @pytest.mark.parametrize("mode", ["sim", "fake"])
 def test_run_planner_with_magic_grasp(mode: str) -> None:
     """With Grasp planned as a magic skill, the cylinder-shelf rollout runs end to end:
+
     the planned MoveToPreGrasp executes, the SkillCall is carried out by a teleport in
     sim mode and by settling to the predicted configuration in fake mode, and the
-    planned place follows."""
+    planned place follows.
+    """
     overrides = [
-        "env=kinematic-cylinder-shelf3d-o1",
+        "env=kinematic-cylinder-shelf3d",
         f"mode={mode}",
         "max_eval_steps=1",
         "seed=0",
@@ -127,8 +129,8 @@ def test_run_planner_with_magic_grasp(mode: str) -> None:
 
 
 def test_run_planner_reports_executor_failure(monkeypatch) -> None:
-    """An executor that gives up ends the rollout with an executor_failure reason
-    rather than continuing the plan."""
+    """An executor that gives up ends the rollout with an executor_failure reason rather
+    than continuing the plan."""
 
     def _give_up(self, sim_state):
         del self, sim_state
