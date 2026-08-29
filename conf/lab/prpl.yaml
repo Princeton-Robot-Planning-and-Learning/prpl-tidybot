@@ -1,5 +1,5 @@
 # PRPL lab configuration.
-marker_detector_host: "192.168.0.247"
+marker_detector_host: "192.168.0.131"
 nuc_ip: "192.168.0.76"
 nuc_host: "tidybot-nuc-prpl"
 laptop_host: "tidybot-laptop-prpl"
