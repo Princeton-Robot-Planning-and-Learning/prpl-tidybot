@@ -122,7 +122,9 @@ def main() -> int:
                 time.sleep(0.05)
                 continue
             edges = detect_cylinder_edges(image, params)
-            if edges is not None and last_width is not None:
+            # A cylinder cut off by the image border has no usable width: it
+            # skips the jump check and leaves the width reference alone.
+            if edges is not None and not edges.clipped and last_width is not None:
                 change = abs(edges.width_px - last_width) / last_width
                 if change > args.max_width_change_frac:
                     print(
@@ -131,7 +133,7 @@ def main() -> int:
                         f"{last_width:.0f}px)"
                     )
                     edges = None
-            if edges is not None:
+            if edges is not None and not edges.clipped:
                 last_width = edges.width_px
             phase = "approach" if approaching else "align"
             overlay = render_edge_overlay(
@@ -147,7 +149,11 @@ def main() -> int:
                 # Open loop from here; the camera only feeds the range estimate
                 # over the first range_baseline metres.
                 if approach_total is None:
-                    if edges is not None and advanced <= args.range_baseline + 1e-9:
+                    if (
+                        edges is not None
+                        and not edges.clipped
+                        and advanced <= args.range_baseline + 1e-9
+                    ):
                         range_samples.append((advanced, edges.width_px))
                     if advanced >= args.range_baseline - 1e-9 or args.no_range_estimate:
                         approach_total = _fit_approach_total(
@@ -177,7 +183,13 @@ def main() -> int:
                     if answer.strip().lower() in ("n", "no"):
                         return 1
                     continue
-                error = edges.lateral_error_px
+                error = edges.servo_error_px
+                if edges.clipped:
+                    side = "left" if edges.clipped_left else "right"
+                    print(
+                        f"step {index}: cylinder cut off by the {side} edge of the "
+                        "image; stepping that way"
+                    )
                 if abs(error) <= args.lateral_tolerance_px:
                     aligned_captures += 1
                     print(

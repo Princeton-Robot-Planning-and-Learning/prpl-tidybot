@@ -89,6 +89,16 @@ class CylinderEdges:
     left_response: float
     right_response: float
     contrast: float
+    # The object run reaches the image border on that side: the cylinder is
+    # only partly in view, so ``center_x`` and ``width_px`` are lower bounds
+    # and the only reliable information is which way it lies.
+    clipped_left: bool = False
+    clipped_right: bool = False
+
+    @property
+    def clipped(self) -> bool:
+        """True when the cylinder is cut off by the left or right image border."""
+        return self.clipped_left or self.clipped_right
 
     @property
     def center_x(self) -> float:
@@ -105,6 +115,18 @@ class CylinderEdges:
         """Signed offset of the cylinder axis from the image center: positive when
         the cylinder is to the right of center."""
         return self.center_x - 0.5 * (self.image_width - 1)
+
+    @property
+    def servo_error_px(self) -> float:
+        """The lateral error to servo on: ``lateral_error_px`` for a fully visible
+        cylinder; for one cut off by the image border, whose centre cannot be
+        measured, a full half-frame toward the clipped side, which is never within
+        tolerance and steps the tool that way at the maximum rate."""
+        if self.clipped_left:
+            return -0.5 * self.image_width
+        if self.clipped_right:
+            return 0.5 * self.image_width
+        return self.lateral_error_px
 
 
 def column_edge_profile(
@@ -184,24 +206,51 @@ def object_columns(
     left_cols = np.arange(margin)
     right_cols = np.arange(width - margin, width)
 
-    background_saturation = float(
-        np.median(np.concatenate([saturation[left_cols], saturation[right_cols]]))
+    stds = value.std(axis=0)
+    # When the cylinder is only partly in view it occupies one margin, and
+    # that margin must not feed the background model. A margin the cylinder
+    # covers is far more textured than the floor (a printed label) or
+    # differs from the other margin in saturation, so when the two margins
+    # disagree, the smoother one alone models the background; otherwise
+    # both do, with the brightness interpolated between them.
+    left_texture = float(np.median(stds[left_cols]))
+    right_texture = float(np.median(stds[right_cols]))
+    saturation_gap = abs(
+        float(np.median(saturation[left_cols]))
+        - float(np.median(saturation[right_cols]))
     )
+    textures_disagree = max(left_texture, right_texture) > max(
+        params.min_texture, params.texture_factor * min(left_texture, right_texture)
+    )
+    if textures_disagree or saturation_gap > params.min_saturation_contrast:
+        background_cols = left_cols if left_texture <= right_texture else right_cols
+        if not textures_disagree:
+            background_cols = (
+                left_cols
+                if float(np.median(saturation[left_cols]))
+                <= float(np.median(saturation[right_cols]))
+                else right_cols
+            )
+        background_saturation = float(np.median(saturation[background_cols]))
+        background_std = float(np.median(stds[background_cols]))
+        row_background = np.median(value[:, background_cols], axis=1, keepdims=True)
+        row_background = np.repeat(row_background, width, axis=1)
+    else:
+        background_saturation = float(
+            np.median(np.concatenate([saturation[left_cols], saturation[right_cols]]))
+        )
+        background_std = float(
+            np.median(np.concatenate([stds[left_cols], stds[right_cols]]))
+        )
+        left_level = np.median(value[:, left_cols], axis=1, keepdims=True)
+        right_level = np.median(value[:, right_cols], axis=1, keepdims=True)
+        ramp = np.linspace(0.0, 1.0, width, dtype=np.float32)[None, :]
+        row_background = left_level + (right_level - left_level) * ramp
     by_saturation = (
         np.abs(saturation - background_saturation) > params.min_saturation_contrast
     )
-
-    stds = value.std(axis=0)
-    background_std = float(
-        np.median(np.concatenate([stds[left_cols], stds[right_cols]]))
-    )
     texture_threshold = max(params.min_texture, params.texture_factor * background_std)
     by_texture = stds > texture_threshold
-
-    left_level = np.median(value[:, left_cols], axis=1, keepdims=True)
-    right_level = np.median(value[:, right_cols], axis=1, keepdims=True)
-    ramp = np.linspace(0.0, 1.0, width, dtype=np.float32)[None, :]
-    row_background = left_level + (right_level - left_level) * ramp
     differs = np.abs(value - row_background) > params.min_brightness_contrast
     by_brightness = differs.mean(axis=0) > 0.5
 
@@ -221,28 +270,45 @@ def detect_cylinder_edges(
     min_width = params.min_width_frac * width
     max_width = params.max_width_frac * width
     center = 0.5 * (width - 1)
-    candidates: list[tuple[float, int, int]] = []
+    candidates: list[tuple[float, int, int, bool, bool]] = []
     for start, stop in _runs(object_columns(image, params)):
-        if not min_width <= stop - start <= max_width:
+        # A run touching a border is a cylinder cut off by the frame: its
+        # width is a lower bound, so only the minimum applies, and the
+        # clipped side keeps the border column instead of a gradient peak.
+        clipped_left = start == 0
+        clipped_right = stop == width
+        if stop - start < min_width:
             continue
-        left = _snap_to_peak(profile, start, params)
-        right = _snap_to_peak(profile, stop - 1, params)
+        if not (clipped_left or clipped_right) and stop - start > max_width:
+            continue
+        left = 0 if clipped_left else _snap_to_peak(profile, start, params)
+        right = width - 1 if clipped_right else _snap_to_peak(profile, stop - 1, params)
         if right - left < min_width:
             continue
-        candidates.append((abs(0.5 * (left + right) - center), left, right))
+        candidates.append(
+            (
+                abs(0.5 * (left + right) - center),
+                left,
+                right,
+                clipped_left,
+                clipped_right,
+            )
+        )
     if not candidates:
         return None
-    _, left, right = min(candidates)
+    _, left, right, clipped_left, clipped_right = min(candidates)
     band = _roi_band(image, params).astype(np.float32)
     column_means = band.mean(axis=0)
     return CylinderEdges(
-        left_x=_refine_peak(profile, left),
-        right_x=_refine_peak(profile, right),
+        left_x=float(left) if clipped_left else _refine_peak(profile, left),
+        right_x=float(right) if clipped_right else _refine_peak(profile, right),
         image_width=width,
         image_height=image.shape[0],
-        left_response=float(profile[left]),
-        right_response=float(profile[right]),
+        left_response=0.0 if clipped_left else float(profile[left]),
+        right_response=0.0 if clipped_right else float(profile[right]),
         contrast=_silhouette_contrast(column_means, left, right),
+        clipped_left=clipped_left,
+        clipped_right=clipped_right,
     )
 
 
@@ -283,6 +349,9 @@ def render_edge_overlay(
             f"err {edges.lateral_error_px:+.1f}px  width {edges.width_px:.0f}px  "
             f"resp {edges.left_response:.2f}/{edges.right_response:.2f}"
         )
+        if edges.clipped:
+            side = "left" if edges.clipped_left else "right"
+            text = f"clipped {side}  {text}"
     else:
         text = "no cylinder edges"
     if label:
