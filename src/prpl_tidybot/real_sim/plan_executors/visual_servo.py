@@ -47,8 +47,9 @@ Each step is issued as an absolute joint target from
 step is only computed once the arm has reached the previous target (within
 ``step_tolerance``) or ``step_timeout_ticks`` have passed, so the loop never
 outruns the arm. Every tick's detection and command are appended to
-:attr:`trace`, and with ``debug_dir`` set the annotated wrist frames are
-written there, so a run can be inspected afterwards without the robot.
+:attr:`trace`, and with ``debug_dir`` set the raw and annotated wrist frames
+are written there, so a run can be inspected (and the detector re-tuned on
+the raw frames) afterwards without the robot.
 
 Failure modes raise :class:`ExecutionFailure`: no detection for
 ``max_missed_detections`` consecutive ticks, no image from the source, an
@@ -677,6 +678,10 @@ class CylinderVisualServoGapExecutor(
         if self._debug_dir is None:
             return
         self._debug_dir.mkdir(parents=True, exist_ok=True)
+        cv.imwrite(
+            str(self._debug_dir / f"servo_{self._tick:04d}_raw.png"),
+            cv.cvtColor(np.asarray(image, dtype=np.uint8), cv.COLOR_RGB2BGR),
+        )
         overlay = render_edge_overlay(
             image,
             edges,

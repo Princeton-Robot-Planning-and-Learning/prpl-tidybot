@@ -1,20 +1,29 @@
-"""Find the two vertical edges of a cylinder in a wrist-camera image.
+"""Find the two silhouette edges of a cylinder in a wrist-camera image.
 
 The cylinder is assumed to stand roughly upright in front of the gripper
 with both of its silhouette edges in view, which is what the pre-grasp
-pose of the cylinder-shelf skills gives. The detector is a column-wise
-horizontal-gradient profile: within a horizontal band of the image
-(``roi_top`` to ``roi_bottom``, chosen to exclude the gripper fingers that
-show at the bottom of the frame) the absolute Sobel-x response is
-averaged over rows, smoothed, and its local maxima are the candidate
-vertical edges. The pair of peaks with the strongest combined response
-whose separation is a plausible cylinder width wins.
+pose of the cylinder-shelf skills gives.
+
+The detector segments first and refines with edges second, because the
+strongest vertical edges are not always the silhouette: a printed label
+(a white nutrition panel next to green print) makes an inner edge that
+outscores the cylinder's own outline against a light floor. Within a
+horizontal band of the image (``roi_top`` to ``roi_bottom``, chosen to
+exclude the gripper fingers at the bottom of the frame) each column is
+summarised by its mean gray level and its vertical texture (standard
+deviation). The outermost columns of the band model the background; a
+column belongs to the object when its mean differs from the background
+or it is textured where the background is smooth. The widest contiguous
+run of object columns of plausible width is the cylinder, and each of its
+two boundaries is then snapped to the strongest horizontal-gradient peak
+nearby (sub-pixel), so the result is as precise as an edge detector and
+as robust as a segmentation.
 
 Everything is a pure function of the image and :class:`EdgeDetectorParams`,
 so it can be run and tuned offline on saved frames
 (``scripts/detect_cylinder_edges.py``) and unit-tested on synthetic images.
-:func:`render_edge_overlay` draws the band, the profile, the detected edges,
-and the lateral error on a copy of the image for that purpose.
+:func:`render_edge_overlay` draws the band, the gradient profile, the object
+columns, the detected edges, and the lateral error on a copy of the image.
 """
 
 from __future__ import annotations
@@ -31,16 +40,25 @@ class EdgeDetectorParams:
     """Tunables for :func:`detect_cylinder_edges`.
 
     ``roi_top`` / ``roi_bottom`` are fractions of the image height bounding
-    the rows that feed the column profile. Widths are fractions of the image
-    width. ``min_edge_strength`` is the smallest mean |Sobel-x| response (gray
-    levels per pixel, before normalisation; the simulator's soft-shaded
-    cylinder measures ~3, a bare floor ~1) the strongest column must reach
-    for the frame to count as containing an edge at all; ``min_peak_frac`` is
-    the minimum height of an accepted peak relative to that maximum.
-    ``peak_min_separation_px`` suppresses secondary maxima within that many
-    columns of a stronger one. ``min_contrast`` is the smallest difference in
-    mean gray level between the band inside the two edges and the band
-    outside them: a cylinder is a silhouette, not just two lines.
+    the rows that feed the column statistics. Widths are fractions of the
+    image width. ``background_margin_frac`` is the fraction of columns at
+    each side of the band that model the background. A column is object
+    when its mean saturation differs from the background's by more than
+    ``min_saturation_contrast`` (0-255), or its brightness differs from a
+    per-row background interpolated between the margins by more than
+    ``min_brightness_contrast`` in most rows, or its vertical standard
+    deviation exceeds ``texture_factor`` times the background's (and
+    ``min_texture``). Gaps of
+    up to ``gap_px`` object-free columns inside a run are closed. Each run
+    boundary is snapped to the strongest gradient peak within
+    ``refine_px``, and both snapped boundaries must carry at least
+    ``min_boundary_response`` of the strongest gradient in the band, else the
+    run is a lighting gradient rather than a silhouette; of the remaining runs
+    the one nearest the image center wins. ``min_edge_strength`` is the
+    smallest mean |Sobel-x|
+    response (gray levels per pixel; the simulator's soft-shaded cylinder
+    measures ~3, a bare floor ~1) the strongest column must reach for the
+    frame to count as containing an edge at all.
     """
 
     roi_top: float = 0.25
@@ -49,10 +67,15 @@ class EdgeDetectorParams:
     profile_smooth_px: int = 9
     min_width_frac: float = 0.06
     max_width_frac: float = 0.7
+    background_margin_frac: float = 0.1
+    min_saturation_contrast: float = 25.0
+    min_brightness_contrast: float = 35.0
+    texture_factor: float = 2.5
+    min_texture: float = 6.0
+    gap_px: int = 12
+    refine_px: int = 14
+    min_boundary_response: float = 0.25
     min_edge_strength: float = 1.5
-    min_peak_frac: float = 0.2
-    peak_min_separation_px: int = 6
-    min_contrast: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -106,6 +129,14 @@ def _roi_band(image: Image, params: EdgeDetectorParams) -> np.ndarray:
     return gray[top:bottom]
 
 
+def _roi_band_rgb(image: Image, params: EdgeDetectorParams) -> np.ndarray:
+    rgb = image if image.ndim == 3 else cv.cvtColor(image, cv.COLOR_GRAY2RGB)
+    height = rgb.shape[0]
+    top = int(round(params.roi_top * height))
+    bottom = max(top + 1, int(round(params.roi_bottom * height)))
+    return np.ascontiguousarray(rgb[top:bottom])
+
+
 def _raw_column_edge_profile(
     image: Image, params: EdgeDetectorParams
 ) -> tuple[np.ndarray, float]:
@@ -124,40 +155,90 @@ def _raw_column_edge_profile(
     return profile, float(profile.max())
 
 
+def object_columns(
+    image: Image, params: EdgeDetectorParams = EdgeDetectorParams()
+) -> np.ndarray:
+    """Boolean mask over columns: True where the band looks like object rather than
+    background (see the module docstring).
+
+    Three cues, any of which marks a column as object, all measured against a
+    background model taken from the band's outermost columns:
+
+    * saturation differs from the background's (a coloured object on a grey
+      floor, or a grey label on a wooden one) — immune to the fisheye's
+      vignetting and to shadows, which change brightness but not colour;
+    * texture: the column's vertical standard deviation is well above the
+      background's (printed labels on a smooth floor);
+    * brightness differs by a large margin from a background interpolated
+      per row between the left and right margins, which absorbs the gradual
+      edge-to-center brightening of a fisheye.
+    """
+    band_rgb = _roi_band_rgb(image, params)
+    if params.blur_ksize > 1:
+        band_rgb = cv.GaussianBlur(band_rgb, (params.blur_ksize, params.blur_ksize), 0)
+    hsv = cv.cvtColor(band_rgb, cv.COLOR_RGB2HSV).astype(np.float32)
+    saturation = hsv[..., 1].mean(axis=0)
+    value = hsv[..., 2]
+    height, width = value.shape
+    margin = max(1, int(round(params.background_margin_frac * width)))
+    left_cols = np.arange(margin)
+    right_cols = np.arange(width - margin, width)
+
+    background_saturation = float(
+        np.median(np.concatenate([saturation[left_cols], saturation[right_cols]]))
+    )
+    by_saturation = (
+        np.abs(saturation - background_saturation) > params.min_saturation_contrast
+    )
+
+    stds = value.std(axis=0)
+    background_std = float(
+        np.median(np.concatenate([stds[left_cols], stds[right_cols]]))
+    )
+    texture_threshold = max(params.min_texture, params.texture_factor * background_std)
+    by_texture = stds > texture_threshold
+
+    left_level = np.median(value[:, left_cols], axis=1, keepdims=True)
+    right_level = np.median(value[:, right_cols], axis=1, keepdims=True)
+    ramp = np.linspace(0.0, 1.0, width, dtype=np.float32)[None, :]
+    row_background = left_level + (right_level - left_level) * ramp
+    differs = np.abs(value - row_background) > params.min_brightness_contrast
+    by_brightness = differs.mean(axis=0) > 0.5
+
+    return _close_gaps(by_saturation | by_texture | by_brightness, params.gap_px)
+
+
 def detect_cylinder_edges(
     image: Image, params: EdgeDetectorParams = EdgeDetectorParams()
 ) -> CylinderEdges | None:
-    """Locate the cylinder's left and right edges, or return None if no plausible pair
-    of vertical edges is found."""
+    """Locate the cylinder's left and right silhouette edges, or return None if no
+    plausible object run is found."""
     raw_profile, peak = _raw_column_edge_profile(image, params)
     if peak < params.min_edge_strength:
         return None
     profile = np.asarray(raw_profile, dtype=np.float64) / peak
-    peaks = _find_peaks(profile, params)
-    if len(peaks) < 2:
-        return None
     width = image.shape[1]
     min_width = params.min_width_frac * width
     max_width = params.max_width_frac * width
+    center = 0.5 * (width - 1)
+    candidates: list[tuple[float, int, int]] = []
+    for start, stop in _runs(object_columns(image, params)):
+        if not min_width <= stop - start <= max_width:
+            continue
+        left = _snap_to_peak(profile, start, params.refine_px)
+        right = _snap_to_peak(profile, stop - 1, params.refine_px)
+        if right - left < min_width:
+            continue
+        if min(profile[left], profile[right]) < params.min_boundary_response:
+            # A run whose boundary is not an edge is a shading or lighting
+            # gradient, not a silhouette.
+            continue
+        candidates.append((abs(0.5 * (left + right) - center), left, right))
+    if not candidates:
+        return None
+    _, left, right = min(candidates)
     band = _roi_band(image, params).astype(np.float32)
     column_means = band.mean(axis=0)
-    best_score = -1.0
-    best: tuple[int, int, float] | None = None
-    for i, left in enumerate(peaks):
-        for right in peaks[i + 1 :]:
-            separation = right - left
-            if separation < min_width or separation > max_width:
-                continue
-            contrast = _silhouette_contrast(column_means, left, right)
-            if contrast < params.min_contrast:
-                continue
-            score = float(profile[left] + profile[right])
-            if score > best_score:
-                best_score = score
-                best = (left, right, contrast)
-    if best is None:
-        return None
-    left, right, contrast = best
     return CylinderEdges(
         left_x=_refine_peak(profile, left),
         right_x=_refine_peak(profile, right),
@@ -165,7 +246,7 @@ def detect_cylinder_edges(
         image_height=image.shape[0],
         left_response=float(profile[left]),
         right_response=float(profile[right]),
-        contrast=contrast,
+        contrast=_silhouette_contrast(column_means, left, right),
     )
 
 
@@ -182,6 +263,12 @@ def render_edge_overlay(
     top = int(round(params.roi_top * height))
     bottom = int(round(params.roi_bottom * height))
     cv.rectangle(out, (0, top), (width - 1, bottom), (255, 255, 0), 1)
+    # Object columns (the segmentation) as a thin magenta strip under the band.
+    mask = object_columns(image, params)
+    strip_top = min(height - 1, bottom + 2)
+    strip_bottom = min(height - 1, bottom + 6)
+    for x in np.where(mask)[0]:
+        out[strip_top:strip_bottom, x] = (255, 0, 255)
     # Column profile plotted along the bottom quarter of the frame.
     profile = column_edge_profile(image, params)
     plot_height = max(1, height // 4)
@@ -223,24 +310,38 @@ def _silhouette_contrast(column_means: np.ndarray, left: int, right: int) -> flo
     return float(abs(inside.mean() - outside.mean()))
 
 
-def _find_peaks(profile: np.ndarray, params: EdgeDetectorParams) -> list[int]:
-    """Local maxima above ``min_peak_frac`` with non-maximum suppression."""
-    threshold = params.min_peak_frac * float(profile.max()) if profile.size else 0.0
-    if threshold <= 0.0:
-        return []
-    candidates = [
-        i
-        for i in range(1, len(profile) - 1)
-        if profile[i] >= threshold
-        and profile[i] > profile[i - 1]
-        and profile[i] >= profile[i + 1]
-    ]
-    candidates.sort(key=lambda i: -profile[i])
-    kept: list[int] = []
-    for i in candidates:
-        if all(abs(i - k) >= params.peak_min_separation_px for k in kept):
-            kept.append(i)
-    return sorted(kept)
+def _close_gaps(mask: np.ndarray, gap_px: int) -> np.ndarray:
+    """Fill runs of False shorter than or equal to `gap_px` that sit between Trues."""
+    closed = mask.copy()
+    if gap_px <= 0:
+        return closed
+    true_idx = np.where(mask)[0]
+    for a, b in zip(true_idx[:-1], true_idx[1:]):
+        if 1 < b - a <= gap_px + 1:
+            closed[a:b] = True
+    return closed
+
+
+def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """(start, stop) index pairs of the contiguous True runs in `mask`."""
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for i, value in enumerate(mask):
+        if value and start is None:
+            start = i
+        elif not value and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(mask)))
+    return runs
+
+
+def _snap_to_peak(profile: np.ndarray, column: int, radius: int) -> int:
+    """Column of the strongest gradient response within `radius` of `column`."""
+    lo = max(0, column - radius)
+    hi = min(len(profile), column + radius + 1)
+    return int(lo + np.argmax(profile[lo:hi]))
 
 
 def _refine_peak(profile: np.ndarray, index: int) -> float:

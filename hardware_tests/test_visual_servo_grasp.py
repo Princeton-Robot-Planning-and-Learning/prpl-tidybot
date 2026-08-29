@@ -139,6 +139,10 @@ def main() -> int:
             )
             out = ARTIFACT_DIR / f"visual_servo_{index:03d}.png"
             cv.imwrite(str(out), cv.cvtColor(overlay, cv.COLOR_RGB2BGR))
+            cv.imwrite(
+                str(ARTIFACT_DIR / f"visual_servo_{index:03d}_raw.png"),
+                cv.cvtColor(image, cv.COLOR_RGB2BGR),
+            )
             if approaching:
                 # Open loop from here; the camera only feeds the range estimate
                 # over the first range_baseline metres.
