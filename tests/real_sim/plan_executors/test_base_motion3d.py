@@ -144,7 +144,9 @@ def test_pure_pursuit_done_only_at_final_waypoint():
     """Done() returns False until the perceived base is within position + angle
     tolerance of the final waypoint."""
     s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
-    executor = PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3)
+    executor = PurePursuitBaseMotion3DPlanExecutor(
+        position_tolerance=1e-3, still_ticks=0
+    )
     executor.set_trajectory([(s0, _base_action(dx=1.0))])
 
     assert executor.done(s0) is False
@@ -155,11 +157,54 @@ def test_pure_pursuit_done_only_at_final_waypoint():
 def test_pure_pursuit_done_is_sticky():
     """Once done() reports True, drift back outside tolerance does not undo it."""
     s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
-    executor = PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3)
+    executor = PurePursuitBaseMotion3DPlanExecutor(
+        position_tolerance=1e-3, still_ticks=0
+    )
     executor.set_trajectory([(s0, _base_action(dx=1.0))])
 
     assert executor.done(_make_state(base_xytheta=(1.0, 0.0, 0.0))) is True
     assert executor.done(_make_state(base_xytheta=(0.9, 0.0, 0.0))) is True
+
+
+def test_pure_pursuit_done_waits_for_the_base_to_stop():
+    """Within tolerance is not enough: the perceived base must also hold still
+    for still_ticks consecutive ticks, so a base coasting through the tolerance
+    circle does not count as arrived."""
+    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
+    executor = PurePursuitBaseMotion3DPlanExecutor(
+        position_tolerance=0.05, still_position_tolerance=0.005, still_ticks=2
+    )
+    executor.set_trajectory([(s0, _base_action(dx=1.0))])
+
+    # Coasting: inside the tolerance circle but moving 1 cm per tick.
+    assert executor.done(_make_state(base_xytheta=(0.97, 0.0, 0.0))) is False
+    assert executor.done(_make_state(base_xytheta=(0.98, 0.0, 0.0))) is False
+    assert executor.done(_make_state(base_xytheta=(0.99, 0.0, 0.0))) is False
+    # Stopped: the same pose (within jitter) on consecutive ticks.
+    assert executor.done(_make_state(base_xytheta=(1.0, 0.0, 0.0))) is False
+    assert executor.done(_make_state(base_xytheta=(1.001, 0.0, 0.0))) is False
+    assert executor.done(_make_state(base_xytheta=(1.0, 0.0, 0.0))) is True
+
+
+def test_pure_pursuit_done_gives_up_waiting_for_stillness(caplog):
+    """Perception jitter alone cannot stall a rollout: after still_max_wait_ticks
+    ticks within tolerance, arrival is declared with a warning."""
+    s0 = _make_state(base_xytheta=(0.0, 0.0, 0.0))
+    executor = PurePursuitBaseMotion3DPlanExecutor(
+        position_tolerance=0.05,
+        still_position_tolerance=0.001,
+        still_ticks=2,
+        still_max_wait_ticks=3,
+    )
+    executor.set_trajectory([(s0, _base_action(dx=1.0))])
+
+    jitter = [1.0, 1.01, 1.0, 1.01, 1.0]
+    with caplog.at_level(logging.WARNING):
+        results = [
+            executor.done(_make_state(base_xytheta=(x, 0.0, 0.0))) for x in jitter
+        ]
+    assert results == [False, False, False, True, True]
+    assert "not still after 4 ticks" in caplog.text
 
 
 # ---------------------------------------------------------------------------

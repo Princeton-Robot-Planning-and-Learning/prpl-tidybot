@@ -24,7 +24,9 @@ from prpl_tidybot.structs import TidyBotObservation
 def _tight_executor() -> Kinematic3DPlanExecutor:
     """Dispatcher with a tight-tolerance pure-pursuit base sub-executor."""
     return Kinematic3DPlanExecutor(
-        base_executor=PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3),
+        base_executor=PurePursuitBaseMotion3DPlanExecutor(
+            position_tolerance=1e-3, still_ticks=0
+        ),
     )
 
 
@@ -201,7 +203,9 @@ def test_skill_call_pair_is_routed_to_gap_executor():
     s1 = _make_state(base_xytheta=(1.0, 0.0, 0.0))
     gap = _RecordingGapExecutor()
     executor = Kinematic3DPlanExecutor(
-        base_executor=PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3),
+        base_executor=PurePursuitBaseMotion3DPlanExecutor(
+            position_tolerance=1e-3, still_ticks=0
+        ),
         gap_executor=gap,
     )
     call = _skill_call(s1)

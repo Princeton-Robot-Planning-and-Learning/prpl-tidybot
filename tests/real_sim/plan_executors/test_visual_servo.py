@@ -146,7 +146,9 @@ def _run(executor, arm: _FakeArm, max_ticks: int = 400) -> list[TidyBotAction]:
 def _make_executor(image_source, stepper, **kwargs) -> CylinderVisualServoGapExecutor:
     return CylinderVisualServoGapExecutor(
         image_source=image_source,
-        base_executor=PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3),
+        base_executor=PurePursuitBaseMotion3DPlanExecutor(
+            position_tolerance=1e-3, still_ticks=0
+        ),
         arm_executor=StreamingArmMotion3DPlanExecutor(
             distance_fn=_l1, arrival_tolerance=1e-3
         ),
