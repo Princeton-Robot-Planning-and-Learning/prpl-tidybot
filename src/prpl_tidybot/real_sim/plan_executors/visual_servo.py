@@ -276,6 +276,7 @@ class CylinderVisualServoGapExecutor(
         self._ticks_on_target: int = 0
         self._start_pose: Pose | None = None
         self._recent_widths: list[float] = []
+        self._gap_index: int = 0
         self._range_samples: list[tuple[float, float]] = []
         self._approach_total: float | None = None
         self._approach_start_pose: Pose | None = None
@@ -641,6 +642,7 @@ class CylinderVisualServoGapExecutor(
     def _reset_run(self) -> None:
         self._phase = ALIGN
         self._tick = 0
+        self._gap_index += 1
         self._missed = 0
         self._aligned_ticks = 0
         self._clipped_warned = False
@@ -701,17 +703,17 @@ class CylinderVisualServoGapExecutor(
             return
         self._debug_dir.mkdir(parents=True, exist_ok=True)
         cv.imwrite(
-            str(self._debug_dir / f"servo_{self._tick:04d}_raw.png"),
+            str(self._debug_dir / f"servo_g{self._gap_index}_{self._tick:04d}_raw.png"),
             cv.cvtColor(np.asarray(image, dtype=np.uint8), cv.COLOR_RGB2BGR),
         )
         overlay = render_edge_overlay(
             image,
             edges,
             self._params.detector,
-            label=f"t{self._tick:04d} {self._phase}",
+            label=f"gap {self._gap_index} t{self._tick:04d} {self._phase}",
         )
         cv.imwrite(
-            str(self._debug_dir / f"servo_{self._tick:04d}.png"),
+            str(self._debug_dir / f"servo_g{self._gap_index}_{self._tick:04d}.png"),
             cv.cvtColor(overlay, cv.COLOR_RGB2BGR),
         )
 
