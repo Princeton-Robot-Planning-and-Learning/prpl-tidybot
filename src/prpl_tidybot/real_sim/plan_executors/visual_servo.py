@@ -129,6 +129,7 @@ class _Params:
     lateral_min_step: float
     max_width_change_frac: float
     width_history: int
+    width_consensus_ticks: int
     estimate_range: bool
     range_baseline: float
     camera_to_grasp_offset: float
@@ -197,6 +198,7 @@ class CylinderVisualServoGapExecutor(
         lateral_min_step: float = 0.006,
         max_width_change_frac: float = 0.3,
         width_history: int = 5,
+        width_consensus_ticks: int = 3,
         estimate_range: bool = True,
         range_baseline: float = 0.04,
         camera_to_grasp_offset: float = 0.108,
@@ -241,6 +243,7 @@ class CylinderVisualServoGapExecutor(
             lateral_min_step=lateral_min_step,
             max_width_change_frac=max_width_change_frac,
             width_history=width_history,
+            width_consensus_ticks=width_consensus_ticks,
             estimate_range=estimate_range,
             range_baseline=range_baseline,
             camera_to_grasp_offset=camera_to_grasp_offset,
@@ -276,6 +279,8 @@ class CylinderVisualServoGapExecutor(
         self._ticks_on_target: int = 0
         self._start_pose: Pose | None = None
         self._recent_widths: list[float] = []
+        self._rejected_widths: list[float] = []
+        self._gap_index: int = 0
         self._range_samples: list[tuple[float, float]] = []
         self._approach_total: float | None = None
         self._approach_start_pose: Pose | None = None
@@ -533,17 +538,46 @@ class CylinderVisualServoGapExecutor(
             reference = float(np.median(self._recent_widths))
             change = abs(edges.width_px - reference) / reference
             if change > self._params.max_width_change_frac:
+                if not self._new_width_consensus(edges.width_px):
+                    _logger.warning(
+                        "Visual servo ignored a detection: width %.0f px vs a recent "
+                        "median of %.0f px (%.0f%% change).",
+                        edges.width_px,
+                        reference,
+                        100 * change,
+                    )
+                    return None
                 _logger.warning(
-                    "Visual servo ignored a detection: width %.0f px vs a recent "
-                    "median of %.0f px (%.0f%% change).",
+                    "Visual servo adopted width %.0f px after %d consistent "
+                    "detections; the earlier reference of %.0f px was wrong.",
                     edges.width_px,
+                    self._params.width_consensus_ticks,
                     reference,
-                    100 * change,
                 )
-                return None
+                self._recent_widths = list(self._rejected_widths)
+                self._rejected_widths = []
+            else:
+                self._rejected_widths = []
         self._recent_widths.append(edges.width_px)
         del self._recent_widths[: -self._params.width_history]
         return edges
+
+    def _new_width_consensus(self, width: float) -> bool:
+        """Record a rejected width; True once the last ``width_consensus_ticks``
+        rejected widths agree with each other (within ``max_width_change_frac`` of
+        their median). A width reference set by a wrong first detection (a
+        partial run on a white can against a light floor) would otherwise lock
+        out every correct detection that follows."""
+        p = self._params
+        self._rejected_widths.append(width)
+        del self._rejected_widths[: -p.width_consensus_ticks]
+        if len(self._rejected_widths) < p.width_consensus_ticks:
+            return False
+        median = float(np.median(self._rejected_widths))
+        return all(
+            abs(w - median) / median <= p.max_width_change_frac
+            for w in self._rejected_widths
+        )
 
     def _lateral_step(self, error: float) -> float:
         """Signed lateral tool move for a pixel error: proportional, but at least
@@ -641,6 +675,7 @@ class CylinderVisualServoGapExecutor(
     def _reset_run(self) -> None:
         self._phase = ALIGN
         self._tick = 0
+        self._gap_index += 1
         self._missed = 0
         self._aligned_ticks = 0
         self._clipped_warned = False
@@ -650,6 +685,7 @@ class CylinderVisualServoGapExecutor(
         self._ticks_on_target = 0
         self._start_pose = None
         self._recent_widths = []
+        self._rejected_widths = []
         self._range_samples = []
         self._approach_total = None
         self._approach_start_pose = None
@@ -701,17 +737,17 @@ class CylinderVisualServoGapExecutor(
             return
         self._debug_dir.mkdir(parents=True, exist_ok=True)
         cv.imwrite(
-            str(self._debug_dir / f"servo_{self._tick:04d}_raw.png"),
+            str(self._debug_dir / f"servo_g{self._gap_index}_{self._tick:04d}_raw.png"),
             cv.cvtColor(np.asarray(image, dtype=np.uint8), cv.COLOR_RGB2BGR),
         )
         overlay = render_edge_overlay(
             image,
             edges,
             self._params.detector,
-            label=f"t{self._tick:04d} {self._phase}",
+            label=f"gap {self._gap_index} t{self._tick:04d} {self._phase}",
         )
         cv.imwrite(
-            str(self._debug_dir / f"servo_{self._tick:04d}.png"),
+            str(self._debug_dir / f"servo_g{self._gap_index}_{self._tick:04d}.png"),
             cv.cvtColor(overlay, cv.COLOR_RGB2BGR),
         )
 

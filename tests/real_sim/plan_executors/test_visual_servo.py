@@ -696,3 +696,39 @@ def test_cylinder_cut_off_by_the_frame_is_walked_into_view(stepper):
     # The can came fully into view and the servo aligned on it.
     assert any(e.edges is not None and not e.edges.clipped for e in align)
     assert executor.phase == SETTLE
+
+
+def test_consistent_new_width_replaces_a_wrong_reference(stepper):
+    """Two narrow partial detections set a wrong width reference; the correct,
+    wider detections that follow are rejected at first but adopted once
+    width_consensus_ticks of them agree."""
+
+    class _PartialThenFull:
+        def __init__(self):
+            self.calls = 0
+
+        def get_image(self):
+            """A 60 px partial run for two frames, then the real 140 px can."""
+            self.calls += 1
+            half = 30 if self.calls <= 2 else 70
+            image = np.full((_IMAGE_H, _IMAGE_W, 3), (190, 150, 90), dtype=np.uint8)
+            center = _IMAGE_W // 2 + 40
+            image[:, center - half : center + half] = (200, 40, 40)
+            return image
+
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    executor = _make_executor(
+        _PartialThenFull(), stepper, max_missed_detections=100, width_consensus_ticks=3
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    for _ in range(9):
+        executor.step(_state(arm.joints))
+    widths = [
+        None if e.edges is None else round(e.edges.width_px) for e in executor.trace
+    ]
+    # Frames 3 and 4 are rejected (jump from 60); frame 5 completes the consensus
+    # and everything from there on is accepted at the real width.
+    assert widths[:2] == [60, 60]
+    assert widths[2:4] == [None, None]
+    assert all(w is not None and abs(w - 140) <= 2 for w in widths[4:])

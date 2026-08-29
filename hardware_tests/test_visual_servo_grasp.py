@@ -99,6 +99,7 @@ def main() -> int:
     parser.add_argument("--camera-to-grasp-offset", type=float, default=0.108)
     parser.add_argument("--no-range-estimate", action="store_true")
     parser.add_argument("--max-width-change-frac", type=float, default=0.3)
+    parser.add_argument("--width-consensus-ticks", type=int, default=3)
     args = parser.parse_args()
 
     ARTIFACT_DIR.mkdir(exist_ok=True)
@@ -114,6 +115,7 @@ def main() -> int:
     approach_total: float | None = None
     range_samples: list[tuple[float, float]] = []
     last_width: float | None = None
+    rejected_widths: list[float] = []
     commanded: list[float] = list(arm.get_arm_state())
     try:
         while True:
@@ -123,16 +125,38 @@ def main() -> int:
                 continue
             edges = detect_cylinder_edges(image, params)
             # A cylinder cut off by the image border has no usable width: it
-            # skips the jump check and leaves the width reference alone.
+            # skips the jump check and leaves the width reference alone. A
+            # width that jumps from the reference is ignored, unless the
+            # same new width comes back on width_consensus_ticks consecutive
+            # captures: then the reference was the wrong one (a partial
+            # detection of a white can on a light floor, say) and the new
+            # width is adopted.
             if edges is not None and not edges.clipped and last_width is not None:
                 change = abs(edges.width_px - last_width) / last_width
                 if change > args.max_width_change_frac:
-                    print(
-                        f"step {index}: ignoring a detection of width "
-                        f"{edges.width_px:.0f}px ({100 * change:.0f}% change from "
-                        f"{last_width:.0f}px)"
+                    rejected_widths.append(edges.width_px)
+                    recent = rejected_widths[-args.width_consensus_ticks :]
+                    consistent = len(recent) == args.width_consensus_ticks and all(
+                        abs(w - np.median(recent)) / np.median(recent)
+                        <= args.max_width_change_frac
+                        for w in recent
                     )
-                    edges = None
+                    if consistent:
+                        print(
+                            f"step {index}: adopting width {edges.width_px:.0f}px "
+                            f"after {len(recent)} consistent detections "
+                            f"(reference was {last_width:.0f}px)"
+                        )
+                        rejected_widths.clear()
+                    else:
+                        print(
+                            f"step {index}: ignoring a detection of width "
+                            f"{edges.width_px:.0f}px ({100 * change:.0f}% change "
+                            f"from {last_width:.0f}px)"
+                        )
+                        edges = None
+                else:
+                    rejected_widths.clear()
             if edges is not None and not edges.clipped:
                 last_width = edges.width_px
             phase = "approach" if approaching else "align"

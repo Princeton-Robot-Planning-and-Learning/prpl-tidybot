@@ -300,6 +300,10 @@ real_gap_executors:
     # fraction from the previous one is ignored (a background edge paired
     # with one cylinder edge).
     max_width_change_frac: 0.3
+    # ...unless the same new width comes back this many ticks in a row:
+    # then the reference was wrong (a partial detection of a white can on
+    # a light floor) and the new width is adopted.
+    width_consensus_ticks: 3
     # After alignment the approach is open loop, straight along the tool's
     # approach axis. Its length is estimated from how fast the cylinder's
     # apparent width grows over the first range_baseline metres (motion
