@@ -170,3 +170,6 @@ outputs/
 
 # test images
 test_images/
+
+# Overlays and other outputs of the interactive hardware tests
+hardware_tests/artifacts/
