@@ -275,6 +275,12 @@ real_gap_executors:
     approach_max: 0.20
     approach_distance: 0.10
     approach_step: 0.01
+    # Forward steps stream, one every approach_ticks_per_step ticks (~3 cm/s
+    # at 1 cm steps), so the approach is one continuous motion; aligning
+    # steps wait up to step_timeout_ticks for the arm before the next frame
+    # is trusted.
+    approach_ticks_per_step: 3
+    step_timeout_ticks: 4
     gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
     gripper_close_position: ${env.gripper_close_position}
     # Safety stops, both raise ExecutionFailure (rollout ends, arm holds):

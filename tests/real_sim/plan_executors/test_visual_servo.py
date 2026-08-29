@@ -410,6 +410,77 @@ def test_range_estimate_sets_the_approach_for_any_diameter(
     assert sum(forward) == pytest.approx(camera_to_axis - 0.108, abs=0.012)
 
 
+def test_approach_streams_without_waiting_for_the_arm(stepper):
+    """Forward steps are issued every approach_ticks_per_step ticks even when the arm
+    lags behind the commands; only the last step is waited out before closing."""
+
+    class _LaggingArm(_FakeArm):
+        """Moves a fraction of the way to each command per tick, like a real arm."""
+
+        def apply(self, action: TidyBotAction) -> None:
+            goal = np.array(action.arm_goal)
+            self.joints = list(
+                np.array(self.joints) + 0.3 * (goal - np.array(self.joints))
+            )
+            self.gripper = action.gripper_goal
+
+    arm = _LaggingArm(_PRE_GRASP_JOINTS)
+    camera = _SyntheticCanCamera(stepper, lambda: arm.joints, can_offset_m=0.0)
+    executor = _make_executor(
+        camera,
+        stepper,
+        estimate_range=False,
+        approach_distance=0.06,
+        approach_step=0.01,
+        approach_ticks_per_step=2,
+        step_timeout_ticks=6,
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    _run(executor, arm)
+
+    approach = [e for e in executor.trace if e.phase == APPROACH]
+    command_ticks = [e.tick for e in approach if e.delta_tool is not None]
+    assert len(command_ticks) == 6
+    gaps = np.diff(command_ticks)
+    assert gaps.max() <= 2, "steps were not streamed"
+    assert executor.phase == SETTLE
+
+
+def test_range_estimate_uses_perceived_travel_with_a_lagging_arm(stepper):
+    """With the arm trailing the commands, the parallax samples are tagged with the
+    perceived forward travel, so the estimate is still right."""
+
+    class _LaggingArm(_FakeArm):
+        def apply(self, action: TidyBotAction) -> None:
+            """Move 40% of the way to the command per tick."""
+            goal = np.array(action.arm_goal)
+            self.joints = list(
+                np.array(self.joints) + 0.4 * (goal - np.array(self.joints))
+            )
+            self.gripper = action.gripper_goal
+
+    arm = _LaggingArm(_PRE_GRASP_JOINTS)
+    camera = _SyntheticCanCamera(
+        stepper, lambda: arm.joints, can_offset_m=0.0, camera_to_axis_m=0.22
+    )
+    executor = _make_executor(
+        camera,
+        stepper,
+        range_baseline=0.04,
+        camera_to_grasp_offset=0.108,
+        approach_distance=0.10,
+        approach_step=0.01,
+        approach_ticks_per_step=2,
+        approach_max=0.25,
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    _run(executor, arm, max_ticks=800)
+    forward = [e.delta_tool[2] for e in executor.trace if e.delta_tool is not None]
+    assert sum(forward) == pytest.approx(0.22 - 0.108, abs=0.012)
+
+
 def test_range_estimate_falls_back_when_samples_are_unusable(stepper, caplog):
     """With the can not growing (a constant-width camera), the fixed distance is used
     and a warning says why."""
@@ -436,7 +507,7 @@ def test_range_estimate_falls_back_when_samples_are_unusable(stepper, caplog):
         _run(executor, arm)
     forward = [e.delta_tool[2] for e in executor.trace if e.delta_tool is not None]
     assert sum(forward) == pytest.approx(0.05)
-    assert "did not grow" in caplog.text
+    assert "using approach_distance 0.050 m" in caplog.text
 
 
 def test_persistent_misdetection_stops_at_lateral_travel_limit(stepper):

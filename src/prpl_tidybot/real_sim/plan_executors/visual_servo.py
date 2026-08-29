@@ -18,12 +18,20 @@ the cylinder in the wrist camera's view. From there the executor:
    the detector looks at and its edge pairs become unreliable, and by then
    the gripper is already facing the cylinder squarely.
 
+   The forward steps are streamed, one every ``approach_ticks_per_step``
+   ticks without waiting for the arm to arrive, so the arm's trajectory
+   generator blends them into one continuous motion; only the final step
+   is waited out before the gripper closes.
+
    How far to go is estimated from **motion parallax** over the first
    ``range_baseline`` of the approach, so it works for any cylinder
    diameter: the apparent width grows as ``w ∝ 1 / (d0 - Δ)`` with the
    forward displacement Δ, so a line fit of ``1/w`` against Δ gives the
    camera-to-axis distance ``d0`` at the start of the approach without
-   knowing the diameter or the focal length. The total approach is then
+   knowing the diameter or the focal length. Δ is measured from the
+   perceived joints (forward kinematics relative to where the approach
+   started), so the streamed commands running ahead of the arm do not
+   bias it, and a sample is taken every tick. The total approach is then
    ``d0 - camera_to_grasp_offset``, where the offset (camera optical
    center to the grasp position along the approach axis) is a property of
    the robot, not the object. If too few clean detections come in, or the
@@ -131,6 +139,7 @@ class _Params:
     approach_step: float
     step_tolerance: float
     step_timeout_ticks: int
+    approach_ticks_per_step: int
     gripper_dwell_ticks: int
     gripper_close_position: float
     max_missed_detections: int
@@ -195,7 +204,8 @@ class CylinderVisualServoGapExecutor(
         approach_distance: float = 0.10,
         approach_step: float = 0.01,
         step_tolerance: float = 0.02,
-        step_timeout_ticks: int = 8,
+        step_timeout_ticks: int = 4,
+        approach_ticks_per_step: int = 3,
         gripper_dwell_ticks: int = 20,
         gripper_close_position: float = 1.0,
         max_missed_detections: int = 10,
@@ -238,6 +248,7 @@ class CylinderVisualServoGapExecutor(
             approach_step=approach_step,
             step_tolerance=step_tolerance,
             step_timeout_ticks=step_timeout_ticks,
+            approach_ticks_per_step=approach_ticks_per_step,
             gripper_dwell_ticks=gripper_dwell_ticks,
             gripper_close_position=gripper_close_position,
             max_missed_detections=max_missed_detections,
@@ -261,6 +272,8 @@ class CylinderVisualServoGapExecutor(
         self._last_width: float | None = None
         self._range_samples: list[tuple[float, float]] = []
         self._approach_total: float | None = None
+        self._approach_start_pose: Pose | None = None
+        self._ticks_since_command: int = 0
         self._reset_run()
 
     # ------------------------------------------------------------------ Public
@@ -364,40 +377,63 @@ class CylinderVisualServoGapExecutor(
     def _approach_step(
         self, sim_state: ObjectCentricState, perceived: list[float]
     ) -> TidyBotAction:
-        if self._waiting_for_arm(perceived):
-            self._record(None, None, None)
-            return self._hold(sim_state, self._target or perceived, gripper=0.0)
-        edges = self._range_sample()
+        p = self._params
+        if self._approach_start_pose is None:
+            self._approach_start_pose = self._stepper.end_effector_pose(perceived)
+        travelled = self._forward_travel(perceived)
+        edges = self._range_sample(travelled)
         if self._approach_total is None:
-            if self._advanced >= self._params.range_baseline - 1e-9:
+            if travelled >= p.range_baseline - 1e-9:
                 self._approach_total = self._fit_approach_total()
-            elif self._advanced >= self._params.approach_distance - 1e-9:
-                # The baseline is longer than the fixed distance; do not
-                # overshoot it while still sampling.
-                self._approach_total = self._params.approach_distance
+            elif self._advanced >= p.approach_distance - 1e-9:
+                # The commands would overshoot the fixed distance before the
+                # arm has covered the baseline; stop here.
+                self._approach_total = p.approach_distance
         total = (
             self._approach_total
             if self._approach_total is not None
-            else max(self._params.approach_distance, self._params.range_baseline)
+            else max(p.approach_distance, p.range_baseline)
         )
         remaining = total - self._advanced
         if remaining <= 1e-6:
+            # All forward steps are out; wait for the arm on the last one.
+            if self._waiting_for_arm(perceived):
+                self._record(edges, None, None)
+                return self._hold(sim_state, self._target or perceived, gripper=0.0)
             self._record(edges, None, None)
             self._enter_close()
             return self._hold(sim_state, self._target or perceived, gripper=0.0)
-        forward = min(self._params.approach_step, remaining)
+        self._ticks_since_command += 1
+        if (
+            self._target is not None
+            and self._ticks_since_command < p.approach_ticks_per_step
+        ):
+            self._record(edges, None, None)
+            return self._hold(sim_state, self._target, gripper=0.0)
+        forward = min(p.approach_step, remaining)
         self._advanced += forward
-        delta = tool_delta(self._params.approach_axis, forward)
+        self._ticks_since_command = 0
+        delta = tool_delta(p.approach_axis, forward)
         return self._issue(sim_state, perceived, delta, edges, None)
 
-    def _range_sample(self) -> CylinderEdges | None:
-        """Capture a frame during the approach; while still inside the range baseline,
-        keep its (displacement, width) for the parallax fit."""
+    def _forward_travel(self, perceived: Sequence[float]) -> float:
+        """Perceived displacement along the approach axis since the approach began."""
+        assert self._approach_start_pose is not None
+        pose = self._stepper.end_effector_pose(perceived)
+        moved = np.array(pose.position) - np.array(self._approach_start_pose.position)
+        axis = matrix_from_quat(self._approach_start_pose.orientation)[
+            :, _axis_index(self._params.approach_axis)
+        ]
+        return float(moved @ axis)
+
+    def _range_sample(self, travelled: float) -> CylinderEdges | None:
+        """Capture a frame during the approach; while the arm is still inside the range
+        baseline, keep its (perceived displacement, width) for the parallax fit."""
         p = self._params
         sampling = (
             p.estimate_range
             and self._approach_total is None
-            and self._advanced <= p.range_baseline + 1e-9
+            and travelled <= p.range_baseline + 1e-9
         )
         if not sampling and self._debug_dir is None:
             return None
@@ -407,7 +443,7 @@ class CylinderVisualServoGapExecutor(
         edges = self._detect(image)
         self._dump_debug(image, edges)
         if sampling and edges is not None:
-            self._range_samples.append((self._advanced, edges.width_px))
+            self._range_samples.append((travelled, edges.width_px))
         return edges
 
     def _fit_approach_total(self) -> float:
@@ -593,6 +629,8 @@ class CylinderVisualServoGapExecutor(
         self._last_width = None
         self._range_samples = []
         self._approach_total = None
+        self._approach_start_pose = None
+        self._ticks_since_command = 0
         self.trace = []
 
     def _reached(self, perceived: Sequence[float], target: Sequence[float]) -> bool:
