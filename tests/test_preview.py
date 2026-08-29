@@ -19,8 +19,16 @@ import pytest
 from kinder_bilevel_planning.agent import AgentFailure
 from kinder_models.structs import SkillCall
 from relational_structs import Object, Type
+from spatialmath import SE2
 
-from prpl_tidybot.preview import planned_trajectory_from_agent, preview_or_abort
+from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
+from prpl_tidybot.preview import (
+    find_floor_violation,
+    planned_trajectory_from_agent,
+    preview_or_abort,
+)
+from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
+from prpl_tidybot.structs import TidyBotObservation
 
 
 @dataclass
@@ -349,4 +357,93 @@ def test_rejects_mismatched_action_count(tmp_path: Path):
             shadow_sim=_StubShadowSim(),
             log_dir=tmp_path,
             prompt_fn=lambda _msg: "y",
+        )
+
+
+def _state_at(x: float, y: float):
+    """A planner state with the base at map-frame (x, y)."""
+    obs = TidyBotObservation(
+        arm_conf=[0.0] * 7,
+        base_pose=SE2(x=0.0, y=0.0, theta=0.0),
+        map_base_pose=SE2(x=x, y=y, theta=0.0),
+        gripper=0.0,
+        wrist_camera=np.zeros(WRIST_CAMERA_DIMS, dtype=np.uint8),
+        base_camera=np.zeros(BASE_CAMERA_DIMS, dtype=np.uint8),
+    )
+    return PrplLab3DPerceiver().step(obs, {})
+
+
+_FLOOR = (-1.83, 1.83, -1.83, 1.83)
+
+
+def test_find_floor_violation_reports_the_first_state_outside_the_margin():
+    """The first state whose base is not base_margin inside the floor is reported
+    with its index and position; a plan that stays inside gives None."""
+    inside = [_state_at(0.0, 0.0), _state_at(1.4, -1.2), _state_at(-1.0, 1.4)]
+    assert find_floor_violation(inside, _FLOOR, base_margin=0.37) is None
+    # 1.6 is on the floor but less than 0.37 m from its edge.
+    plan = inside + [_state_at(1.6, 0.0), _state_at(1.9, 0.0)]
+    assert find_floor_violation(plan, _FLOOR, base_margin=0.0) == (4, 1.9, 0.0)
+    assert find_floor_violation(plan, _FLOOR, base_margin=0.37) == (3, 1.6, 0.0)
+
+
+def test_plan_off_the_floor_is_refused_without_prompting(tmp_path: Path):
+    """A plan with a base position outside the floor bounds is refused before the
+    operator is asked, the preview is still written, and the message names the
+    offending state."""
+    states = [_state_at(0.0, 0.0), _state_at(1.0, 0.5), _state_at(1.9, -1.4)]
+    prompted: list[str] = []
+
+    def _record(msg: str) -> str:
+        prompted.append(msg)
+        return "y"
+
+    with pytest.raises(AgentFailure, match=r"state 2 puts the base at \(1.90, -1.40\)"):
+        preview_or_abort(
+            planned_states=states,
+            shadow_sim=_StubShadowSim(),
+            log_dir=tmp_path,
+            prompt_fn=_record,
+            floor_bounds=_FLOOR,
+            base_margin=0.37,
+        )
+    assert not prompted
+    assert (tmp_path / "preview.mp4").exists()
+
+
+def test_plan_inside_the_floor_is_prompted_as_before(tmp_path: Path):
+    """With the bounds set, a plan that stays inside them still goes to the prompt."""
+    states = [_state_at(0.0, 0.0), _state_at(1.3, 0.6)]
+    prompted: list[str] = []
+
+    def _record(msg: str) -> str:
+        prompted.append(msg)
+        return "y"
+
+    out = preview_or_abort(
+        planned_states=states,
+        shadow_sim=_StubShadowSim(),
+        log_dir=tmp_path,
+        prompt_fn=_record,
+        floor_bounds=_FLOOR,
+        base_margin=0.37,
+    )
+    assert out is not None and len(prompted) == 1
+
+
+def test_predicted_state_after_a_gap_is_checked_too(tmp_path: Path):
+    """The predicted post-gap state is part of the plan and is held to the floor
+    bounds like any other."""
+    outside = _state_at(-1.9, 0.0)
+    states = [_state_at(0.0, 0.0), outside, _state_at(0.0, 0.0)]
+    actions = [_skill_call(outside), np.zeros(11)]
+    with pytest.raises(AgentFailure, match="state 1"):
+        preview_or_abort(
+            planned_states=states,
+            planned_actions=actions,
+            shadow_sim=_StubShadowSim(),
+            log_dir=tmp_path,
+            prompt_fn=lambda _msg: "y",
+            floor_bounds=_FLOOR,
+            base_margin=0.37,
         )

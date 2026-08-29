@@ -52,6 +52,9 @@ _logger = logging.getLogger(__name__)
 _GAP_BANNER_COLOR = (180, 30, 30, 255)
 
 
+FloorBounds = tuple[float, float, float, float]
+
+
 def preview_or_abort(
     planned_states: Sequence[ObjectCentricState],
     shadow_sim,
@@ -62,8 +65,17 @@ def preview_or_abort(
     prompt_fn: PromptFn = input,
     planned_actions: Sequence[Any] | None = None,
     gap_hold_seconds: float = 1.0,
+    floor_bounds: FloorBounds | None = None,
+    base_margin: float = 0.0,
 ) -> Path | None:
     """Render the plan through `shadow_sim`, save an mp4, prompt for approval.
+
+    With ``floor_bounds`` (map-frame ``(x_min, x_max, y_min, y_max)``), every
+    planned base position, including the predicted states after magic gaps,
+    must stay at least ``base_margin`` inside them; otherwise the preview is
+    still written but the plan is refused (:class:`AgentFailure`) without
+    prompting, naming the first offending state. A base path that leaves the
+    floor is hard to judge from the video, so the check is the gate.
 
     ``planned_actions`` (one fewer than ``planned_states``; action ``i``
     leads from state ``i`` to state ``i + 1``) is scanned for
@@ -128,10 +140,44 @@ def preview_or_abort(
         render_time,
         encode_time,
     )
+    if floor_bounds is not None:
+        violation = find_floor_violation(planned_states, floor_bounds, base_margin)
+        if violation is not None:
+            index, x, y = violation
+            message = (
+                f"Plan leaves the floor: planned state {index} puts the base at "
+                f"({x:.2f}, {y:.2f}), which is less than {base_margin:.2f} m inside "
+                f"x [{floor_bounds[0]:.2f}, {floor_bounds[1]:.2f}] "
+                f"y [{floor_bounds[2]:.2f}, {floor_bounds[3]:.2f}] (preview: {out_path})"
+            )
+            _logger.error(message)
+            raise AgentFailure(message)
     answer = prompt_fn(_prompt_text(out_path, gaps)).strip().lower()
     if answer not in ("y", "yes"):
         raise AgentFailure(f"Plan preview rejected by operator (answer={answer!r})")
     return out_path
+
+
+def find_floor_violation(
+    planned_states: Sequence[ObjectCentricState],
+    floor_bounds: FloorBounds,
+    base_margin: float = 0.0,
+    robot_name: str = "robot",
+) -> tuple[int, float, float] | None:
+    """The first planned state whose base position is not at least ``base_margin``
+    inside ``floor_bounds`` (``x_min, x_max, y_min, y_max``), as ``(index, x, y)``,
+    or None when every state is inside."""
+    x_min, x_max, y_min, y_max = floor_bounds
+    for index, state in enumerate(planned_states):
+        robot = state.get_object_from_name(robot_name)
+        x = float(state.get(robot, "pos_base_x"))
+        y = float(state.get(robot, "pos_base_y"))
+        if not (
+            x_min + base_margin <= x <= x_max - base_margin
+            and y_min + base_margin <= y <= y_max - base_margin
+        ):
+            return index, x, y
+    return None
 
 
 def _find_gaps(

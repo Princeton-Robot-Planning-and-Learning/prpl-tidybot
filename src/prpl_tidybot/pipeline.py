@@ -183,6 +183,12 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
                     seed=cfg.seed,
                     fps=int(preview_cfg.get("fps", 10)),
                     max_frames=preview_cfg.get("max_frames", 50),
+                    floor_bounds=(
+                        tuple(preview_cfg["floor_bounds"])
+                        if preview_cfg.get("floor_bounds") is not None
+                        else None
+                    ),
+                    base_margin=float(preview_cfg.get("base_margin", 0.0)),
                 )
             except AgentFailure as e:
                 finish_reason = f"agent_failure: {e}"
