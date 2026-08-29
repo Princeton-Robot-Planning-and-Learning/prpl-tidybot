@@ -252,6 +252,55 @@ def test_tick_budget_raises(stepper: ToolFrameStepper):
         _run(executor, arm)
 
 
+def test_persistent_misdetection_stops_at_lateral_travel_limit(stepper):
+    """A camera that always reports the can far to one side walks the arm sideways
+    one step at a time until the travel limit stops it."""
+
+    class _AlwaysLeft:
+        def get_image(self):
+            """A can fixed 120 px left of center, whatever the arm does."""
+            image = np.full((_IMAGE_H, _IMAGE_W, 3), (190, 150, 90), dtype=np.uint8)
+            image[:, 10:70] = (200, 40, 40)
+            return image
+
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    executor = _make_executor(
+        _AlwaysLeft(), stepper, lateral_gain=0.001, lateral_travel_limit=0.03
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    with pytest.raises(ExecutionFailure, match="lateral travel"):
+        _run(executor, arm)
+    # Only a few 1 cm steps were ever commanded.
+    steps = [e for e in executor.trace if e.delta_tool is not None]
+    assert 3 <= len(steps) <= 4
+    assert all(abs(e.delta_tool[0]) <= 0.01 + 1e-9 for e in steps)
+
+
+def test_ik_branch_flip_is_refused(stepper):
+    """A stepper that returns a far-away joint solution for a small move is refused."""
+
+    class _FlippingStepper:
+        def end_effector_pose(self, joints):
+            """Delegate to the real model."""
+            return stepper.end_effector_pose(joints)
+
+        def step(self, joints, delta_tool):
+            """Return the true solution with joint 5 flipped by pi."""
+            target = stepper.step(joints, delta_tool)
+            target[4] += np.pi
+            return target
+
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    camera = _SyntheticCanCamera(stepper, lambda: arm.joints, can_offset_m=0.03)
+    executor = _make_executor(camera, _FlippingStepper())  # type: ignore[arg-type]
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    with pytest.raises(ExecutionFailure, match="IK branch flip"):
+        _run(executor, arm)
+    assert not any(e.target_joints for e in executor.trace)
+
+
 def test_validation():
     """Bad axes and a non-SkillCall trajectory are rejected."""
     with pytest.raises(ValueError, match="axis"):

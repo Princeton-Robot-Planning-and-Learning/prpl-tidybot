@@ -28,7 +28,13 @@ written there, so a run can be inspected afterwards without the robot.
 
 Failure modes raise :class:`ExecutionFailure`: no detection for
 ``max_missed_detections`` consecutive ticks, no image from the source, an
-unreachable tool-frame move, or ``max_ticks`` elapsed.
+unreachable tool-frame move, a step whose inverse kinematics would jump
+any joint by more than ``max_joint_step`` (an IK branch flip near a
+singularity), more than ``lateral_travel_limit`` of sideways travel from
+where the servo started (a persistent misdetection walking the arm), or
+``max_ticks`` elapsed. Each command is at most one ``lateral_max_step`` /
+``approach_step`` move, so a misdetection can change the direction of a
+step but never its size.
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ import cv2 as cv
 import numpy as np
 from kinder_models.structs import SkillCall
 from prpl_utils.real_sim import PlanExecutor
+from pybullet_helpers.geometry import Pose, matrix_from_quat
 from relational_structs import ObjectCentricState
 from spatialmath import SE2
 
@@ -104,6 +111,8 @@ class _Params:
     gripper_close_position: float
     max_missed_detections: int
     max_ticks: int
+    max_joint_step: float
+    lateral_travel_limit: float
     detector: EdgeDetectorParams = field(default_factory=EdgeDetectorParams)
 
 
@@ -144,6 +153,8 @@ class CylinderVisualServoGapExecutor(
         gripper_close_position: float = 1.0,
         max_missed_detections: int = 10,
         max_ticks: int = 600,
+        max_joint_step: float = 0.2,
+        lateral_travel_limit: float = 0.05,
         debug_dir: str | Path | None = None,
     ) -> None:
         if lateral_axis not in ("x", "y", "z") or approach_axis not in ("x", "y", "z"):
@@ -174,6 +185,8 @@ class CylinderVisualServoGapExecutor(
             gripper_close_position=gripper_close_position,
             max_missed_detections=max_missed_detections,
             max_ticks=max_ticks,
+            max_joint_step=max_joint_step,
+            lateral_travel_limit=lateral_travel_limit,
             detector=detector or EdgeDetectorParams(),
         )
         self._debug_dir = Path(debug_dir) if debug_dir is not None else None
@@ -187,6 +200,7 @@ class CylinderVisualServoGapExecutor(
         self._close_ticks: int = 0
         self._target: list[float] | None = None
         self._ticks_on_target: int = 0
+        self._start_pose: Pose | None = None
         self._reset_run()
 
     # ------------------------------------------------------------------ Public
@@ -275,14 +289,46 @@ class CylinderVisualServoGapExecutor(
             return self._hold(sim_state, self._target or perceived, gripper=0.0)
 
         origin = self._target or perceived
+        if self._start_pose is None:
+            self._start_pose = self._stepper.end_effector_pose(origin)
         try:
             target = self._stepper.step(origin, delta)
         except ToolFrameStepError as e:
             raise ExecutionFailure(f"Visual servo step is unreachable: {e}") from e
+        self._check_step_is_small(origin, target, delta)
+        self._check_lateral_travel(target)
         self._target = target
         self._ticks_on_target = 0
         self._record(edges, error, delta, target)
         return self._hold(sim_state, target, gripper=0.0)
+
+    def _check_step_is_small(
+        self, origin: Sequence[float], target: Sequence[float], delta: Sequence[float]
+    ) -> None:
+        """Refuse an IK solution that jumps a joint by more than max_joint_step."""
+        jump = np.abs(_wrap(np.asarray(target) - np.asarray(origin)))
+        if float(jump.max()) > self._params.max_joint_step:
+            raise ExecutionFailure(
+                f"Visual servo refused a step: a {np.round(delta, 4)} m tool move "
+                f"maps to a joint change of {np.round(jump, 3)} rad (limit "
+                f"{self._params.max_joint_step}); likely an IK branch flip."
+            )
+
+    def _check_lateral_travel(self, target: Sequence[float]) -> None:
+        """Refuse to wander further than lateral_travel_limit from the start pose."""
+        assert self._start_pose is not None
+        pose = self._stepper.end_effector_pose(target)
+        moved = np.array(pose.position) - np.array(self._start_pose.position)
+        lateral_axis = matrix_from_quat(self._start_pose.orientation)[
+            :, _axis_index(self._params.lateral_axis)
+        ]
+        travel = abs(float(moved @ lateral_axis))
+        if travel > self._params.lateral_travel_limit:
+            raise ExecutionFailure(
+                f"Visual servo stopped: lateral travel {travel:.3f} m exceeds the "
+                f"{self._params.lateral_travel_limit:.3f} m limit; the detection is "
+                "probably wrong."
+            )
 
     def _next_delta(self, error: float) -> list[float] | None:
         """Tool-frame move for this tick, or None when the current phase has nothing
@@ -356,6 +402,7 @@ class CylinderVisualServoGapExecutor(
         self._close_ticks = 0
         self._target = None
         self._ticks_on_target = 0
+        self._start_pose = None
         self.trace = []
 
     def _reached(self, perceived: Sequence[float], target: Sequence[float]) -> bool:
