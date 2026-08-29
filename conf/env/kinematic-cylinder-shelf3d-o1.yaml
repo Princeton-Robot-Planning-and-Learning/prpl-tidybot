@@ -253,7 +253,13 @@ real_gap_executors:
     # would only accumulate and release in a jump. Keep below twice the
     # tolerance in metres (~6 mm at the grasp standoff).
     lateral_min_step: 0.006
-    # The pre-grasp pose is PRE_GRASP_BACKOFF (0.10 m) behind the grasp.
+    # During alignment a detection whose width jumps by more than this
+    # fraction from the previous one is ignored (a background edge paired
+    # with one cylinder edge).
+    max_width_change_frac: 0.3
+    # After alignment the approach is open loop, straight along the tool's
+    # approach axis. The pre-grasp pose is PRE_GRASP_BACKOFF (0.10 m)
+    # behind the grasp.
     approach_distance: 0.10
     approach_step: 0.01
     gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}

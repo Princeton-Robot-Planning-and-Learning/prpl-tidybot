@@ -9,10 +9,16 @@ the cylinder in the wrist camera's view. From there the executor:
    (:mod:`prpl_tidybot.visual_servo.cylinder_edges`), and moves the tool
    along its lateral axis in small steps proportional to the pixel offset
    of the cylinder axis from the image center, until the offset stays
-   within ``lateral_tolerance_px`` for ``align_confirm_ticks`` ticks.
-2. **Approaches**: moves the tool forward along its approach axis in
-   ``approach_step`` increments until ``approach_distance`` has been
-   covered, still correcting laterally along the way.
+   within ``lateral_tolerance_px`` for ``align_confirm_ticks`` ticks. This
+   is the only phase that acts on the camera: it happens at the pre-grasp
+   standoff, where both edges are cleanly in view.
+2. **Approaches** open loop: moves the tool straight forward along its
+   approach axis in ``approach_step`` increments until
+   ``approach_distance`` has been covered. No lateral correction: close to
+   the cylinder the fingers and background clutter enter the band the
+   detector looks at and its edge pairs become unreliable, and by then the
+   gripper is already facing the cylinder squarely. Frames are still
+   captured for the debug trace when a ``debug_dir`` is set.
 3. **Closes** the gripper and dwells ``gripper_dwell_ticks``.
 4. **Settles** to the SkillCall's predicted post-grasp configuration with
    a :class:`SettleGapExecutor`, the same final phase as the teleop
@@ -102,6 +108,7 @@ class _Params:
     lateral_tolerance_px: float
     lateral_max_step: float
     lateral_min_step: float
+    max_width_change_frac: float
     align_confirm_ticks: int
     approach_axis: str
     approach_distance: float
@@ -129,6 +136,9 @@ class CylinderVisualServoGapExecutor(
     at least ``lateral_min_step`` and at most ``lateral_max_step``; keep the
     minimum below twice the tolerance in metres so a step taken from just
     outside the tolerance cannot land outside it on the other side.
+    During alignment a detection whose apparent width differs from the
+    previous accepted one by more than ``max_width_change_frac`` is treated
+    as a miss (a stray background edge paired with one cylinder edge).
     Distances are in metres, tolerances in pixels / radians, durations in
     ticks.
     """
@@ -149,6 +159,7 @@ class CylinderVisualServoGapExecutor(
         lateral_tolerance_px: float = 8.0,
         lateral_max_step: float = 0.01,
         lateral_min_step: float = 0.006,
+        max_width_change_frac: float = 0.3,
         align_confirm_ticks: int = 3,
         approach_axis: str = "z",
         approach_distance: float = 0.10,
@@ -184,6 +195,7 @@ class CylinderVisualServoGapExecutor(
             lateral_tolerance_px=lateral_tolerance_px,
             lateral_max_step=lateral_max_step,
             lateral_min_step=lateral_min_step,
+            max_width_change_frac=max_width_change_frac,
             align_confirm_ticks=align_confirm_ticks,
             approach_axis=approach_axis,
             approach_distance=approach_distance,
@@ -210,6 +222,7 @@ class CylinderVisualServoGapExecutor(
         self._target: list[float] | None = None
         self._ticks_on_target: int = 0
         self._start_pose: Pose | None = None
+        self._last_width: float | None = None
         self._reset_run()
 
     # ------------------------------------------------------------------ Public
@@ -263,10 +276,17 @@ class CylinderVisualServoGapExecutor(
     def _servo_step(
         self, sim_state: ObjectCentricState, perceived: list[float]
     ) -> TidyBotAction:
+        if self._phase == APPROACH:
+            return self._approach_step(sim_state, perceived)
+        return self._align_step(sim_state, perceived)
+
+    def _align_step(
+        self, sim_state: ObjectCentricState, perceived: list[float]
+    ) -> TidyBotAction:
         image = self._image_source.get_image()
         if image is None:
             raise ExecutionFailure("Visual servo got no wrist image.")
-        edges = detect_cylinder_edges(image, self._params.detector)
+        edges = self._detect(image)
         error = None if edges is None else edges.lateral_error_px
         self._dump_debug(image, edges)
         if edges is None:
@@ -275,28 +295,99 @@ class CylinderVisualServoGapExecutor(
             if self._missed > self._params.max_missed_detections:
                 raise ExecutionFailure(
                     f"Visual servo lost the cylinder for {self._missed} consecutive "
-                    f"ticks in phase {self._phase}."
+                    "ticks while aligning."
                 )
             return self._hold(sim_state, self._target or perceived, gripper=0.0)
         self._missed = 0
         assert error is not None
 
-        # Let the arm reach the previous step before issuing the next one.
-        if self._target is not None and not self._reached(perceived, self._target):
-            self._ticks_on_target += 1
-            if self._ticks_on_target < self._params.step_timeout_ticks:
-                self._record(edges, error, None)
-                return self._hold(sim_state, self._target, gripper=0.0)
-
-        delta = self._next_delta(error)
-        if delta is None:
-            # Aligned and (if approaching) fully advanced: nothing more to do
-            # in this phase.
+        if self._waiting_for_arm(perceived):
             self._record(edges, error, None)
-            if self._phase == APPROACH:
-                self._enter_close()
             return self._hold(sim_state, self._target or perceived, gripper=0.0)
 
+        if abs(error) <= self._params.lateral_tolerance_px:
+            self._aligned_ticks += 1
+            self._record(edges, error, None)
+            if self._aligned_ticks >= self._params.align_confirm_ticks:
+                _logger.info(
+                    "Visual servo aligned (|error| <= %.1f px for %d ticks); "
+                    "approaching %.3f m open loop.",
+                    self._params.lateral_tolerance_px,
+                    self._aligned_ticks,
+                    self._params.approach_distance,
+                )
+                self._phase = APPROACH
+            return self._hold(sim_state, self._target or perceived, gripper=0.0)
+
+        self._aligned_ticks = 0
+        delta = tool_delta(self._params.lateral_axis, self._lateral_step(error))
+        return self._issue(sim_state, perceived, delta, edges, error)
+
+    def _approach_step(
+        self, sim_state: ObjectCentricState, perceived: list[float]
+    ) -> TidyBotAction:
+        if self._debug_dir is not None:
+            image = self._image_source.get_image()
+            if image is not None:
+                self._dump_debug(image, self._detect(image))
+        if self._waiting_for_arm(perceived):
+            self._record(None, None, None)
+            return self._hold(sim_state, self._target or perceived, gripper=0.0)
+        remaining = self._params.approach_distance - self._advanced
+        if remaining <= 1e-6:
+            self._record(None, None, None)
+            self._enter_close()
+            return self._hold(sim_state, self._target or perceived, gripper=0.0)
+        forward = min(self._params.approach_step, remaining)
+        self._advanced += forward
+        delta = tool_delta(self._params.approach_axis, forward)
+        return self._issue(sim_state, perceived, delta, None, None)
+
+    def _detect(self, image: np.ndarray) -> CylinderEdges | None:
+        """Run the detector and reject a width that jumped from the last accepted one."""
+        edges = detect_cylinder_edges(image, self._params.detector)
+        if edges is None:
+            return None
+        if self._last_width is not None:
+            change = abs(edges.width_px - self._last_width) / self._last_width
+            if change > self._params.max_width_change_frac:
+                _logger.warning(
+                    "Visual servo ignored a detection: width %.0f px vs %.0f px "
+                    "before (%.0f%% change).",
+                    edges.width_px,
+                    self._last_width,
+                    100 * change,
+                )
+                return None
+        self._last_width = edges.width_px
+        return edges
+
+    def _lateral_step(self, error: float) -> float:
+        """Signed lateral tool move for a pixel error: proportional, but at least
+        ``lateral_min_step`` and at most ``lateral_max_step``. The arm's compliant
+        controller does not react to a target a few millimetres away, so smaller
+        nudges only stack up and then release in one jump."""
+        p = self._params
+        lateral = -p.lateral_sign * p.lateral_gain * error
+        magnitude = min(max(abs(lateral), p.lateral_min_step), p.lateral_max_step)
+        return float(np.copysign(magnitude, lateral))
+
+    def _waiting_for_arm(self, perceived: Sequence[float]) -> bool:
+        """Let the arm reach the previous step before issuing the next one."""
+        if self._target is None or self._reached(perceived, self._target):
+            return False
+        self._ticks_on_target += 1
+        return self._ticks_on_target < self._params.step_timeout_ticks
+
+    def _issue(
+        self,
+        sim_state: ObjectCentricState,
+        perceived: list[float],
+        delta: list[float],
+        edges: CylinderEdges | None,
+        error: float | None,
+    ) -> TidyBotAction:
+        """Convert a tool-frame move into a joint target, check it, and command it."""
         origin = self._target or perceived
         if self._start_pose is None:
             self._start_pose = self._stepper.end_effector_pose(origin)
@@ -339,46 +430,6 @@ class CylinderVisualServoGapExecutor(
                 "probably wrong."
             )
 
-    def _next_delta(self, error: float) -> list[float] | None:
-        """Tool-frame move for this tick, or None when the current phase has nothing
-        left to command."""
-        p = self._params
-        aligned = abs(error) <= p.lateral_tolerance_px
-        lateral = 0.0
-        if not aligned:
-            lateral = -p.lateral_sign * p.lateral_gain * error
-            # Small corrections are still a full lateral_min_step: the arm's
-            # compliant controller does not react to a target a few
-            # millimetres away, so nudges below its deadband only stack up
-            # and then release in one jump.
-            magnitude = min(max(abs(lateral), p.lateral_min_step), p.lateral_max_step)
-            lateral = float(np.copysign(magnitude, lateral))
-        if self._phase == ALIGN:
-            if aligned:
-                self._aligned_ticks += 1
-                if self._aligned_ticks >= p.align_confirm_ticks:
-                    _logger.info(
-                        "Visual servo aligned (|error| <= %.1f px for %d ticks); "
-                        "approaching %.3f m.",
-                        p.lateral_tolerance_px,
-                        self._aligned_ticks,
-                        p.approach_distance,
-                    )
-                    self._phase = APPROACH
-                else:
-                    return None
-            else:
-                self._aligned_ticks = 0
-                return tool_delta(p.lateral_axis, lateral)
-        remaining = p.approach_distance - self._advanced
-        if remaining <= 1e-6:
-            return None
-        forward = min(p.approach_step, remaining)
-        self._advanced += forward
-        delta = tool_delta(p.approach_axis, forward)
-        delta[_axis_index(p.lateral_axis)] += lateral
-        return delta
-
     def _enter_close(self) -> None:
         _logger.info(
             "Visual servo approach complete (%.3f m); closing the gripper.",
@@ -412,6 +463,7 @@ class CylinderVisualServoGapExecutor(
         self._target = None
         self._ticks_on_target = 0
         self._start_pose = None
+        self._last_width = None
         self.trace = []
 
     def _reached(self, perceived: Sequence[float], target: Sequence[float]) -> bool:

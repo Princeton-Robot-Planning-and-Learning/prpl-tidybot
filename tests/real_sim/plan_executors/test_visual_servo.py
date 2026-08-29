@@ -166,14 +166,20 @@ def test_aligns_approaches_closes_and_settles(stepper: ToolFrameStepper):
     phases = [entry.phase for entry in executor.trace]
     assert ALIGN in phases and APPROACH in phases and CLOSE in phases
     assert executor.phase == SETTLE
-    # Aligned: by the time the approach ran, the can was within tolerance of the
-    # image center (8 px at 0.5 mm/px is 4 mm).
-    approach_errors = [
+    # Aligned: the last detections before the approach had the can within
+    # tolerance of the image center (8 px at 0.5 mm/px is 4 mm).
+    align_errors = [
         e.lateral_error_px
         for e in executor.trace
-        if e.phase == APPROACH and e.lateral_error_px is not None
+        if e.phase == ALIGN and e.lateral_error_px is not None
     ]
-    assert approach_errors and max(abs(x) for x in approach_errors) <= 8.0
+    assert align_errors and max(abs(x) for x in align_errors[-3:]) <= 8.0
+    # The approach never acted on the camera.
+    assert all(
+        e.delta_tool is None or abs(e.delta_tool[0]) < 1e-9
+        for e in executor.trace
+        if e.phase == APPROACH
+    )
     # Approached: the tool advanced the requested distance along its z axis before
     # the settle took over (measured on the last approach-phase target).
     last_approach = next(
@@ -289,6 +295,62 @@ def test_minimum_step_validation():
         )
 
 
+def test_approach_is_open_loop_and_ignores_the_camera(stepper):
+    """Once aligned, garbage frames (or none) do not stop or steer the approach."""
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    real_camera = _SyntheticCanCamera(stepper, lambda: arm.joints, can_offset_m=0.0)
+
+    class _GoesBlankAfterAlignment:
+        def __init__(self):
+            self.calls = 0
+
+        def get_image(self):
+            """Real frames for the first few captures, then nothing."""
+            self.calls += 1
+            return real_camera.get_image() if self.calls <= 4 else None
+
+    camera = _GoesBlankAfterAlignment()
+    executor = _make_executor(
+        camera,
+        stepper,
+        align_confirm_ticks=2,
+        approach_distance=0.04,
+        approach_step=0.02,
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    _run(executor, arm)
+    assert executor.phase == SETTLE
+    forward = [e.delta_tool[2] for e in executor.trace if e.delta_tool is not None]
+    assert sum(forward) == pytest.approx(0.04)
+
+
+def test_width_jump_is_treated_as_a_miss(stepper):
+    """A detection whose width differs wildly from the previous one is ignored."""
+
+    class _WidthJumps:
+        def __init__(self):
+            self.calls = 0
+
+        def get_image(self):
+            """A 60 px can, then a 200 px 'can' (a background edge), alternating."""
+            self.calls += 1
+            image = np.full((_IMAGE_H, _IMAGE_W, 3), (190, 150, 90), dtype=np.uint8)
+            half = 30 if self.calls % 2 else 100
+            image[:, 160 - half + 40 : 160 + half + 40] = (200, 40, 40)
+            return image
+
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    executor = _make_executor(_WidthJumps(), stepper, max_missed_detections=100)
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    for _ in range(4):
+        executor.step(_state(arm.joints))
+    widths = [e.edges.width_px for e in executor.trace if e.edges is not None]
+    assert widths and all(abs(w - 60) < 4 for w in widths)
+    assert any(e.edges is None for e in executor.trace[1:])
+
+
 def test_persistent_misdetection_stops_at_lateral_travel_limit(stepper):
     """A camera that always reports the can far to one side walks the arm sideways
     one step at a time until the travel limit stops it."""
@@ -398,12 +460,12 @@ def test_servo_on_kinder_wrist_camera(stepper: ToolFrameStepper):
             e.lateral_error_px for e in executor.trace if e.lateral_error_px is not None
         ]
         assert abs(errors[0]) > 40, "the shifted cylinder starts well off center"
-        aligned_errors = [
+        align_errors = [
             e.lateral_error_px
             for e in executor.trace
-            if e.phase == APPROACH and e.lateral_error_px is not None
+            if e.phase == ALIGN and e.lateral_error_px is not None
         ]
-        assert aligned_errors and max(abs(x) for x in aligned_errors) <= 12.0
+        assert align_errors and max(abs(x) for x in align_errors[-3:]) <= 12.0
         sim.close()
     finally:
         env.close()

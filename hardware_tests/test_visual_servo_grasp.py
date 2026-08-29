@@ -5,10 +5,12 @@ pre-grasp pose in front of a standing cylinder, gripper open, both cylinder
 edges visible in the wrist camera. Each iteration captures a wrist frame,
 runs the edge detector, writes the annotated frame under
 hardware_tests/artifacts/, prints the lateral error and the tool-frame step
-the servo would take, and asks before commanding it. Use it to confirm the
-sign of the lateral axis (`--lateral-sign -1` if the first aligning step
-moves the wrong way) and the gain before enabling the executor in a
-rollout.
+the servo would take, and asks before commanding it. Alignment acts on the
+camera; once the cylinder has been within tolerance on two consecutive
+captures the approach is open loop (straight forward steps, frames still
+saved for the record). Use it to confirm the sign of the lateral axis
+(`--lateral-sign -1` if the first aligning step moves the wrong way) and
+the gain before enabling the executor in a rollout.
 
     python hardware_tests/test_visual_servo_grasp.py [--dry-run] [--lateral-sign -1]
 
@@ -71,6 +73,8 @@ def main() -> int:
     arm = RealArmInterface(reset_arm=False)
     advanced = 0.0
     index = 0
+    aligned_captures = 0
+    approaching = False
     commanded: list[float] = list(arm.get_arm_state())
     try:
         while True:
@@ -79,39 +83,53 @@ def main() -> int:
                 time.sleep(0.05)
                 continue
             edges = detect_cylinder_edges(image, params)
-            overlay = render_edge_overlay(image, edges, params, label=f"step {index}")
+            phase = "approach" if approaching else "align"
+            overlay = render_edge_overlay(
+                image, edges, params, label=f"step {index} {phase}"
+            )
             out = ARTIFACT_DIR / f"visual_servo_{index:03d}.png"
             cv.imwrite(str(out), cv.cvtColor(overlay, cv.COLOR_RGB2BGR))
-            if edges is None:
-                answer = input(f"No edges found (overlay: {out}). Retry? [Y/n]: ")
-                if answer.strip().lower() in ("n", "no"):
-                    return 1
-                continue
-            error = edges.lateral_error_px
-            aligned = abs(error) <= args.lateral_tolerance_px
-            lateral = 0.0
-            if not aligned:
+            if approaching:
+                # Open loop from here: the camera is only recorded.
+                forward = min(args.approach_step, args.approach_distance - advanced)
+                if forward <= 1e-6:
+                    print(f"Approach complete ({advanced:.3f} m). Done.")
+                    return 0
+                delta = tool_delta("z", forward)
+                report = f"open-loop forward {forward:.3f} m ({advanced:.3f} so far)"
+            else:
+                if edges is None:
+                    answer = input(f"No edges found (overlay: {out}). Retry? [Y/n]: ")
+                    if answer.strip().lower() in ("n", "no"):
+                        return 1
+                    continue
+                error = edges.lateral_error_px
+                if abs(error) <= args.lateral_tolerance_px:
+                    aligned_captures += 1
+                    print(
+                        f"step {index}: error {error:+.1f}px within tolerance "
+                        f"({aligned_captures}/2)"
+                    )
+                    if aligned_captures >= 2:
+                        approaching = True
+                        print("Aligned; switching to the open-loop approach.")
+                    index += 1
+                    continue
+                aligned_captures = 0
                 lateral = -args.lateral_sign * args.lateral_gain * error
                 magnitude = min(
                     max(abs(lateral), args.lateral_min_step), args.lateral_max_step
                 )
-                lateral = float(np.copysign(magnitude, lateral))
-            forward = 0.0
-            if aligned:
-                forward = min(args.approach_step, args.approach_distance - advanced)
-            if aligned and forward <= 1e-6:
-                print(f"Aligned and approach complete ({advanced:.3f} m). Done.")
-                return 0
-            delta = tool_delta("x", lateral)
-            delta[2] += forward
+                delta = tool_delta("x", float(np.copysign(magnitude, lateral)))
+                forward = 0.0
+                report = f"error {error:+.1f}px width {edges.width_px:.0f}px"
             perceived = arm.get_arm_state()
             target = stepper.step(commanded, delta)
             lag = np.round(_wrap(np.array(commanded) - np.array(perceived)), 3)
             print(
-                f"step {index}: error {error:+.1f}px width {edges.width_px:.0f}px "
-                f"-> tool delta {np.round(delta, 4)} m, joint delta "
-                f"{np.round(np.array(target) - np.array(commanded), 3)} from the last "
-                f"target (perceived lag {lag}) (overlay: {out})"
+                f"step {index}: {report} -> tool delta {np.round(delta, 4)} m, joint "
+                f"delta {np.round(np.array(target) - np.array(commanded), 3)} from the "
+                f"last target (perceived lag {lag}) (overlay: {out})"
             )
             answer = input("Execute this step? [Enter=yes / s=skip capture / q=quit]: ")
             if answer.strip().lower() == "q":
