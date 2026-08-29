@@ -33,6 +33,13 @@ env_model_kwargs:
     # tall opening above the bottom board; the Pringles can (taller than a
     # regular board gap) is placed there.
     shelf_omitted_layers: [1]
+    # Where the base motion planner may put the base (it samples poses
+    # uniformly inside this box; the default is +-10 m). The map frame is
+    # centred on the 6 x 6 tiles of 2 ft floor, so the floor edge is at
+    # +-1.83 m; this keeps the sampled waypoints on the tiles, with room
+    # for the place staging pose next to the shelf (x up to ~1.65).
+    robot_base_pose_lower_bound: ${env.base_pose_lower_bound}
+    robot_base_pose_upper_bound: ${env.base_pose_upper_bound}
 
 # Skills planned as "magic": their low-level policy is not simulated. The
 # planner records a SkillCall carrying the skill's predicted outcome, and
@@ -80,6 +87,19 @@ cylinders:
   - {marker_id: 37, radius: 0.040, height: 0.210, fake_xy: [0.3, -0.6], place: [0.12, -0.05, 0.86]}
 # Radius the simulator uses for every cylinder (see env_model_kwargs).
 sim_cylinder_radius: 0.039
+
+# Base motion planning box (see env_model_kwargs.config): SE2 poses the
+# base motion planner is allowed to sample. Rotation bounds are +-pi.
+base_pose_lower_bound:
+  _target_: pybullet_helpers.geometry.SE2Pose
+  x: -1.5
+  y: -1.5
+  rot: -3.141592653589793
+base_pose_upper_bound:
+  _target_: pybullet_helpers.geometry.SE2Pose
+  x: 1.7
+  y: 1.5
+  rot: 3.141592653589793
 
 # Static shelf pose threaded into the perceiver. Matches the value used for
 # the Shelf3D env so the same physical shelf staging works for both;
