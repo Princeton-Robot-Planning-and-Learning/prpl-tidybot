@@ -371,11 +371,39 @@ def test_width_jump_is_treated_as_a_miss(stepper):
     executor = _make_executor(_WidthJumps(), stepper, max_missed_detections=100)
     pre_state = _state(_PRE_GRASP_JOINTS)
     executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
-    for _ in range(4):
+    for _ in range(8):
         executor.step(_state(arm.joints))
     widths = [e.edges.width_px for e in executor.trace if e.edges is not None]
     assert widths and all(abs(w - 60) < 4 for w in widths)
     assert any(e.edges is None for e in executor.trace[1:])
+
+
+def test_single_outlier_does_not_become_the_width_reference(stepper):
+    """The width reference is the median of recent detections, so one outlier that
+    slipped through cannot make the following correct detections look like jumps."""
+
+    class _OneOutlier:
+        def __init__(self):
+            self.calls = 0
+
+        def get_image(self):
+            """60 px cans, except one 74 px frame (a 23% change, accepted)."""
+            self.calls += 1
+            half = 37 if self.calls == 4 else 30
+            image = np.full((_IMAGE_H, _IMAGE_W, 3), (190, 150, 90), dtype=np.uint8)
+            center = _IMAGE_W // 2 + 40
+            image[:, center - half : center + half] = (200, 40, 40)
+            return image
+
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    executor = _make_executor(_OneOutlier(), stepper, max_missed_detections=100)
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    for _ in range(8):
+        executor.step(_state(arm.joints))
+    accepted = [e.edges is not None for e in executor.trace]
+    # Everything after the outlier is still accepted.
+    assert all(accepted[4:])
 
 
 @pytest.mark.parametrize("camera_to_axis,diameter", [(0.20, 0.078), (0.26, 0.05)])

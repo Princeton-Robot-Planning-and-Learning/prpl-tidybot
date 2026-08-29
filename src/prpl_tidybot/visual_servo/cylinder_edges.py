@@ -51,11 +51,11 @@ class EdgeDetectorParams:
     ``min_texture``). Gaps of
     up to ``gap_px`` object-free columns inside a run are closed. Each run
     boundary is snapped to the strongest gradient peak within
-    ``refine_px``, and both snapped boundaries must carry at least
-    ``min_boundary_response`` of the strongest gradient in the band, else the
-    run is a lighting gradient rather than a silhouette; of the remaining runs
-    the one nearest the image center wins. ``min_edge_strength`` is the
-    smallest mean |Sobel-x|
+    ``refine_px`` when that peak carries at least ``min_boundary_response`` of
+    the strongest gradient in the band (a boundary with no such peak, like a
+    white label against a light floor, keeps the segmentation's column); of
+    the plausible runs the one nearest the image center wins.
+    ``min_edge_strength`` is the smallest mean |Sobel-x|
     response (gray levels per pixel; the simulator's soft-shaded cylinder
     measures ~3, a bare floor ~1) the strongest column must reach for the
     frame to count as containing an edge at all.
@@ -225,13 +225,9 @@ def detect_cylinder_edges(
     for start, stop in _runs(object_columns(image, params)):
         if not min_width <= stop - start <= max_width:
             continue
-        left = _snap_to_peak(profile, start, params.refine_px)
-        right = _snap_to_peak(profile, stop - 1, params.refine_px)
+        left = _snap_to_peak(profile, start, params)
+        right = _snap_to_peak(profile, stop - 1, params)
         if right - left < min_width:
-            continue
-        if min(profile[left], profile[right]) < params.min_boundary_response:
-            # A run whose boundary is not an edge is a shading or lighting
-            # gradient, not a silhouette.
             continue
         candidates.append((abs(0.5 * (left + right) - center), left, right))
     if not candidates:
@@ -337,11 +333,17 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return runs
 
 
-def _snap_to_peak(profile: np.ndarray, column: int, radius: int) -> int:
-    """Column of the strongest gradient response within `radius` of `column`."""
-    lo = max(0, column - radius)
-    hi = min(len(profile), column + radius + 1)
-    return int(lo + np.argmax(profile[lo:hi]))
+def _snap_to_peak(profile: np.ndarray, column: int, params: EdgeDetectorParams) -> int:
+    """Column of the strongest gradient response within ``refine_px`` of `column`, if
+    it carries at least ``min_boundary_response``; otherwise the segmentation boundary
+    itself (a white label against a light floor has almost no gradient, but the
+    saturation and texture cues still place the boundary within a few pixels)."""
+    lo = max(0, column - params.refine_px)
+    hi = min(len(profile), column + params.refine_px + 1)
+    best = int(lo + np.argmax(profile[lo:hi]))
+    if profile[best] < params.min_boundary_response:
+        return int(np.clip(column, 0, len(profile) - 1))
+    return best
 
 
 def _refine_peak(profile: np.ndarray, index: int) -> float:

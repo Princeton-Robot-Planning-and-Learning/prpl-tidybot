@@ -128,6 +128,7 @@ class _Params:
     lateral_max_step: float
     lateral_min_step: float
     max_width_change_frac: float
+    width_history: int
     estimate_range: bool
     range_baseline: float
     camera_to_grasp_offset: float
@@ -162,9 +163,10 @@ class CylinderVisualServoGapExecutor(
     at least ``lateral_min_step`` and at most ``lateral_max_step``; keep the
     minimum below twice the tolerance in metres so a step taken from just
     outside the tolerance cannot land outside it on the other side.
-    During alignment a detection whose apparent width differs from the
-    previous accepted one by more than ``max_width_change_frac`` is treated
-    as a miss (a stray background edge paired with one cylinder edge).
+    A detection whose apparent width differs by more than
+    ``max_width_change_frac`` from the median of the last ``width_history``
+    accepted widths is treated as a miss, so a single stray detection can
+    neither steer the arm nor become the reference for later frames.
 
     With ``estimate_range`` the approach length is fitted from the width
     growth over the first ``range_baseline`` metres (see the module
@@ -194,6 +196,7 @@ class CylinderVisualServoGapExecutor(
         lateral_max_step: float = 0.01,
         lateral_min_step: float = 0.006,
         max_width_change_frac: float = 0.3,
+        width_history: int = 5,
         estimate_range: bool = True,
         range_baseline: float = 0.04,
         camera_to_grasp_offset: float = 0.108,
@@ -237,6 +240,7 @@ class CylinderVisualServoGapExecutor(
             lateral_max_step=lateral_max_step,
             lateral_min_step=lateral_min_step,
             max_width_change_frac=max_width_change_frac,
+            width_history=width_history,
             estimate_range=estimate_range,
             range_baseline=range_baseline,
             camera_to_grasp_offset=camera_to_grasp_offset,
@@ -270,7 +274,7 @@ class CylinderVisualServoGapExecutor(
         self._target: list[float] | None = None
         self._ticks_on_target: int = 0
         self._start_pose: Pose | None = None
-        self._last_width: float | None = None
+        self._recent_widths: list[float] = []
         self._range_samples: list[tuple[float, float]] = []
         self._approach_total: float | None = None
         self._approach_start_pose: Pose | None = None
@@ -510,18 +514,20 @@ class CylinderVisualServoGapExecutor(
         edges = detect_cylinder_edges(image, self._params.detector)
         if edges is None:
             return None
-        if self._last_width is not None:
-            change = abs(edges.width_px - self._last_width) / self._last_width
+        if self._recent_widths:
+            reference = float(np.median(self._recent_widths))
+            change = abs(edges.width_px - reference) / reference
             if change > self._params.max_width_change_frac:
                 _logger.warning(
-                    "Visual servo ignored a detection: width %.0f px vs %.0f px "
-                    "before (%.0f%% change).",
+                    "Visual servo ignored a detection: width %.0f px vs a recent "
+                    "median of %.0f px (%.0f%% change).",
                     edges.width_px,
-                    self._last_width,
+                    reference,
                     100 * change,
                 )
                 return None
-        self._last_width = edges.width_px
+        self._recent_widths.append(edges.width_px)
+        del self._recent_widths[: -self._params.width_history]
         return edges
 
     def _lateral_step(self, error: float) -> float:
@@ -627,7 +633,7 @@ class CylinderVisualServoGapExecutor(
         self._target = None
         self._ticks_on_target = 0
         self._start_pose = None
-        self._last_width = None
+        self._recent_widths = []
         self._range_samples = []
         self._approach_total = None
         self._approach_start_pose = None
