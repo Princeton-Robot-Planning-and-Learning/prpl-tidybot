@@ -22,7 +22,7 @@ dependencies = [
    "hydra-core",
    "kinder_bilevel_planning @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@0023a3a#subdirectory=kinder-bilevel-planning",
    "kinder_models @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@0023a3a#subdirectory=kinder-models",
-   "pybullet_helpers @ git+https://github.com/Princeton-Robot-Planning-and-Learning/prpl-mono.git@c3bcad09#subdirectory=pybullet-helpers",
+   "pybullet_helpers>=0.1.2",
    "phoenix6==25.1.0",
    "ruckig",
    "setuptools<81",
