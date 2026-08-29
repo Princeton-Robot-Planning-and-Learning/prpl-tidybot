@@ -14,6 +14,7 @@ import numpy as np
 
 from prpl_tidybot.interfaces.real_arm_interface import RealArmInterface
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD, RETRACT_ARM_CONF
+from prpl_tidybot.third_party.ik_solver import IKSolver
 
 HOME_POS = np.array([0.456, 0.0, 0.434])
 HOME_QUAT = np.array([0.5, 0.5, 0.5, 0.5])  # (x, y, z, w)
@@ -24,10 +25,6 @@ N_STEPS = 20
 def main() -> int:
     """Solve IK for the home pose and command the arm there over N_STEPS steps."""
     print("Solving IK for home pose...")
-    from prpl_tidybot.third_party.ik_solver import (  # pylint: disable=import-outside-toplevel
-        IKSolver,
-    )
-
     ik_solver = IKSolver()  # type: ignore[no-untyped-call]
     target = ik_solver.solve(  # type: ignore[no-untyped-call]
         HOME_POS, HOME_QUAT, RETRACT_ARM_CONF
