@@ -98,6 +98,7 @@ def main() -> int:
     parser.add_argument("--range-baseline", type=float, default=0.04)
     parser.add_argument("--camera-to-grasp-offset", type=float, default=0.108)
     parser.add_argument("--no-range-estimate", action="store_true")
+    parser.add_argument("--max-width-change-frac", type=float, default=0.3)
     args = parser.parse_args()
 
     ARTIFACT_DIR.mkdir(exist_ok=True)
@@ -112,6 +113,7 @@ def main() -> int:
     approaching = False
     approach_total: float | None = None
     range_samples: list[tuple[float, float]] = []
+    last_width: float | None = None
     commanded: list[float] = list(arm.get_arm_state())
     try:
         while True:
@@ -120,6 +122,17 @@ def main() -> int:
                 time.sleep(0.05)
                 continue
             edges = detect_cylinder_edges(image, params)
+            if edges is not None and last_width is not None:
+                change = abs(edges.width_px - last_width) / last_width
+                if change > args.max_width_change_frac:
+                    print(
+                        f"step {index}: ignoring a detection of width "
+                        f"{edges.width_px:.0f}px ({100 * change:.0f}% change from "
+                        f"{last_width:.0f}px)"
+                    )
+                    edges = None
+            if edges is not None:
+                last_width = edges.width_px
             phase = "approach" if approaching else "align"
             overlay = render_edge_overlay(
                 image, edges, params, label=f"step {index} {phase}"
