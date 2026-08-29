@@ -102,12 +102,12 @@ def main() -> int:
             delta[2] += forward
             perceived = arm.get_arm_state()
             target = stepper.step(commanded, delta)
+            lag = np.round(np.array(commanded) - np.array(perceived), 3)
             print(
                 f"step {index}: error {error:+.1f}px width {edges.width_px:.0f}px "
                 f"-> tool delta {np.round(delta, 4)} m, joint delta "
                 f"{np.round(np.array(target) - np.array(commanded), 3)} from the last "
-                f"target (perceived lag {np.round(np.array(commanded) - np.array(perceived), 3)}) "
-                f"(overlay: {out})"
+                f"target (perceived lag {lag}) (overlay: {out})"
             )
             answer = input("Execute this step? [Enter=yes / s=skip capture / q=quit]: ")
             if answer.strip().lower() == "q":
