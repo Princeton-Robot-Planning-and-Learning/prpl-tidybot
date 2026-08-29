@@ -5,6 +5,8 @@ import pytest
 
 from prpl_tidybot.visual_servo.cylinder_edges import (
     EdgeDetectorParams,
+    _refine_peak,
+    _snap_to_peak,
     column_edge_profile,
     detect_cylinder_edges,
     render_edge_overlay,
@@ -148,3 +150,48 @@ def test_overlay_labels_a_clipped_detection():
     edges = detect_cylinder_edges(image)
     overlay = render_edge_overlay(image, edges)
     assert overlay.shape == image.shape
+
+
+def _white_can_frame(left: int, right: int, label_from: int, **kwargs) -> np.ndarray:
+    """A pale, unsaturated but textured can body from `left` to `label_from` (a white
+    cap with printed rings against a light floor) and a saturated blue label from
+    `label_from` to `right`, on the usual background."""
+    image = _synthetic_frame(label_from, right, **kwargs).astype(np.float64)
+    height = image.shape[0]
+    rows = np.arange(height)[:, None]
+    body = np.where((rows // 6) % 2 == 0, 205.0, 165.0)
+    image[:, left:label_from] = np.stack([body, body, body], axis=-1)[
+        :, : label_from - left
+    ]
+    image[:, label_from:right] = (40, 60, 200)
+    return np.clip(image, 0, 255).astype(np.uint8)
+
+
+def test_white_can_reaching_into_the_margin_is_detected_whole():
+    """A white can whose body has no colour or brightness contrast against the
+    floor, staged so that it reaches into the left background margin, is still
+    found from its silhouette edge: the background's texture is estimated from
+    the smoothest columns, not from the margin the can occupies."""
+    edges = detect_cylinder_edges(_white_can_frame(20, 210, 150))
+    assert edges is not None
+    assert abs(edges.left_x - 20) <= 4, edges.left_x
+    assert abs(edges.right_x - 210) <= 4, edges.right_x
+
+
+def test_snap_keeps_the_boundary_when_the_gradient_only_rises_toward_a_far_peak():
+    """A window maximum on the window's rim is a slope toward a peak outside the
+    window, not an edge here; the segmentation boundary is kept."""
+    params = EdgeDetectorParams(refine_px=5, min_boundary_response=0.1)
+    profile = np.zeros(100)
+    profile[40:61] = np.linspace(0.0, 1.0, 21)  # rising slope; peak at 60
+    assert _snap_to_peak(profile, 50, params) == 50
+    assert _snap_to_peak(profile, 58, params) == 60
+
+
+def test_refine_peak_moves_at_most_half_a_pixel():
+    """Sub-pixel refinement on a slope (not a peak) stays put instead of jumping
+    tens of pixels along the fitted parabola."""
+    profile = np.linspace(0.0, 1.0, 50)
+    assert abs(_refine_peak(profile, 25) - 25) <= 0.5
+    peak = np.array([0.0, 0.5, 1.0, 0.6, 0.0])
+    assert 1.5 < _refine_peak(peak, 2) < 2.5
