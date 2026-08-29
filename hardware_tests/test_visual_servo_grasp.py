@@ -45,6 +45,11 @@ ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
 TICKS_PER_STEP = 10
 
 
+def _wrap(angles: np.ndarray) -> np.ndarray:
+    """Wrap joint differences to [-pi, pi] so continuous joints print sensibly."""
+    return np.arctan2(np.sin(angles), np.cos(angles))
+
+
 def main() -> int:
     """Interactive align-then-approach with a confirmation before every step."""
     parser = argparse.ArgumentParser()
@@ -53,6 +58,7 @@ def main() -> int:
     parser.add_argument("--lateral-gain", type=float, default=0.0003)
     parser.add_argument("--lateral-tolerance-px", type=float, default=8.0)
     parser.add_argument("--lateral-max-step", type=float, default=0.01)
+    parser.add_argument("--lateral-min-step", type=float, default=0.006)
     parser.add_argument("--approach-distance", type=float, default=0.10)
     parser.add_argument("--approach-step", type=float, default=0.01)
     args = parser.parse_args()
@@ -85,13 +91,11 @@ def main() -> int:
             aligned = abs(error) <= args.lateral_tolerance_px
             lateral = 0.0
             if not aligned:
-                lateral = float(
-                    np.clip(
-                        -args.lateral_sign * args.lateral_gain * error,
-                        -args.lateral_max_step,
-                        args.lateral_max_step,
-                    )
+                lateral = -args.lateral_sign * args.lateral_gain * error
+                magnitude = min(
+                    max(abs(lateral), args.lateral_min_step), args.lateral_max_step
                 )
+                lateral = float(np.copysign(magnitude, lateral))
             forward = 0.0
             if aligned:
                 forward = min(args.approach_step, args.approach_distance - advanced)
@@ -102,7 +106,7 @@ def main() -> int:
             delta[2] += forward
             perceived = arm.get_arm_state()
             target = stepper.step(commanded, delta)
-            lag = np.round(np.array(commanded) - np.array(perceived), 3)
+            lag = np.round(_wrap(np.array(commanded) - np.array(perceived)), 3)
             print(
                 f"step {index}: error {error:+.1f}px width {edges.width_px:.0f}px "
                 f"-> tool delta {np.round(delta, 4)} m, joint delta "

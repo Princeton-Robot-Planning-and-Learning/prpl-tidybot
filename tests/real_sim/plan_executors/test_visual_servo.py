@@ -252,6 +252,43 @@ def test_tick_budget_raises(stepper: ToolFrameStepper):
         _run(executor, arm)
 
 
+def test_small_corrections_are_raised_to_the_minimum_step(stepper):
+    """With a gain that would produce sub-millimetre nudges, every lateral step is at
+    least lateral_min_step and the servo still converges without oscillating."""
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    camera = _SyntheticCanCamera(stepper, lambda: arm.joints, can_offset_m=0.02)
+    executor = _make_executor(
+        camera,
+        stepper,
+        lateral_gain=0.00002,
+        lateral_min_step=0.006,
+        lateral_tolerance_px=8.0,
+        approach_distance=0.02,
+        approach_step=0.02,
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    _run(executor, arm)
+
+    lateral = [e.delta_tool[0] for e in executor.trace if e.delta_tool is not None]
+    nonzero = [d for d in lateral if abs(d) > 1e-9]
+    assert nonzero and all(abs(d) >= 0.006 - 1e-9 for d in nonzero)
+    # 2 cm off with 6 mm steps: three or four steps, no back-and-forth.
+    assert len(nonzero) <= 4
+    assert executor.phase == SETTLE
+
+
+def test_minimum_step_validation():
+    """lateral_min_step must lie in [0, lateral_max_step]."""
+    with pytest.raises(ValueError, match="lateral_min_step"):
+        CylinderVisualServoGapExecutor(
+            image_source=None,  # type: ignore[arg-type]
+            stepper=None,  # type: ignore[arg-type]
+            lateral_min_step=0.02,
+            lateral_max_step=0.01,
+        )
+
+
 def test_persistent_misdetection_stops_at_lateral_travel_limit(stepper):
     """A camera that always reports the can far to one side walks the arm sideways
     one step at a time until the travel limit stops it."""

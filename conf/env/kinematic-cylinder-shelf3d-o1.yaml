@@ -248,6 +248,11 @@ real_gap_executors:
     lateral_sign: ${env.servo_lateral_sign}
     lateral_tolerance_px: 8.0
     lateral_max_step: 0.01
+    # Every non-zero correction is at least this large: the compliant
+    # controller ignores targets a few millimetres away, so smaller nudges
+    # would only accumulate and release in a jump. Keep below twice the
+    # tolerance in metres (~6 mm at the grasp standoff).
+    lateral_min_step: 0.006
     # The pre-grasp pose is PRE_GRASP_BACKOFF (0.10 m) behind the grasp.
     approach_distance: 0.10
     approach_step: 0.01

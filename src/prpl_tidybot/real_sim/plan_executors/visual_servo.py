@@ -101,6 +101,7 @@ class _Params:
     lateral_axis: str
     lateral_tolerance_px: float
     lateral_max_step: float
+    lateral_min_step: float
     align_confirm_ticks: int
     approach_axis: str
     approach_distance: float
@@ -124,8 +125,12 @@ class CylinderVisualServoGapExecutor(
     ``lateral_gain`` is metres of tool motion per pixel of lateral error;
     ``lateral_sign`` flips the direction for a camera whose horizontal axis
     runs opposite to the tool's lateral axis (check with the hardware test
-    before trusting it on a new mount). Distances are in metres, tolerances
-    in pixels / radians, durations in ticks.
+    before trusting it on a new mount). Any non-zero lateral correction is
+    at least ``lateral_min_step`` and at most ``lateral_max_step``; keep the
+    minimum below twice the tolerance in metres so a step taken from just
+    outside the tolerance cannot land outside it on the other side.
+    Distances are in metres, tolerances in pixels / radians, durations in
+    ticks.
     """
 
     # pylint: disable=too-many-instance-attributes
@@ -143,6 +148,7 @@ class CylinderVisualServoGapExecutor(
         lateral_axis: str = "x",
         lateral_tolerance_px: float = 8.0,
         lateral_max_step: float = 0.01,
+        lateral_min_step: float = 0.006,
         align_confirm_ticks: int = 3,
         approach_axis: str = "z",
         approach_distance: float = 0.10,
@@ -161,6 +167,8 @@ class CylinderVisualServoGapExecutor(
             raise ValueError("lateral_axis and approach_axis must be 'x', 'y' or 'z'")
         if approach_step <= 0 or approach_distance < 0:
             raise ValueError("approach_step must be > 0 and approach_distance >= 0")
+        if not 0.0 <= lateral_min_step <= lateral_max_step:
+            raise ValueError("need 0 <= lateral_min_step <= lateral_max_step")
         self._image_source = image_source
         self._stepper = stepper or ToolFrameStepper()
         self._settle = SettleGapExecutor(
@@ -175,6 +183,7 @@ class CylinderVisualServoGapExecutor(
             lateral_axis=lateral_axis,
             lateral_tolerance_px=lateral_tolerance_px,
             lateral_max_step=lateral_max_step,
+            lateral_min_step=lateral_min_step,
             align_confirm_ticks=align_confirm_ticks,
             approach_axis=approach_axis,
             approach_distance=approach_distance,
@@ -337,13 +346,13 @@ class CylinderVisualServoGapExecutor(
         aligned = abs(error) <= p.lateral_tolerance_px
         lateral = 0.0
         if not aligned:
-            lateral = float(
-                np.clip(
-                    -p.lateral_sign * p.lateral_gain * error,
-                    -p.lateral_max_step,
-                    p.lateral_max_step,
-                )
-            )
+            lateral = -p.lateral_sign * p.lateral_gain * error
+            # Small corrections are still a full lateral_min_step: the arm's
+            # compliant controller does not react to a target a few
+            # millimetres away, so nudges below its deadband only stack up
+            # and then release in one jump.
+            magnitude = min(max(abs(lateral), p.lateral_min_step), p.lateral_max_step)
+            lateral = float(np.copysign(magnitude, lateral))
         if self._phase == ALIGN:
             if aligned:
                 self._aligned_ticks += 1
