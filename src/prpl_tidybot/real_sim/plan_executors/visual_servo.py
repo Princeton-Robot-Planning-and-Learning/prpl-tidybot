@@ -212,7 +212,7 @@ class CylinderVisualServoGapExecutor(
         max_missed_detections: int = 10,
         max_ticks: int = 600,
         max_joint_step: float = 0.2,
-        lateral_travel_limit: float = 0.05,
+        lateral_travel_limit: float = 0.08,
         debug_dir: str | Path | None = None,
     ) -> None:
         if lateral_axis not in ("x", "y", "z") or approach_axis not in ("x", "y", "z"):

@@ -285,11 +285,14 @@ real_gap_executors:
     gripper_close_position: ${env.gripper_close_position}
     # Safety stops, both raise ExecutionFailure (rollout ends, arm holds):
     # the most any single joint may change for one 1 cm step (an IK branch
-    # flip would be far larger), and the total sideways travel allowed
-    # from where the servo started (a persistent misdetection would walk
-    # the arm further).
+    # flip would be far larger), and the total sideways travel of the
+    # commanded target from where the servo started (a persistent
+    # misdetection would walk the arm further). Base staging has been off
+    # by up to ~4 cm, and the commanded target leads the arm by the
+    # controller's deadband (~2-3 cm), so 8 cm leaves room for a real
+    # correction.
     max_joint_step: 0.2
-    lateral_travel_limit: 0.05
+    lateral_travel_limit: 0.08
     # Annotated wrist frames for every servo tick land here (set to null
     # to skip).
     debug_dir: ${hydra:runtime.output_dir}/visual_servo
