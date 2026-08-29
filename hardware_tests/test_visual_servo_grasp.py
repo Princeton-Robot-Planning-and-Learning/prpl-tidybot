@@ -12,6 +12,11 @@ rollout.
 
     python hardware_tests/test_visual_servo_grasp.py [--dry-run] [--lateral-sign -1]
 
+Steps are chained from the last *commanded* joint target rather than the
+perceived joints: the compliant controller holds a few hundredths of a
+radian short of any target, so commands computed from the perceived joints
+would never accumulate past that deadband and the arm would not move.
+
 The script never closes the gripper; it stops after the approach distance
 so you can check the fingers straddle the cylinder before a real grasp.
 """
@@ -60,6 +65,7 @@ def main() -> int:
     arm = RealArmInterface(reset_arm=False)
     advanced = 0.0
     index = 0
+    commanded: list[float] = list(arm.get_arm_state())
     try:
         while True:
             image = camera.get_image()
@@ -94,12 +100,14 @@ def main() -> int:
                 return 0
             delta = tool_delta("x", lateral)
             delta[2] += forward
-            joints = arm.get_arm_state()
-            target = stepper.step(joints, delta)
+            perceived = arm.get_arm_state()
+            target = stepper.step(commanded, delta)
             print(
                 f"step {index}: error {error:+.1f}px width {edges.width_px:.0f}px "
                 f"-> tool delta {np.round(delta, 4)} m, joint delta "
-                f"{np.round(np.array(target) - np.array(joints), 3)} (overlay: {out})"
+                f"{np.round(np.array(target) - np.array(commanded), 3)} from the last "
+                f"target (perceived lag {np.round(np.array(commanded) - np.array(perceived), 3)}) "
+                f"(overlay: {out})"
             )
             answer = input("Execute this step? [Enter=yes / s=skip capture / q=quit]: ")
             if answer.strip().lower() == "q":
@@ -112,6 +120,7 @@ def main() -> int:
                 for _ in range(TICKS_PER_STEP):
                     arm.execute_action(target, gripper)
                     time.sleep(POLICY_CONTROL_PERIOD)
+            commanded = target
             advanced += forward
             index += 1
     finally:
