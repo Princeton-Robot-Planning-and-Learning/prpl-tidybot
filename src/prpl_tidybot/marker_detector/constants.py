@@ -35,10 +35,13 @@ CHARUCO_BOARD_PARAMS = {
     "marker_length": 0.018,  # 18 mm
 }
 
-# ArUco markers placed in the scene as task targets (currently a single point
-# target used by base_motion3d). Disjoint from MARKER_IDS so detector slots map
-# cleanly to "robot sticker" vs "target".
-TARGET_MARKER_IDS = (23,)
+# ArUco markers placed in the scene as task targets: 23 is the point target
+# used by base_motion3d (and the original single-cylinder staging); 35-46 are
+# taped under the cylinders of the cylinder-shelf env (printed from
+# conf/calibration/cylinder_markers.pdf). Disjoint from MARKER_IDS so detector
+# slots map cleanly to "robot sticker" vs "target", and outside the ChArUco
+# board's 0-34 so the board can stay in the room.
+TARGET_MARKER_IDS = (23,) + tuple(range(35, 47))
 
 # Flat ordered list of every ID the detector should be configured to recognise.
 # Robot stickers occupy slots 0..len(MARKER_IDS)-1; targets follow.

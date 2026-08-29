@@ -8,12 +8,12 @@ the non-robot object detection differs per env.
 """
 
 import abc
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from kinder.envs.kinematic3d.base_motion3d import BaseMotion3DObjectCentricState
 from kinder.envs.kinematic3d.cylinder_shelf3d import (
     CYLINDER_OBJECT_TYPE,
-    CylinderShelf3DEnvConfig,
     CylinderShelf3DObjectCentricState,
 )
 from kinder.envs.kinematic3d.object_types import (
@@ -35,12 +35,16 @@ from prpl_utils.real_sim import Perceiver
 from relational_structs import Object, ObjectCentricState
 from relational_structs.utils import create_state_from_dict
 
-from prpl_tidybot.real_sim.perceivers.target_source import TargetSource
+from prpl_tidybot.real_sim.perceivers.target_source import (
+    CylinderSpec,
+    CylinderTargets,
+    TargetSource,
+    parse_cylinder_specs,
+)
 from prpl_tidybot.structs import TidyBotObservation
 
 _DEFAULT_CUBE_HALF_EXTENTS = PrplLab3DEnvConfig().block_half_extents
 _DEFAULT_SHELF_CUBE_HALF_EXTENTS = Shelf3DEnvConfig().block_half_extents
-_DEFAULT_CYLINDER_SHELF_CONFIG = CylinderShelf3DEnvConfig()
 
 
 class KinematicRobotPerceiverBase(
@@ -299,34 +303,32 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
 class CylinderShelf3DPerceiver(KinematicRobotPerceiverBase):
     """Perceiver for kinder/KinematicCylinderShelf3D-o{N}-v0.
 
-    Emits one cylinder (cylinder0) whose `(x, y, z)` comes from a
-    TargetSource plus a shelf fixture at a fixed pose threaded in from the
-    env yaml — the same pattern as :class:`Shelf3DPerceiver`, with the
-    cube swapped for a vertical cylinder. The cylinder's radius and height
-    default to the env config's first cylinder; override per-lab once the
-    real objects are measured. The marker detector only provides
-    `(x, y, z)` so the cylinder orientation defaults to identity
-    (standing upright), which for a rotationally symmetric cylinder is
-    the only orientation the planner needs. The target is cached once per
+    Emits one object per configured cylinder (cylinder0, cylinder1, ... in
+    spec order), each with its own radius and height, standing upright at
+    the `(x, y, z)` its :class:`CylinderTargets` reports, plus a shelf
+    fixture at a fixed pose threaded in from the env yaml — the same
+    pattern as :class:`Shelf3DPerceiver` with the cube swapped for
+    vertical cylinders. The marker detector only provides `(x, y)` so the
+    orientation is identity, which for a rotationally symmetric cylinder is
+    the only orientation the planner needs. The targets are cached once per
     :meth:`reset` for the same control-loop-latency reason as in
-    :class:`BaseMotion3DPerceiver` — the cylinder is stationary during a
-    rollout by design.
+    :class:`BaseMotion3DPerceiver` — the cylinders are stationary during a
+    rollout by design (a grasped one is carried, but nothing re-perceives
+    it; grasp tracking is deferred).
     """
 
     def __init__(
         self,
-        target_source: TargetSource,
+        cylinders: Sequence[Mapping[str, Any] | CylinderSpec],
+        targets: CylinderTargets,
         shelf_pose: tuple[float, float, float],
-        cylinder_radius: float = _DEFAULT_CYLINDER_SHELF_CONFIG.cylinder_radius,
-        cylinder_height: float = _DEFAULT_CYLINDER_SHELF_CONFIG.cylinder_heights[0],
         robot_name: str = "robot",
     ) -> None:
         super().__init__(robot_name=robot_name)
-        self._target_source = target_source
+        self._cylinders = parse_cylinder_specs(cylinders)
+        self._targets = targets
         self._shelf_pose = tuple(shelf_pose)
-        self._cylinder_radius = cylinder_radius
-        self._cylinder_height = cylinder_height
-        self._cached_cylinder_target: tuple[float, float, float] | None = None
+        self._cached_targets: list[tuple[float, float, float]] | None = None
 
     @property
     def _state_cls(self) -> type[ObjectCentricState]:
@@ -335,21 +337,28 @@ class CylinderShelf3DPerceiver(KinematicRobotPerceiverBase):
     def reset(
         self, obs: TidyBotObservation, info: dict[str, Any]
     ) -> ObjectCentricState:
-        self._cached_cylinder_target = self._target_source.get_target()
+        self._cached_targets = self._fetch_targets()
         return super().reset(obs, info)
+
+    def _fetch_targets(self) -> list[tuple[float, float, float]]:
+        targets = self._targets.get_targets()
+        if len(targets) != len(self._cylinders):
+            raise RuntimeError(
+                f"CylinderShelf3DPerceiver has {len(self._cylinders)} cylinder "
+                f"spec(s) but its targets reported {len(targets)} position(s)."
+            )
+        return targets
 
     def _detect_objects(
         self, obs: TidyBotObservation, info: dict[str, Any]
     ) -> dict[Object, dict[str, float]]:
         del obs, info
-        if self._cached_cylinder_target is None:
+        if self._cached_targets is None:
             # Defensive — reset() should have run first; populate lazily
-            # so callers that call step() before reset() still get a
-            # cylinder.
-            self._cached_cylinder_target = self._target_source.get_target()
-        cyl_x, cyl_y, cyl_z = self._cached_cylinder_target
+            # so callers that call step() before reset() still get objects.
+            self._cached_targets = self._fetch_targets()
         shelf_x, shelf_y, shelf_z = self._shelf_pose
-        return {
+        objects: dict[Object, dict[str, float]] = {
             Object("shelf", Kinematic3DFixtureType): {
                 "pose_x": shelf_x,
                 "pose_y": shelf_y,
@@ -358,8 +367,12 @@ class CylinderShelf3DPerceiver(KinematicRobotPerceiverBase):
                 "pose_qy": 0.0,
                 "pose_qz": 0.0,
                 "pose_qw": 1.0,
-            },
-            Object("cylinder0", Kinematic3DCuboidType): {
+            }
+        }
+        for index, (spec, (cyl_x, cyl_y, cyl_z)) in enumerate(
+            zip(self._cylinders, self._cached_targets)
+        ):
+            objects[Object(f"cylinder{index}", Kinematic3DCuboidType)] = {
                 "pose_x": cyl_x,
                 "pose_y": cyl_y,
                 "pose_z": cyl_z,
@@ -369,8 +382,8 @@ class CylinderShelf3DPerceiver(KinematicRobotPerceiverBase):
                 "pose_qw": 1.0,
                 "grasp_active": 0.0,
                 "object_type": CYLINDER_OBJECT_TYPE,
-                "half_extent_x": self._cylinder_radius,
-                "half_extent_y": self._cylinder_radius,
-                "half_extent_z": self._cylinder_height / 2,
-            },
-        }
+                "half_extent_x": spec.radius,
+                "half_extent_y": spec.radius,
+                "half_extent_z": 0.5 * spec.height,
+            }
+        return objects
