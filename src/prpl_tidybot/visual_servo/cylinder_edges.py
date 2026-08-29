@@ -40,7 +40,12 @@ class EdgeDetectorParams:
     """Tunables for :func:`detect_cylinder_edges`.
 
     ``roi_top`` / ``roi_bottom`` are fractions of the image height bounding
-    the rows that feed the column statistics. Widths are fractions of the
+    the rows that feed the column statistics: low enough to leave out the
+    wall and furniture the wrist camera sees above the floor at the
+    pre-grasp pose of a tall cylinder (which drown every column in texture
+    and can turn a dark strip at the image's edge into the only "object"),
+    high enough to leave out the gripper fingers at the bottom corners.
+    Widths are fractions of the
     image width. ``background_margin_frac`` is the fraction of columns at
     each side of the band that model the background. A column is object
     when its mean saturation differs from the background's by more than
@@ -64,8 +69,8 @@ class EdgeDetectorParams:
     frame to count as containing an edge at all.
     """
 
-    roi_top: float = 0.25
-    roi_bottom: float = 0.75
+    roi_top: float = 0.40
+    roi_bottom: float = 0.80
     blur_ksize: int = 5
     profile_smooth_px: int = 9
     min_width_frac: float = 0.06

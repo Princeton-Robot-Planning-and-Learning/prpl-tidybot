@@ -129,6 +129,8 @@ class _Params:
     lateral_min_step: float
     max_width_change_frac: float
     width_history: int
+    focal_px: float
+    width_plausibility: tuple[float, float]
     estimate_range: bool
     range_baseline: float
     camera_to_grasp_offset: float
@@ -197,6 +199,8 @@ class CylinderVisualServoGapExecutor(
         lateral_min_step: float = 0.006,
         max_width_change_frac: float = 0.3,
         width_history: int = 5,
+        focal_px: float = 552.0,
+        width_plausibility: tuple[float, float] = (0.5, 1.6),
         estimate_range: bool = True,
         range_baseline: float = 0.04,
         camera_to_grasp_offset: float = 0.108,
@@ -241,6 +245,11 @@ class CylinderVisualServoGapExecutor(
             lateral_min_step=lateral_min_step,
             max_width_change_frac=max_width_change_frac,
             width_history=width_history,
+            focal_px=focal_px,
+            width_plausibility=(
+                float(width_plausibility[0]),
+                float(width_plausibility[1]),
+            ),
             estimate_range=estimate_range,
             range_baseline=range_baseline,
             camera_to_grasp_offset=camera_to_grasp_offset,
@@ -276,6 +285,7 @@ class CylinderVisualServoGapExecutor(
         self._ticks_on_target: int = 0
         self._start_pose: Pose | None = None
         self._recent_widths: list[float] = []
+        self._expected_width_px: float | None = None
         self._gap_index: int = 0
         self._range_samples: list[tuple[float, float]] = []
         self._approach_total: float | None = None
@@ -299,7 +309,26 @@ class CylinderVisualServoGapExecutor(
                 f"pair; got {len(trajectory)} pair(s)."
             )
         self._call = trajectory[0][1]
+        self._expected_width_px = self._expected_width(trajectory[0][0])
         self._reset_run()
+
+    def _expected_width(self, state: ObjectCentricState) -> float | None:
+        """The cylinder's apparent width at the pre-grasp pose, from its radius in
+        the planner state and the camera's standoff there (the grasp offset plus
+        the approach distance), or None when the state does not carry a radius."""
+        assert self._call is not None
+        p = self._params
+        if len(self._call.objects) < 2:
+            return None
+        cylinder = self._call.objects[1]
+        try:
+            radius = float(state.get(cylinder, "half_extent_x"))
+        except (KeyError, ValueError, AttributeError):
+            return None
+        standoff = p.camera_to_grasp_offset + p.approach_distance
+        if radius <= 0.0 or standoff <= 0.0:
+            return None
+        return p.focal_px * 2.0 * radius / standoff
 
     def step(self, sim_state: ObjectCentricState) -> tuple[RealAction, SimAction]:
         if self._call is None:
@@ -530,6 +559,8 @@ class CylinderVisualServoGapExecutor(
             return None
         if edges.clipped:
             return edges
+        if not self._plausible_width(edges.width_px):
+            return None
         if self._recent_widths:
             reference = float(np.median(self._recent_widths))
             change = abs(edges.width_px - reference) / reference
@@ -545,6 +576,25 @@ class CylinderVisualServoGapExecutor(
         self._recent_widths.append(edges.width_px)
         del self._recent_widths[: -self._params.width_history]
         return edges
+
+    def _plausible_width(self, width: float) -> bool:
+        """While aligning, a detection must be within ``width_plausibility`` of the
+        width the cylinder's known radius predicts at the pre-grasp standoff. A
+        sliver of label or a dark strip at the frame's edge is not the cylinder,
+        however consistent it is from tick to tick."""
+        expected = self._expected_width_px
+        if expected is None or self._phase != ALIGN:
+            return True
+        low, high = self._params.width_plausibility
+        if low * expected <= width <= high * expected:
+            return True
+        _logger.warning(
+            "Visual servo ignored a detection: width %.0f px is not plausible for "
+            "the cylinder (expected ~%.0f px at the pre-grasp pose).",
+            width,
+            expected,
+        )
+        return False
 
     def _lateral_step(self, error: float) -> float:
         """Signed lateral tool move for a pixel error: proportional, but at least

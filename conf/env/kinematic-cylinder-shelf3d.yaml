@@ -300,6 +300,14 @@ real_gap_executors:
     # fraction from the previous one is ignored (a background edge paired
     # with one cylinder edge).
     max_width_change_frac: 0.3
+    # While aligning, a detection is also held to the width the cylinder's
+    # radius predicts at the pre-grasp standoff (focal_px * diameter /
+    # (camera_to_grasp_offset + approach_distance)), within these factors:
+    # a sliver of label or a dark strip at the frame's edge is not the
+    # cylinder. focal_px was fitted on 2026-08-29 (207 px for a 78 mm can
+    # at 0.208 m).
+    focal_px: 552.0
+    width_plausibility: [0.5, 1.6]
     # After alignment the approach is open loop, straight along the tool's
     # approach axis. Its length is estimated from how fast the cylinder's
     # apparent width grows over the first range_baseline metres (motion
