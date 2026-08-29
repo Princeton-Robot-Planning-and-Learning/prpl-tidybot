@@ -696,3 +696,43 @@ def test_cylinder_cut_off_by_the_frame_is_walked_into_view(stepper):
     # The can came fully into view and the servo aligned on it.
     assert any(e.edges is not None and not e.edges.clipped for e in align)
     assert executor.phase == SETTLE
+
+
+def _pre_state_with_cylinder():
+    """A planner state carrying a cylinder of known radius, and a Grasp call on it."""
+    env = ObjectCentricCylinderShelf3DEnv(num_cylinders=1, allow_state_access=True)
+    try:
+        state, _ = env.reset(seed=456)
+    finally:
+        env.close()
+    robot = state.get_object_from_name("robot")
+    target = state.get_object_from_name("cylinder0")
+    return state, SkillCall("Grasp", (robot, target), np.zeros(0), state)
+
+
+@pytest.mark.parametrize("diameter_m, plausible", [(0.06, True), (0.015, False)])
+def test_implausible_widths_are_not_the_cylinder(stepper, diameter_m, plausible):
+    """With the cylinder's radius known from the plan (3 cm here, so ~160 px at the
+    pre-grasp standoff), a detection far from that width is a miss: a 37 px sliver
+    is ignored (and the servo eventually reports the cylinder lost) while a 150 px
+    can is servoed on as usual."""
+    pre_state, call = _pre_state_with_cylinder()
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    camera = _SyntheticCanCamera(
+        stepper, lambda: arm.joints, can_offset_m=0.03, diameter_m=diameter_m
+    )
+    executor = _make_executor(
+        camera, stepper, lateral_gain=0.0004, max_missed_detections=5
+    )
+    executor.set_trajectory([(pre_state, call)])
+    if plausible:
+        for _ in range(6):
+            executor.step(_state(arm.joints))
+        assert all(e.edges is not None for e in executor.trace)
+        assert any(e.delta_tool is not None for e in executor.trace)
+    else:
+        with pytest.raises(ExecutionFailure, match="lost the cylinder"):
+            for _ in range(10):
+                executor.step(_state(arm.joints))
+        assert all(e.edges is None for e in executor.trace)
+        assert arm.joints == list(_PRE_GRASP_JOINTS)
