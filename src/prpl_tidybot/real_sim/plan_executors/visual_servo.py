@@ -13,12 +13,22 @@ the cylinder in the wrist camera's view. From there the executor:
    is the only phase that acts on the camera: it happens at the pre-grasp
    standoff, where both edges are cleanly in view.
 2. **Approaches** open loop: moves the tool straight forward along its
-   approach axis in ``approach_step`` increments until
-   ``approach_distance`` has been covered. No lateral correction: close to
-   the cylinder the fingers and background clutter enter the band the
-   detector looks at and its edge pairs become unreliable, and by then the
-   gripper is already facing the cylinder squarely. Frames are still
-   captured for the debug trace when a ``debug_dir`` is set.
+   approach axis in ``approach_step`` increments. No lateral correction:
+   close to the cylinder the fingers and background clutter enter the band
+   the detector looks at and its edge pairs become unreliable, and by then
+   the gripper is already facing the cylinder squarely.
+
+   How far to go is estimated from **motion parallax** over the first
+   ``range_baseline`` of the approach, so it works for any cylinder
+   diameter: the apparent width grows as ``w ∝ 1 / (d0 - Δ)`` with the
+   forward displacement Δ, so a line fit of ``1/w`` against Δ gives the
+   camera-to-axis distance ``d0`` at the start of the approach without
+   knowing the diameter or the focal length. The total approach is then
+   ``d0 - camera_to_grasp_offset``, where the offset (camera optical
+   center to the grasp position along the approach axis) is a property of
+   the robot, not the object. If too few clean detections come in, or the
+   estimate is implausible, the fixed ``approach_distance`` is used
+   instead, with a warning.
 3. **Closes** the gripper and dwells ``gripper_dwell_ticks``.
 4. **Settles** to the SkillCall's predicted post-grasp configuration with
    a :class:`SettleGapExecutor`, the same final phase as the teleop
@@ -109,6 +119,12 @@ class _Params:
     lateral_max_step: float
     lateral_min_step: float
     max_width_change_frac: float
+    estimate_range: bool
+    range_baseline: float
+    camera_to_grasp_offset: float
+    min_range_samples: int
+    approach_min: float
+    approach_max: float
     align_confirm_ticks: int
     approach_axis: str
     approach_distance: float
@@ -139,6 +155,14 @@ class CylinderVisualServoGapExecutor(
     During alignment a detection whose apparent width differs from the
     previous accepted one by more than ``max_width_change_frac`` is treated
     as a miss (a stray background edge paired with one cylinder edge).
+
+    With ``estimate_range`` the approach length is fitted from the width
+    growth over the first ``range_baseline`` metres (see the module
+    docstring); ``camera_to_grasp_offset`` is the robot constant that turns
+    the camera-to-axis distance into gripper travel, and the result is
+    accepted only within ``approach_min`` .. ``approach_max`` and with at
+    least ``min_range_samples`` clean detections. Otherwise, or with
+    ``estimate_range=False``, the approach is the fixed ``approach_distance``.
     Distances are in metres, tolerances in pixels / radians, durations in
     ticks.
     """
@@ -160,6 +184,12 @@ class CylinderVisualServoGapExecutor(
         lateral_max_step: float = 0.01,
         lateral_min_step: float = 0.006,
         max_width_change_frac: float = 0.3,
+        estimate_range: bool = True,
+        range_baseline: float = 0.04,
+        camera_to_grasp_offset: float = 0.108,
+        min_range_samples: int = 3,
+        approach_min: float = 0.04,
+        approach_max: float = 0.20,
         align_confirm_ticks: int = 3,
         approach_axis: str = "z",
         approach_distance: float = 0.10,
@@ -196,6 +226,12 @@ class CylinderVisualServoGapExecutor(
             lateral_max_step=lateral_max_step,
             lateral_min_step=lateral_min_step,
             max_width_change_frac=max_width_change_frac,
+            estimate_range=estimate_range,
+            range_baseline=range_baseline,
+            camera_to_grasp_offset=camera_to_grasp_offset,
+            min_range_samples=min_range_samples,
+            approach_min=approach_min,
+            approach_max=approach_max,
             align_confirm_ticks=align_confirm_ticks,
             approach_axis=approach_axis,
             approach_distance=approach_distance,
@@ -223,6 +259,8 @@ class CylinderVisualServoGapExecutor(
         self._ticks_on_target: int = 0
         self._start_pose: Pose | None = None
         self._last_width: float | None = None
+        self._range_samples: list[tuple[float, float]] = []
+        self._approach_total: float | None = None
         self._reset_run()
 
     # ------------------------------------------------------------------ Public
@@ -326,22 +364,109 @@ class CylinderVisualServoGapExecutor(
     def _approach_step(
         self, sim_state: ObjectCentricState, perceived: list[float]
     ) -> TidyBotAction:
-        if self._debug_dir is not None:
-            image = self._image_source.get_image()
-            if image is not None:
-                self._dump_debug(image, self._detect(image))
         if self._waiting_for_arm(perceived):
             self._record(None, None, None)
             return self._hold(sim_state, self._target or perceived, gripper=0.0)
-        remaining = self._params.approach_distance - self._advanced
+        edges = self._range_sample()
+        if self._approach_total is None:
+            if self._advanced >= self._params.range_baseline - 1e-9:
+                self._approach_total = self._fit_approach_total()
+            elif self._advanced >= self._params.approach_distance - 1e-9:
+                # The baseline is longer than the fixed distance; do not
+                # overshoot it while still sampling.
+                self._approach_total = self._params.approach_distance
+        total = (
+            self._approach_total
+            if self._approach_total is not None
+            else max(self._params.approach_distance, self._params.range_baseline)
+        )
+        remaining = total - self._advanced
         if remaining <= 1e-6:
-            self._record(None, None, None)
+            self._record(edges, None, None)
             self._enter_close()
             return self._hold(sim_state, self._target or perceived, gripper=0.0)
         forward = min(self._params.approach_step, remaining)
         self._advanced += forward
         delta = tool_delta(self._params.approach_axis, forward)
-        return self._issue(sim_state, perceived, delta, None, None)
+        return self._issue(sim_state, perceived, delta, edges, None)
+
+    def _range_sample(self) -> CylinderEdges | None:
+        """Capture a frame during the approach; while still inside the range baseline,
+        keep its (displacement, width) for the parallax fit."""
+        p = self._params
+        sampling = (
+            p.estimate_range
+            and self._approach_total is None
+            and self._advanced <= p.range_baseline + 1e-9
+        )
+        if not sampling and self._debug_dir is None:
+            return None
+        image = self._image_source.get_image()
+        if image is None:
+            return None
+        edges = self._detect(image)
+        self._dump_debug(image, edges)
+        if sampling and edges is not None:
+            self._range_samples.append((self._advanced, edges.width_px))
+        return edges
+
+    def _fit_approach_total(self) -> float:
+        """Camera-to-axis distance from the width samples, turned into gripper travel.
+
+        ``1/w`` is linear in the displacement: ``1/w = (d0 - Δ) / k``. A least-squares
+        line through the samples gives ``d0 = -intercept / slope``.
+        """
+        p = self._params
+        fallback = p.approach_distance
+        if not p.estimate_range:
+            return fallback
+        samples = self._range_samples
+        if len(samples) < p.min_range_samples:
+            _logger.warning(
+                "Visual servo range estimate skipped: %d clean detection(s) over the "
+                "%.3f m baseline (need %d); using approach_distance %.3f m.",
+                len(samples),
+                p.range_baseline,
+                p.min_range_samples,
+                fallback,
+            )
+            return fallback
+        displacement = np.array([d for d, _ in samples])
+        inverse_width = np.array([1.0 / w for _, w in samples])
+        slope, intercept = np.polyfit(displacement, inverse_width, 1)
+        if slope >= 0.0:
+            _logger.warning(
+                "Visual servo range estimate rejected: the cylinder did not grow "
+                "over the baseline (samples %s); using approach_distance %.3f m.",
+                [(round(d, 3), round(w, 1)) for d, w in samples],
+                fallback,
+            )
+            return fallback
+        camera_to_axis = float(-intercept / slope)
+        total = camera_to_axis - p.camera_to_grasp_offset
+        if not p.approach_min <= total <= p.approach_max:
+            _logger.warning(
+                "Visual servo range estimate implausible: camera-to-axis %.3f m -> "
+                "approach %.3f m outside [%.3f, %.3f] (samples %s); using "
+                "approach_distance %.3f m.",
+                camera_to_axis,
+                total,
+                p.approach_min,
+                p.approach_max,
+                [(round(d, 3), round(w, 1)) for d, w in samples],
+                fallback,
+            )
+            return fallback
+        _logger.info(
+            "Visual servo range estimate: camera-to-axis %.3f m from %d samples over "
+            "%.3f m -> approach %.3f m (fixed default %.3f m).",
+            camera_to_axis,
+            len(samples),
+            p.range_baseline,
+            total,
+            fallback,
+        )
+        return total
 
     def _detect(self, image: np.ndarray) -> CylinderEdges | None:
         """Run the detector and reject a width that jumped from the last accepted one."""
@@ -368,9 +493,11 @@ class CylinderVisualServoGapExecutor(
         controller does not react to a target a few millimetres away, so smaller
         nudges only stack up and then release in one jump."""
         p = self._params
-        lateral = -p.lateral_sign * p.lateral_gain * error
-        magnitude = min(max(abs(lateral), p.lateral_min_step), p.lateral_max_step)
-        return float(np.copysign(magnitude, lateral))
+        direction = -p.lateral_sign * np.sign(error)
+        magnitude = min(
+            max(p.lateral_gain * abs(error), p.lateral_min_step), p.lateral_max_step
+        )
+        return float(direction * magnitude)
 
     def _waiting_for_arm(self, perceived: Sequence[float]) -> bool:
         """Let the arm reach the previous step before issuing the next one."""
@@ -464,6 +591,8 @@ class CylinderVisualServoGapExecutor(
         self._ticks_on_target = 0
         self._start_pose = None
         self._last_width = None
+        self._range_samples = []
+        self._approach_total = None
         self.trace = []
 
     def _reached(self, perceived: Sequence[float], target: Sequence[float]) -> bool:

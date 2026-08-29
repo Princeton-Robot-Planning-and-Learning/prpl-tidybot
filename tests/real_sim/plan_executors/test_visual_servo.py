@@ -8,6 +8,7 @@ edge detector on rendered images and the lateral sign convention end to end).
 
 from __future__ import annotations
 
+import logging
 from typing import Sequence
 
 import numpy as np
@@ -41,8 +42,7 @@ from prpl_tidybot.visual_servo.image_sources import KinderEECameraSource
 from prpl_tidybot.visual_servo.tool_frame import ToolFrameStepper
 
 _PRE_GRASP_JOINTS = [0.002, 1.887, 3.142, -1.623, 0.0, 1.678, 1.571]
-_IMAGE_W, _IMAGE_H = 320, 240
-_M_PER_PX = 0.0005  # synthetic camera scale at the pre-grasp standoff
+_IMAGE_W, _IMAGE_H = 640, 480
 
 
 def _l1(q1: Sequence[float], q2: Sequence[float]) -> float:
@@ -63,21 +63,41 @@ def _state(joints: Sequence[float], gripper: float = 0.0):
 
 class _SyntheticCanCamera:
     """Renders a red bar whose horizontal position follows the tool's lateral offset
-    from a virtual can, using the stepper's forward kinematics on the arm's current
-    joints (which the fake arm sets to whatever was last commanded)."""
+    from a virtual can and whose width follows the camera-to-axis distance (pinhole:
+    width = focal_px * diameter / distance), using the stepper's forward kinematics on
+    the arm's current joints (which the fake arm sets to whatever was last commanded).
+    """
 
-    def __init__(self, stepper: ToolFrameStepper, joints_fn, can_offset_m: float):
+    def __init__(
+        self,
+        stepper: ToolFrameStepper,
+        joints_fn,
+        can_offset_m: float,
+        camera_to_axis_m: float = 0.20,
+        diameter_m: float = 0.078,
+        focal_px: float = 500.0,
+    ):
         self._stepper = stepper
         self._joints_fn = joints_fn
         self._reference = stepper.end_effector_pose(_PRE_GRASP_JOINTS)
         self._can_offset = can_offset_m
+        self._camera_to_axis = camera_to_axis_m
+        self._diameter = diameter_m
+        self._focal = focal_px
         self.frames = 0
+
+    def _displacement(self, axis: int) -> float:
+        pose = self._stepper.end_effector_pose(self._joints_fn())
+        moved = np.array(pose.position) - np.array(self._reference.position)
+        return float(moved @ matrix_from_quat(self._reference.orientation)[:, axis])
 
     def lateral_offset(self) -> float:
         """Tool-x displacement of the end effector from its reference pose."""
-        pose = self._stepper.end_effector_pose(self._joints_fn())
-        moved = np.array(pose.position) - np.array(self._reference.position)
-        return float(moved @ matrix_from_quat(self._reference.orientation)[:, 0])
+        return self._displacement(0)
+
+    def forward_offset(self) -> float:
+        """Tool-z displacement of the end effector from its reference pose."""
+        return self._displacement(2)
 
     def get_image(self):
         """Render the virtual can for the current tool pose."""
@@ -85,10 +105,13 @@ class _SyntheticCanCamera:
         # The can sits `can_offset` along +tool-x; moving the tool +x brings it to
         # the image center. The camera's horizontal axis runs opposite to tool x
         # (a can further along +x appears further left), matching the sim camera.
+        distance = max(0.02, self._camera_to_axis - self.forward_offset())
+        scale = self._focal / distance  # px per metre at the can
         relative = self._can_offset - self.lateral_offset()
-        center = 0.5 * (_IMAGE_W - 1) - relative / _M_PER_PX
+        center = 0.5 * (_IMAGE_W - 1) - relative * scale
+        half = 0.5 * self._diameter * scale
         image = np.full((_IMAGE_H, _IMAGE_W, 3), (190, 150, 90), dtype=np.uint8)
-        left, right = int(round(center - 30)), int(round(center + 30))
+        left, right = int(round(center - half)), int(round(center + half))
         image[:, max(0, left) : max(0, right)] = (200, 40, 40)
         return image
 
@@ -152,6 +175,7 @@ def test_aligns_approaches_closes_and_settles(stepper: ToolFrameStepper):
         camera,
         stepper,
         lateral_gain=0.0004,
+        estimate_range=False,
         approach_distance=0.06,
         approach_step=0.02,
         gripper_close_position=0.7,
@@ -248,10 +272,12 @@ def test_missing_image_raises(stepper: ToolFrameStepper):
 
 
 def test_tick_budget_raises(stepper: ToolFrameStepper):
-    """A can that never centers (zero gain) exhausts max_ticks."""
+    """A can that never centers (zero gain and no minimum step) exhausts max_ticks."""
     arm = _FakeArm(_PRE_GRASP_JOINTS)
     camera = _SyntheticCanCamera(stepper, lambda: arm.joints, can_offset_m=0.05)
-    executor = _make_executor(camera, stepper, lateral_gain=0.0, max_ticks=15)
+    executor = _make_executor(
+        camera, stepper, lateral_gain=0.0, lateral_min_step=0.0, max_ticks=15
+    )
     pre_state = _state(_PRE_GRASP_JOINTS)
     executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
     with pytest.raises(ExecutionFailure, match="gave up after 15 ticks"):
@@ -269,6 +295,7 @@ def test_small_corrections_are_raised_to_the_minimum_step(stepper):
         lateral_gain=0.00002,
         lateral_min_step=0.006,
         lateral_tolerance_px=8.0,
+        estimate_range=False,
         approach_distance=0.02,
         approach_step=0.02,
     )
@@ -349,6 +376,67 @@ def test_width_jump_is_treated_as_a_miss(stepper):
     widths = [e.edges.width_px for e in executor.trace if e.edges is not None]
     assert widths and all(abs(w - 60) < 4 for w in widths)
     assert any(e.edges is None for e in executor.trace[1:])
+
+
+@pytest.mark.parametrize("camera_to_axis,diameter", [(0.20, 0.078), (0.26, 0.05)])
+def test_range_estimate_sets_the_approach_for_any_diameter(
+    stepper, camera_to_axis: float, diameter: float
+):
+    """The approach length comes from the width growth over the baseline, so cans of
+    different diameters at different distances are approached to the same grasp
+    standoff, without a known diameter."""
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    camera = _SyntheticCanCamera(
+        stepper,
+        lambda: arm.joints,
+        can_offset_m=0.0,
+        camera_to_axis_m=camera_to_axis,
+        diameter_m=diameter,
+    )
+    executor = _make_executor(
+        camera,
+        stepper,
+        range_baseline=0.04,
+        camera_to_grasp_offset=0.108,
+        approach_distance=0.10,
+        approach_step=0.01,
+        approach_max=0.25,
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    _run(executor, arm, max_ticks=800)
+    assert executor.phase == SETTLE
+    forward = [e.delta_tool[2] for e in executor.trace if e.delta_tool is not None]
+    assert sum(forward) == pytest.approx(camera_to_axis - 0.108, abs=0.012)
+
+
+def test_range_estimate_falls_back_when_samples_are_unusable(stepper, caplog):
+    """With the can not growing (a constant-width camera), the fixed distance is used
+    and a warning says why."""
+
+    class _ConstantWidth:
+        def get_image(self):
+            """A 60 px can dead center, whatever the arm does."""
+            image = np.full((_IMAGE_H, _IMAGE_W, 3), (190, 150, 90), dtype=np.uint8)
+            center = _IMAGE_W // 2
+            image[:, center - 30 : center + 30] = (200, 40, 40)
+            return image
+
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    executor = _make_executor(
+        _ConstantWidth(),
+        stepper,
+        range_baseline=0.02,
+        approach_distance=0.05,
+        approach_step=0.01,
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, pre_state))])
+    with caplog.at_level(logging.WARNING):
+        _run(executor, arm)
+    forward = [e.delta_tool[2] for e in executor.trace if e.delta_tool is not None]
+    assert sum(forward) == pytest.approx(0.05)
+    assert "did not grow" in caplog.text
 
 
 def test_persistent_misdetection_stops_at_lateral_travel_limit(stepper):

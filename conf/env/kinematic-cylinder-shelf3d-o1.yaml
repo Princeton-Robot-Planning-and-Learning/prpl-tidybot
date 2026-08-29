@@ -258,8 +258,21 @@ real_gap_executors:
     # with one cylinder edge).
     max_width_change_frac: 0.3
     # After alignment the approach is open loop, straight along the tool's
-    # approach axis. The pre-grasp pose is PRE_GRASP_BACKOFF (0.10 m)
-    # behind the grasp.
+    # approach axis. Its length is estimated from how fast the cylinder's
+    # apparent width grows over the first range_baseline metres (motion
+    # parallax; no diameter or focal length needed) minus the camera-to-
+    # grasp offset, a robot constant: on 2026-08-29 the Pringles can read
+    # 207 px at the aligned pre-grasp pose and 229 px two centimetres in,
+    # giving a camera-to-axis distance of 0.208 m, and a 0.10 m approach
+    # grasped it, hence 0.108 (which also matches the wrist camera's
+    # mounting offset). approach_distance is the fallback when the
+    # estimate is missing or implausible; the pre-grasp pose is
+    # PRE_GRASP_BACKOFF (0.10 m) behind the grasp.
+    estimate_range: true
+    range_baseline: 0.04
+    camera_to_grasp_offset: 0.108
+    approach_min: 0.04
+    approach_max: 0.20
     approach_distance: 0.10
     approach_step: 0.01
     gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}

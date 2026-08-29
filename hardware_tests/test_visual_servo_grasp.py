@@ -52,6 +52,38 @@ def _wrap(angles: np.ndarray) -> np.ndarray:
     return np.arctan2(np.sin(angles), np.cos(angles))
 
 
+def _fit_approach_total(
+    samples: list[tuple[float, float]],
+    fallback: float,
+    camera_to_grasp_offset: float,
+    disabled: bool,
+) -> float:
+    """Approach length from the width growth over the baseline (1/w linear in the
+    displacement), or the fallback when disabled or the fit is unusable."""
+    if disabled or len(samples) < 3:
+        print(
+            f"Range estimate skipped ({len(samples)} samples); using {fallback:.3f} m."
+        )
+        return fallback
+    slope, intercept = np.polyfit(
+        [d for d, _ in samples], [1.0 / w for _, w in samples], 1
+    )
+    if slope >= 0:
+        print(f"Range estimate rejected (width did not grow); using {fallback:.3f} m.")
+        return fallback
+    camera_to_axis = float(-intercept / slope)
+    total = camera_to_axis - camera_to_grasp_offset
+    print(
+        f"Range estimate: camera-to-axis {camera_to_axis:.3f} m from "
+        f"{[(round(d, 3), round(w, 1)) for d, w in samples]} -> approach {total:.3f} m "
+        f"(fixed default {fallback:.3f} m)."
+    )
+    if not 0.04 <= total <= 0.20:
+        print("  implausible; using the fixed default.")
+        return fallback
+    return total
+
+
 def main() -> int:
     """Interactive align-then-approach with a confirmation before every step."""
     parser = argparse.ArgumentParser()
@@ -63,6 +95,9 @@ def main() -> int:
     parser.add_argument("--lateral-min-step", type=float, default=0.006)
     parser.add_argument("--approach-distance", type=float, default=0.10)
     parser.add_argument("--approach-step", type=float, default=0.01)
+    parser.add_argument("--range-baseline", type=float, default=0.04)
+    parser.add_argument("--camera-to-grasp-offset", type=float, default=0.108)
+    parser.add_argument("--no-range-estimate", action="store_true")
     args = parser.parse_args()
 
     ARTIFACT_DIR.mkdir(exist_ok=True)
@@ -75,6 +110,8 @@ def main() -> int:
     index = 0
     aligned_captures = 0
     approaching = False
+    approach_total: float | None = None
+    range_samples: list[tuple[float, float]] = []
     commanded: list[float] = list(arm.get_arm_state())
     try:
         while True:
@@ -90,13 +127,33 @@ def main() -> int:
             out = ARTIFACT_DIR / f"visual_servo_{index:03d}.png"
             cv.imwrite(str(out), cv.cvtColor(overlay, cv.COLOR_RGB2BGR))
             if approaching:
-                # Open loop from here: the camera is only recorded.
-                forward = min(args.approach_step, args.approach_distance - advanced)
+                # Open loop from here; the camera only feeds the range estimate
+                # over the first range_baseline metres.
+                if approach_total is None:
+                    if edges is not None and advanced <= args.range_baseline + 1e-9:
+                        range_samples.append((advanced, edges.width_px))
+                    if advanced >= args.range_baseline - 1e-9 or args.no_range_estimate:
+                        approach_total = _fit_approach_total(
+                            range_samples,
+                            args.approach_distance,
+                            args.camera_to_grasp_offset,
+                            args.no_range_estimate,
+                        )
+                total = (
+                    approach_total
+                    if approach_total is not None
+                    else max(args.approach_distance, args.range_baseline)
+                )
+                forward = min(args.approach_step, total - advanced)
                 if forward <= 1e-6:
                     print(f"Approach complete ({advanced:.3f} m). Done.")
                     return 0
                 delta = tool_delta("z", forward)
-                report = f"open-loop forward {forward:.3f} m ({advanced:.3f} so far)"
+                width = "-" if edges is None else f"{edges.width_px:.0f}px"
+                report = (
+                    f"open-loop forward {forward:.3f} m ({advanced:.3f} of {total:.3f}; "
+                    f"width {width})"
+                )
             else:
                 if edges is None:
                     answer = input(f"No edges found (overlay: {out}). Retry? [Y/n]: ")
@@ -116,11 +173,12 @@ def main() -> int:
                     index += 1
                     continue
                 aligned_captures = 0
-                lateral = -args.lateral_sign * args.lateral_gain * error
+                direction = -args.lateral_sign * np.sign(error)
                 magnitude = min(
-                    max(abs(lateral), args.lateral_min_step), args.lateral_max_step
+                    max(args.lateral_gain * abs(error), args.lateral_min_step),
+                    args.lateral_max_step,
                 )
-                delta = tool_delta("x", float(np.copysign(magnitude, lateral)))
+                delta = tool_delta("x", float(direction * magnitude))
                 forward = 0.0
                 report = f"error {error:+.1f}px width {edges.width_px:.0f}px"
             perceived = arm.get_arm_state()
