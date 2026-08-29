@@ -236,6 +236,17 @@ class PurePursuitBaseMotion3DPlanExecutor(BaseMotion3DPlanExecutor):
     ``(x, y)`` onto the polyline and commands a target at a fixed
     arc-length lookahead. ``max_iter_per_pair * num_waypoints`` caps the
     total tick count to bound divergent rollouts.
+
+    Arrival requires the base to be within tolerance of the final waypoint
+    *and* to have stopped: the perceived pose must move by at most
+    ``still_position_tolerance`` / ``still_angle_tolerance`` between
+    consecutive ticks for ``still_ticks`` ticks. Without this the check
+    passes while the real base is still coasting through the tolerance
+    circle, the next (arm) segment starts, and the base settles wherever
+    it drifts to, several centimetres off the plan. So that perception
+    jitter alone can never stall a rollout, arrival is declared anyway
+    (with a warning) after ``still_max_wait_ticks`` ticks within
+    tolerance.
     """
 
     def __init__(
@@ -245,9 +256,15 @@ class PurePursuitBaseMotion3DPlanExecutor(BaseMotion3DPlanExecutor):
         position_tolerance: float = 0.02,
         angle_tolerance: float = 0.1,
         max_iter_per_pair: int = 200,
+        still_position_tolerance: float = 0.01,
+        still_angle_tolerance: float = 0.03,
+        still_ticks: int = 2,
+        still_max_wait_ticks: int = 20,
     ) -> None:
         if lookahead_distance <= 0:
             raise ValueError("lookahead_distance must be > 0")
+        if still_ticks < 0 or still_max_wait_ticks < 0:
+            raise ValueError("still_ticks and still_max_wait_ticks must be >= 0")
         super().__init__(
             robot_name=robot_name,
             position_tolerance=position_tolerance,
@@ -255,16 +272,26 @@ class PurePursuitBaseMotion3DPlanExecutor(BaseMotion3DPlanExecutor):
             max_iter_per_pair=max_iter_per_pair,
         )
         self._lookahead_distance = lookahead_distance
+        self._still_position_tolerance = still_position_tolerance
+        self._still_angle_tolerance = still_angle_tolerance
+        self._still_ticks = still_ticks
+        self._still_max_wait_ticks = still_max_wait_ticks
         self._waypoints: list[_Waypoint] = []
         self._cumulative_arc: list[float] = []
         self._cursor_arc: float = 0.0
         self._tick_count: int = 0
         self._done_latched: bool = False
+        self._last_pose: tuple[float, float, float] | None = None
+        self._still_count: int = 0
+        self._in_tolerance_ticks: int = 0
 
     def _on_set_trajectory(self) -> None:
         self._cursor_arc = 0.0
         self._tick_count = 0
         self._done_latched = False
+        self._last_pose = None
+        self._still_count = 0
+        self._in_tolerance_ticks = 0
         if self._pairs:
             self._waypoints = _waypoints_for_pairs(self._pairs, self._robot_name)
             self._cumulative_arc = _cumulative_arc_lengths(self._waypoints)
@@ -330,8 +357,42 @@ class PurePursuitBaseMotion3DPlanExecutor(BaseMotion3DPlanExecutor):
             return False
         if angle_err > self._angle_tolerance:
             return False
+        self._in_tolerance_ticks += 1
+        if not self._update_stillness(sim_state):
+            if self._in_tolerance_ticks <= self._still_max_wait_ticks:
+                return False
+            _logger.warning(
+                "%s: base within tolerance of the final waypoint but not still "
+                "after %d ticks; declaring arrival anyway.",
+                type(self).__name__,
+                self._in_tolerance_ticks,
+            )
         self._done_latched = True
         return True
+
+    def _update_stillness(self, sim_state: ObjectCentricState) -> bool:
+        """Track how many consecutive ticks the perceived base has been still;
+        True once that reaches ``still_ticks``."""
+        robot = sim_state.get_object_from_name(self._robot_name)
+        pose = (
+            float(sim_state.get(robot, "pos_base_x")),
+            float(sim_state.get(robot, "pos_base_y")),
+            float(sim_state.get(robot, "pos_base_rot")),
+        )
+        if self._last_pose is not None:
+            moved = math.hypot(
+                pose[0] - self._last_pose[0], pose[1] - self._last_pose[1]
+            )
+            turned = abs(_wrap_angle(pose[2] - self._last_pose[2]))
+            if (
+                moved <= self._still_position_tolerance
+                and turned <= self._still_angle_tolerance
+            ):
+                self._still_count += 1
+            else:
+                self._still_count = 0
+        self._last_pose = pose
+        return self._still_count >= self._still_ticks
 
     def _pair_for_cursor(self) -> _Waypoint:
         """Waypoint just past the cursor — its sim_action is the planner's
