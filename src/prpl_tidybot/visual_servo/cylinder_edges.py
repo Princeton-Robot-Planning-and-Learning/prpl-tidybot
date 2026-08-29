@@ -179,7 +179,7 @@ def object_columns(
     hsv = cv.cvtColor(band_rgb, cv.COLOR_RGB2HSV).astype(np.float32)
     saturation = hsv[..., 1].mean(axis=0)
     value = hsv[..., 2]
-    height, width = value.shape
+    width = value.shape[1]
     margin = max(1, int(round(params.background_margin_frac * width)))
     left_cols = np.arange(margin)
     right_cols = np.arange(width - margin, width)
