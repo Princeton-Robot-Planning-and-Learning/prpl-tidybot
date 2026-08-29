@@ -47,7 +47,9 @@ def _make_state(
 
 def _executor() -> SettleGapExecutor:
     return SettleGapExecutor(
-        base_executor=PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3),
+        base_executor=PurePursuitBaseMotion3DPlanExecutor(
+            position_tolerance=1e-3, still_ticks=0
+        ),
         arm_executor=StreamingArmMotion3DPlanExecutor(
             distance_fn=_l1_distance, arrival_tolerance=1e-3
         ),
@@ -130,7 +132,9 @@ def test_rejects_anything_but_a_single_skill_call():
 
 def _teleop_executor() -> TeleopGapExecutor:
     return TeleopGapExecutor(
-        base_executor=PurePursuitBaseMotion3DPlanExecutor(position_tolerance=1e-3),
+        base_executor=PurePursuitBaseMotion3DPlanExecutor(
+            position_tolerance=1e-3, still_ticks=0
+        ),
         arm_executor=StreamingArmMotion3DPlanExecutor(
             distance_fn=_l1_distance, arrival_tolerance=1e-3
         ),
