@@ -1,6 +1,7 @@
 """Base interface."""
 
 import abc
+import math
 
 import numpy as np
 from spatialmath import SE2
@@ -13,6 +14,21 @@ from prpl_tidybot.third_party.constants import (
     RPC_AUTHKEY,
     SERVER_HOSTNAME,
 )
+
+
+def unwrap_heading(target: float, reference: float) -> float:
+    """``target`` expressed on the same branch of the angle as ``reference``: the
+    value within pi of ``reference`` that is equivalent to ``target`` modulo 2 pi.
+
+    The base controller integrates its odometry heading continuously (it can
+    read 3.5 rad after a few turns) and tracks a target heading as a plain
+    number, while an :class:`SE2` heading is always wrapped to (-pi, pi]. A
+    wrapped target handed to the controller when its heading sits past the
+    wrap is up to 2 pi away, and the base spins a full turn to reach it.
+    """
+    return reference + math.atan2(
+        math.sin(target - reference), math.cos(target - reference)
+    )
 
 
 class BaseInterface(abc.ABC):
@@ -67,9 +83,13 @@ class RealBaseInterface(BaseInterface):
 
         self.marker_detector_client = MarkerDetectorClient(host=marker_detector_host)
         self.last_pose_map = SE2(0, 0, 0)
+        # The controller's continuous odometry heading as of the last state
+        # read; commanded headings are unwrapped onto its branch.
+        self._last_odom_heading = 0.0
 
     def get_base_state(self) -> SE2:
         base_pose = self.base.get_state()["base_pose"]
+        self._last_odom_heading = float(base_pose[2])
         return SE2(base_pose[0], base_pose[1], base_pose[2])
 
     def get_map_base_state(self) -> SE2:
@@ -80,9 +100,8 @@ class RealBaseInterface(BaseInterface):
         return self.last_pose_map
 
     def execute_action(self, action: SE2) -> None:
-        self.base.execute_action(
-            {"base_pose": np.array([action.x, action.y, action.theta()])}
-        )
+        heading = unwrap_heading(action.theta(), self._last_odom_heading)
+        self.base.execute_action({"base_pose": np.array([action.x, action.y, heading])})
 
     def close(self) -> None:
         """Stop the low-level base control loop."""
