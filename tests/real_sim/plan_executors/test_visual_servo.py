@@ -658,3 +658,41 @@ def test_servo_on_kinder_wrist_camera(stepper: ToolFrameStepper):
         sim.close()
     finally:
         env.close()
+
+
+def test_cylinder_cut_off_by_the_frame_is_walked_into_view(stepper):
+    """Staged far enough off that the can starts half outside the wrist image, the
+    executor steps toward the clipped side (no width filter, no alignment) until
+    the can is fully in view, then aligns and approaches as usual."""
+    arm = _FakeArm(_PRE_GRASP_JOINTS)
+    # 0.11 m at 2500 px/m is 275 px: the can's left edge starts 53 px past the
+    # left border.
+    camera = _SyntheticCanCamera(stepper, lambda: arm.joints, can_offset_m=0.11)
+    executor = _make_executor(
+        camera,
+        stepper,
+        lateral_gain=0.0004,
+        lateral_max_step=0.01,
+        lateral_travel_limit=0.2,
+        estimate_range=False,
+        approach_distance=0.04,
+        approach_step=0.02,
+    )
+    pre_state = _state(_PRE_GRASP_JOINTS)
+    predicted = _state([0.002, 0.628, 3.142, -2.495, 0.0, 0.291, 1.571], gripper=0.7)
+    executor.set_trajectory([(pre_state, _skill_call(pre_state, predicted))])
+
+    _run(executor, arm)
+
+    align = [e for e in executor.trace if e.phase == ALIGN and e.edges is not None]
+    assert align[0].edges is not None and align[0].edges.clipped_left
+    # Every clipped tick stepped the tool by the maximum lateral step, toward the can.
+    clipped_steps = [
+        e.delta_tool
+        for e in align
+        if e.edges is not None and e.edges.clipped and e.delta_tool
+    ]
+    assert clipped_steps and all(abs(abs(d[0]) - 0.01) < 1e-9 for d in clipped_steps)
+    # The can came fully into view and the servo aligned on it.
+    assert any(e.edges is not None and not e.edges.clipped for e in align)
+    assert executor.phase == SETTLE

@@ -135,6 +135,11 @@ pipelines:
       _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
       base_executor:
         _target_: prpl_tidybot.real_sim.plan_executors.base_motion3d.PurePursuitBaseMotion3DPlanExecutor
+        # The pre-grasp pose stages the base ~0.85 m from the cylinder, so a
+        # heading error of x rad puts the cylinder 0.85x m sideways in the
+        # wrist camera: the default 0.1 rad allowed 8 cm, which took the
+        # cylinder half out of the servo's frame. 0.03 rad is ~2.5 cm.
+        angle_tolerance: 0.03
       arm_executor:
         _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.CarrotArmMotion3DPlanExecutor
         distance_fn:

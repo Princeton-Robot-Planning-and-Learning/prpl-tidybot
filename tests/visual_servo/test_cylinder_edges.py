@@ -109,3 +109,42 @@ def test_grayscale_input_is_accepted():
     edges = detect_cylinder_edges(gray)
     assert edges is not None
     assert edges.center_x == pytest.approx(160, abs=2.0)
+
+
+@pytest.mark.parametrize(
+    "left, right, clipped_left, clipped_right",
+    [(0, 70, True, False), (250, 320, False, True)],
+)
+def test_cylinder_cut_off_by_the_border_is_reported_as_clipped(
+    left, right, clipped_left, clipped_right
+):
+    """A cylinder run touching the image border is detected with the clipped flag on
+    that side and the border column as that edge; the cylinder covering one
+    background margin must not poison the background model."""
+    edges = detect_cylinder_edges(_synthetic_frame(left, right))
+    assert edges is not None
+    assert (edges.clipped_left, edges.clipped_right) == (clipped_left, clipped_right)
+    assert edges.clipped
+    if clipped_left:
+        assert edges.left_x == 0.0
+        assert abs(edges.right_x - right) <= 3
+        assert edges.lateral_error_px < 0
+    else:
+        assert edges.right_x == 319.0
+        assert abs(edges.left_x - left) <= 3
+        assert edges.lateral_error_px > 0
+
+
+def test_fully_visible_cylinder_is_not_clipped():
+    """The clipped flags are off for a cylinder with both edges inside the frame."""
+    edges = detect_cylinder_edges(_synthetic_frame(120, 200))
+    assert edges is not None
+    assert not edges.clipped
+
+
+def test_overlay_labels_a_clipped_detection():
+    """The overlay text names the clipped side."""
+    image = _synthetic_frame(0, 70)
+    edges = detect_cylinder_edges(image)
+    overlay = render_edge_overlay(image, edges)
+    assert overlay.shape == image.shape

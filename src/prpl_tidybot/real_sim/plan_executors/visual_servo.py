@@ -269,6 +269,7 @@ class CylinderVisualServoGapExecutor(
         self._tick: int = 0
         self._missed: int = 0
         self._aligned_ticks: int = 0
+        self._clipped_warned: bool = False
         self._advanced: float = 0.0
         self._close_ticks: int = 0
         self._target: list[float] | None = None
@@ -343,7 +344,7 @@ class CylinderVisualServoGapExecutor(
         if image is None:
             raise ExecutionFailure("Visual servo got no wrist image.")
         edges = self._detect(image)
-        error = None if edges is None else edges.lateral_error_px
+        error = None if edges is None else edges.servo_error_px
         self._dump_debug(image, edges)
         if edges is None:
             self._missed += 1
@@ -361,6 +362,14 @@ class CylinderVisualServoGapExecutor(
             self._record(edges, error, None)
             return self._hold(sim_state, self._target or perceived, gripper=0.0)
 
+        if edges.clipped and not self._clipped_warned:
+            self._clipped_warned = True
+            _logger.warning(
+                "Visual servo: the cylinder is cut off by the %s edge of the wrist "
+                "image (base staged off to the side); stepping that way until it is "
+                "fully in view.",
+                "left" if edges.clipped_left else "right",
+            )
         if abs(error) <= self._params.lateral_tolerance_px:
             self._aligned_ticks += 1
             self._record(edges, error, None)
@@ -447,7 +456,7 @@ class CylinderVisualServoGapExecutor(
             return None
         edges = self._detect(image)
         self._dump_debug(image, edges)
-        if sampling and edges is not None:
+        if sampling and edges is not None and not edges.clipped:
             self._range_samples.append((travelled, edges.width_px))
         return edges
 
@@ -510,10 +519,16 @@ class CylinderVisualServoGapExecutor(
         return total
 
     def _detect(self, image: np.ndarray) -> CylinderEdges | None:
-        """Run the detector and reject a width that jumped from the last accepted one."""
+        """Run the detector and reject a width that jumped from the last accepted one.
+
+        A clipped detection (cylinder cut off by the image border) has no usable
+        width: it passes without the jump check and leaves the width history alone.
+        """
         edges = detect_cylinder_edges(image, self._params.detector)
         if edges is None:
             return None
+        if edges.clipped:
+            return edges
         if self._recent_widths:
             reference = float(np.median(self._recent_widths))
             change = abs(edges.width_px - reference) / reference
@@ -628,6 +643,7 @@ class CylinderVisualServoGapExecutor(
         self._tick = 0
         self._missed = 0
         self._aligned_ticks = 0
+        self._clipped_warned = False
         self._advanced = 0.0
         self._close_ticks = 0
         self._target = None
