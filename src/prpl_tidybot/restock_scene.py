@@ -216,6 +216,34 @@ def robot_home_poses(
     return poses
 
 
+def staging_sheet(
+    lab_config: Mapping[str, Any],
+    scene: Mapping[str, Any],
+) -> list[str]:
+    """Printable taping coordinates for a planned scene: each object's marker
+    centre and the robot's start pose, in the map frame."""
+    frame = home_frame_from_shelf(
+        lab_config["shelf"]["map_xy"], float(lab_config["shelf"].get("yaw_map", 0.0))
+    )
+    lines = [
+        f"home frame: origin map ({frame.origin_x:.3f}, {frame.origin_y:.3f}), "
+        f"yaw {frame.yaw:.3f}",
+        f"robot start: map ({frame.origin_x:.3f}, {frame.origin_y:.3f}), "
+        f"heading {frame.yaw:.3f}",
+    ]
+    markers = {
+        str(entry.get("name") or f"obj_goal{i}"): int(entry["marker_id"])
+        for i, entry in enumerate(lab_config["objects"], start=1)
+    }
+    for obj in scene["objects"]:
+        name = obj["name"]
+        x, y = frame.home_to_map(obj["floor"][0], obj["floor"][1])
+        marker = markers.get(name)
+        marker_note = f"marker {marker}" if marker is not None else "no marker"
+        lines.append(f"{name} ({marker_note}): tape at map ({x:.3f}, {y:.3f})")
+    return lines
+
+
 def cli(argv: Sequence[str] | None = None) -> int:
     """Command-line entry point; see `scripts/export_restock_scene.py`."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -243,6 +271,12 @@ def cli(argv: Sequence[str] | None = None) -> int:
         help="marker-detector host (default: the client's built-in hostname)",
     )
     parser.add_argument(
+        "--staging-sheet",
+        action="store_true",
+        help="print map-frame taping coordinates for the existing --out scene "
+        "(no detector needed) and exit",
+    )
+    parser.add_argument(
         "--verify",
         action="store_true",
         help="compare fresh detections against the existing --out scene "
@@ -257,6 +291,14 @@ def cli(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     lab_config = load_lab_config(args.config)
+    if args.staging_sheet:
+        scene = cast(
+            dict[str, Any],
+            OmegaConf.to_container(OmegaConf.load(args.out), resolve=True),
+        )
+        for line in staging_sheet(lab_config, scene):
+            print(line)
+        return 0
     if args.from_json is not None:
         payload = read_payload_from_json(args.from_json)
     else:

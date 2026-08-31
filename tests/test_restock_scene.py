@@ -13,6 +13,7 @@ from prpl_tidybot.restock_scene import (
     cli,
     home_frame_from_shelf,
     robot_home_poses,
+    staging_sheet,
     verify_scene,
 )
 
@@ -114,3 +115,34 @@ def test_cli_write_and_verify(tmp_path: Path, capsys: pytest.CaptureFixture) -> 
         json.dump(moved, f)
     assert cli(common + ["--from-json", str(moved_path), "--verify"]) == 1
     assert "BAD" in capsys.readouterr().out
+
+
+def test_staging_sheet_round_trips_floor_positions() -> None:
+    """The sheet's map-frame taping coordinates transform back to the scene's planned
+    home-frame floor spots."""
+    scene, _ = build_scene(_PAYLOAD, _LAB_CONFIG)
+    lines = staging_sheet(_LAB_CONFIG, scene)
+    assert any("robot start: map (1.100, 0.100)" in line for line in lines)
+    assert any(
+        "obj_goal1 (marker 35): tape at map (0.600, 0.900)" in line for line in lines
+    )
+    assert any(
+        "obj_goal2 (marker 36): tape at map (0.800, 1.100)" in line for line in lines
+    )
+
+
+def test_cli_staging_sheet(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """--staging-sheet prints taping coordinates from an existing scene without
+    touching the marker detector."""
+    config_path = tmp_path / "objects.yaml"
+    OmegaConf.save(config=OmegaConf.create(_LAB_CONFIG), f=config_path)
+    payload_path = tmp_path / "payload.json"
+    with open(payload_path, "w", encoding="utf-8") as f:
+        json.dump(_PAYLOAD, f)
+    out_path = tmp_path / "scene.yaml"
+    common = ["--config", str(config_path), "--out", str(out_path)]
+    assert cli(common + ["--from-json", str(payload_path)]) == 0
+    capsys.readouterr()
+    assert cli(common + ["--staging-sheet"]) == 0
+    out = capsys.readouterr().out
+    assert "tape at map (0.600, 0.900)" in out
