@@ -271,7 +271,9 @@ Software, in dependency order — each step ends with a fake-mode or pytest chec
    `SkillCall` with the post-stow `predicted_state`; `SettleGapExecutor` handles it in
    fake mode, so the whole path is testable without a human or a robot.
 6. Check whether `kortex_wheels/` has (or Kinova ships) a Python 3.11 wheel — ten minutes
-   that decides how hard section 3 item 5 will be later.
+   that decides how hard section 3 item 5 will be later. **Checked 2026-08-31: the wheel
+   is `py3-none-any` (pure Python), so it is not what caps `requires-python` at <3.11;
+   lifting the cap is a dependency-resolution exercise, not a Kinova blocker.**
 
 Physical preparation that does not need the robot:
 

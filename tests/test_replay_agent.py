@@ -137,6 +137,24 @@ def test_settle_pairs(tmp_path: Path) -> None:
     assert base_action[2] == pytest.approx(math.atan2(math.sin(3.0), math.cos(3.0)))
 
 
+def test_repeated_gripper_commands_collapse(tmp_path: Path) -> None:
+    """A run of repeated close commands (the export repeats ±1 while the sim's fingers
+    move) is collapsed to its first step, so the executor dwells once per event instead
+    of once per repeat."""
+    joints = np.array([_HOME_JOINTS] * 5)
+    base = np.zeros((5, 3))
+    gripper = np.array([0.31, 0.2, 0.1, 0.0, 0.31])
+    actions = np.zeros((4, 11))
+    actions[0:3, 10] = -1.0  # one close event, repeated over three steps
+    actions[3, 10] = 1.0  # a distinct open event right after stays intact
+    plan_path = tmp_path / "plan.npz"
+    np.savez(plan_path, base=base, joints=joints, gripper=gripper, actions=actions)
+    agent = NpzPlanAgent(plan_path)
+    agent.reset(_make_state((0.0, 0.0, 0.0), list(_HOME_JOINTS)), {})
+    commands = [pair[1][10] for pair in agent.plan()]
+    assert commands == [-1.0, 0.0, 0.0, 1.0]
+
+
 def test_plan_is_one_shot(tmp_path: Path) -> None:
     """A second plan() call within an episode raises AgentFailure, matching the bilevel
     planner's one-shot contract."""

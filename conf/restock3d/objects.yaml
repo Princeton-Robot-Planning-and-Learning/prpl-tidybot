@@ -18,30 +18,32 @@ shelf:
   map_xy: [1.5, 1.5]
   yaw_map: 0.0
 
-# Placeholder set: two talls, four shorts, packing feasible in both sections.
+# Placeholder set: the bundled demo6 scene's dimensions (two talls, four
+# shorts, packing feasible in both sections), so the already-planned demo6
+# export can serve as the first lab run by staging objects of these sizes.
 # Replace with the measured object set before the lab visit.
 objects:
-  - marker_id: 35 # e.g. Skippy peanut butter jar (tall section)
-    width: 0.070
-    height: 0.125
-    depth: 0.070
+  - marker_id: 35 # tall
+    width: 0.050
+    height: 0.150
+    depth: 0.050
   - marker_id: 36 # tall
-    width: 0.060
+    width: 0.050
     height: 0.140
-    depth: 0.060
+    depth: 0.050
   - marker_id: 37 # short
-    width: 0.070
-    height: 0.110
-    depth: 0.070
-  - marker_id: 38 # short
     width: 0.050
     height: 0.100
     depth: 0.050
-  - marker_id: 39 # short
+  - marker_id: 38 # short
     width: 0.060
-    height: 0.090
+    height: 0.110
     depth: 0.060
+  - marker_id: 39 # short
+    width: 0.050
+    height: 0.090
+    depth: 0.050
   - marker_id: 40 # short
     width: 0.050
-    height: 0.110
+    height: 0.100
     depth: 0.050

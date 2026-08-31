@@ -72,6 +72,7 @@ class NpzPlanAgent(
         self._robot_name = robot_name
         self._settle_first = settle_first
         base, joints, gripper, actions = _load_plan(Path(plan_path))
+        actions = _collapse_gripper_runs(actions)
         self._base, self._actions = _to_map_frame(
             base,
             actions,
@@ -221,6 +222,29 @@ def _load_plan(
             f"{joints.shape}, gripper {gripper.shape}, actions {actions.shape}"
         )
     return base, joints, gripper, actions
+
+
+def _collapse_gripper_runs(
+    actions: NDArray[np.floating],
+) -> NDArray[np.floating]:
+    """Keep only the first command of each run of repeated gripper commands.
+
+    The export repeats its ±1 gripper command for the 2-3 steps the sim's
+    fingers take to move, but the arm executor treats every gripper pair as
+    its own event and dwells `gripper_dwell_ticks` at each, so the repeats
+    would multiply the dwell (~6 s of extra hold per pick on the real robot).
+    One command per event is sufficient: the executor latches the last
+    explicit open/close and re-issues it on hold ticks.
+    """
+    actions = actions.copy()
+    previous_cmd = 0.0
+    for row in actions:
+        cmd = float(row[10])
+        if abs(cmd) > 0.5 and abs(previous_cmd) > 0.5 and cmd * previous_cmd > 0:
+            row[10] = 0.0
+        else:
+            previous_cmd = cmd
+    return actions
 
 
 def _to_map_frame(
