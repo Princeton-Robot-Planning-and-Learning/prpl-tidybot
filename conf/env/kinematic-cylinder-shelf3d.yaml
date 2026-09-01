@@ -301,7 +301,14 @@ real_gap_executors:
     # with one cylinder edge).
     max_width_change_frac: 0.3
     # After alignment the approach is open loop, straight along the tool's
-    # approach axis. Its length is estimated from how fast the cylinder's
+    # approach axis: approach_distance, the pre-grasp backoff, which is
+    # geometrically exact once the arm is at the pre-grasp pose and the
+    # servo has only strafed. The parallax range estimate below is off by
+    # default: it is sensitive to a constant over-width in the detections
+    # (soft shadows added ~15 px per side on 2026-08-31 and every grasp
+    # overshot by 1-5 cm), and the base staging it compensated for is now
+    # accurate to a few centimetres. With estimate_range true, the length
+    # is instead estimated from how fast the cylinder's
     # apparent width grows over the first range_baseline metres (motion
     # parallax; no diameter or focal length needed) minus the camera-to-
     # grasp offset, a robot constant: on 2026-08-29 the Pringles can read
@@ -311,7 +318,7 @@ real_gap_executors:
     # mounting offset). approach_distance is the fallback when the
     # estimate is missing or implausible; the pre-grasp pose is
     # PRE_GRASP_BACKOFF (0.10 m) behind the grasp.
-    estimate_range: true
+    estimate_range: false
     range_baseline: 0.04
     camera_to_grasp_offset: 0.108
     approach_min: 0.04
