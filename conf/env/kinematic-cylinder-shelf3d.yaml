@@ -84,8 +84,8 @@ cylinders:
   - {marker_id: 35, radius: 0.039, height: 0.233, fake_xy: [0.5, 0.0], place: [-0.12, -0.05, 0.86]}
   # short Pringles can
   - {marker_id: 36, radius: 0.039, height: 0.120, fake_xy: [0.3, 0.6], place: [0.0, -0.05, 0.86]}
-  # Lysol can
-  - {marker_id: 37, radius: 0.040, height: 0.210, fake_xy: [0.3, -0.6], place: [0.12, -0.05, 0.86]}
+  # Skippy peanut butter jar
+  - {marker_id: 37, radius: 0.035, height: 0.125, fake_xy: [0.3, -0.6], place: [0.12, -0.05, 0.86]}
 # Radius the simulator uses for every cylinder (see env_model_kwargs).
 sim_cylinder_radius: 0.039
 
