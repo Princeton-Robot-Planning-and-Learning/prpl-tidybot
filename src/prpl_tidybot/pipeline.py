@@ -15,6 +15,7 @@ import kinder
 from hydra.core.hydra_config import HydraConfig
 from kinder_bilevel_planning.agent import AgentFailure, BilevelPlanningAgent
 from omegaconf import DictConfig
+from prpl_utils.planning_agent import PlanningAgent
 from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
@@ -84,7 +85,15 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
     recorder: TrajectoryRecorder | None = None
     shadow_sim = None
     record_cfg = cfg.get("record")
-    if resolved_log_dir is not None:
+    if resolved_log_dir is not None and cfg.env.pipelines.get("sim") is None:
+        # An env without a sim pipeline (e.g. a replay env whose kinder env
+        # isn't importable here) has no shadow sim: trajectory recording is
+        # skipped, and the preview below runs without a rendered video.
+        _logger.warning(
+            "Env %s has no sim pipeline; skipping trajectory recording.",
+            cfg.env.env_name,
+        )
+    elif resolved_log_dir is not None:
         shadow_sim = hydra.utils.instantiate(
             cfg.env.pipelines.sim.real_env, _convert_="all"
         )
@@ -111,23 +120,35 @@ def run_planner(cfg: DictConfig, log_dir: Path | str | None = None) -> RolloutSu
     # `Kinematic3DEnvConfig.robot_base_home_pose: SE2Pose` get re-wrapped
     # as structured configs and downstream `.to_se3(...)` method calls fail
     # with "Key 'to_se3' not in 'SE2Pose'".
-    env_models = build_planner_env_models(
-        cfg.env.env_name,
-        hydra.utils.instantiate(cfg.env.make_kwargs, _recursive_=True, _convert_="all"),
-        hydra.utils.instantiate(
-            cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
-        ),
-    )
-
-    agent: BilevelPlanningAgent = BilevelPlanningAgent(
-        env_models,
-        cfg.seed,
-        max_abstract_plans=cfg.agent.max_abstract_plans,
-        samples_per_step=cfg.agent.samples_per_step,
-        max_skill_horizon=cfg.agent.max_skill_horizon,
-        heuristic_name=cfg.agent.heuristic_name,
-        planning_timeout=cfg.agent.planning_timeout,
-    )
+    # An env yaml may supply its own agent as an `env.agent` `_target_` block
+    # (e.g. `NpzPlanAgent`, which replays an externally planned trajectory).
+    # The default is the bilevel planner over the env's planning models; the
+    # models are built only on that path, since a custom-agent env's
+    # `env_name` need not have registered planning models at all.
+    agent: PlanningAgent
+    if cfg.env.get("agent") is not None:
+        agent = hydra.utils.instantiate(
+            cfg.env.agent, _recursive_=True, _convert_="all"
+        )
+    else:
+        env_models = build_planner_env_models(
+            cfg.env.env_name,
+            hydra.utils.instantiate(
+                cfg.env.make_kwargs, _recursive_=True, _convert_="all"
+            ),
+            hydra.utils.instantiate(
+                cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
+            ),
+        )
+        agent = BilevelPlanningAgent(
+            env_models,
+            cfg.seed,
+            max_abstract_plans=cfg.agent.max_abstract_plans,
+            samples_per_step=cfg.agent.samples_per_step,
+            max_skill_horizon=cfg.agent.max_skill_horizon,
+            heuristic_name=cfg.agent.heuristic_name,
+            planning_timeout=cfg.agent.planning_timeout,
+        )
 
     runner: Runner = Runner(
         real_env=real_env,
