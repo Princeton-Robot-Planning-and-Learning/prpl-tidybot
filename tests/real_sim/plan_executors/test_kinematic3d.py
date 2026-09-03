@@ -264,9 +264,7 @@ def test_confirm_release_segments_prompts_before_insertion_only():
     marker = _base_action(drot=2e-3)
     insert = _arm_action(arm_deltas=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     release = _arm_action(gripper_cmd=1.0)
-    executor.set_trajectory(
-        [(s0, reach), (s0, marker), (s0, insert), (s0, release)]
-    )
+    executor.set_trajectory([(s0, reach), (s0, marker), (s0, insert), (s0, release)])
     # Loading the trajectory loads the first (staging) segment: no prompt.
     assert not prompts
     # pylint: disable=protected-access
