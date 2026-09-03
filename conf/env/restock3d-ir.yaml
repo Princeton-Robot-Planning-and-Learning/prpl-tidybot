@@ -82,7 +82,11 @@ pipelines:
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv
-      env_id: kinder/KinematicCylinderShelf3D-o6-v0
+      # kindergarden registers this env only up to o3; gymnasium.make lets
+      # call-time kwargs override the registered ones, so the o3 id plus an
+      # explicit num_cylinders yields the 6-can scene.
+      env_id: kinder/KinematicCylinderShelf3D-o3-v0
+      num_cylinders: 6
       config: ${env.sim_config}
       # Enable inner-env `set_state` so this same pipeline can serve as a
       # shadow sim for the preview video and the side-by-side recorder.
