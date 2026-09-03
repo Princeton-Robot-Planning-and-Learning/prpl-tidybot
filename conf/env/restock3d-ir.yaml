@@ -50,6 +50,12 @@ arm_max_iter_total: 5000
 # squeezed, not crushed. Tune with `env.gripper_close_position=...`.
 gripper_close_position: 0.7
 
+# Testing gate (real mode only): prompt the operator before every arm
+# segment that carries a can into the shelf and releases it, while the
+# robot stands still at the staging pose. Disable with
+# `env.confirm_release_segments=false` once trusted.
+confirm_release_segments: true
+
 pipelines:
   fake:
     real_env:
@@ -112,4 +118,8 @@ pipelines:
       renderer:
         _target_: prpl_tidybot.rendering.CeilingCameraRenderer
     perceiver: ${env.pipelines.fake.perceiver}
-    plan_executor: ${env.pipelines.fake.plan_executor}
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
+      base_executor: ${env.pipelines.fake.plan_executor.base_executor}
+      arm_executor: ${env.pipelines.fake.plan_executor.arm_executor}
+      confirm_release_segments: ${env.confirm_release_segments}
