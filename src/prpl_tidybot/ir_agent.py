@@ -181,12 +181,25 @@ class InjectedPlanAgent(
         ]
         pairs: list[tuple[ObjectCentricState, NDArray[np.floating]]] = []
 
+        # Settle states are built on the plan's start state, not the perceived
+        # observation: the perceiver reports a robot-only ObjectCentricState,
+        # which the preview's shadow sim cannot set_state (no scene objects,
+        # not the env-specific state class). The executors read only the
+        # robot features either way.
+        perceived = start.copy()
+        for feat in ("pos_base_x", "pos_base_y", "pos_base_rot", "finger_state"):
+            perceived.set(start_robot, feat, float(obs.get(robot, feat)))
+        for j in range(7):
+            perceived.set(
+                start_robot, f"joint_{j + 1}", float(obs.get(robot, f"joint_{j + 1}"))
+            )
+
         perceived_joints = [float(obs.get(robot, f"joint_{j + 1}")) for j in range(7)]
         arm_delta = np.asarray(start_joints) - np.asarray(perceived_joints)
         if np.abs(arm_delta).max() > _MOTION_EPS:
             action = np.zeros(11)
             action[3:10] = arm_delta
-            pairs.append((obs, action))
+            pairs.append((perceived, action))
 
         base_delta = np.array(
             [
@@ -203,9 +216,9 @@ class InjectedPlanAgent(
         if np.abs(base_delta).max() > _MOTION_EPS:
             # The pair's state carries the post-arm-settle joints so the base
             # executor holds the arm there while driving.
-            state = obs.copy()
+            state = perceived.copy()
             for j in range(7):
-                state.set(robot, f"joint_{j + 1}", start_joints[j])
+                state.set(start_robot, f"joint_{j + 1}", start_joints[j])
             action = np.zeros(11)
             action[:3] = base_delta
             pairs.append((state, action))

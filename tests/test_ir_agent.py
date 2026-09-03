@@ -9,6 +9,7 @@ end to end through the executor stack in fake mode.
 import json
 from pathlib import Path
 
+import hydra
 import numpy as np
 import pytest
 from hydra import compose, initialize_config_dir
@@ -88,6 +89,31 @@ def test_mismatched_ir_rejected(tmp_path: Path) -> None:
     bad.write_text(json.dumps(ir))
     with pytest.raises(ValueError, match="height"):
         InjectedPlanAgent(bad)
+
+
+def test_settle_states_render_in_shadow_sim() -> None:
+    """Every planned state — the settle pairs included — can be set_state into the
+    shadow sim, which is what the real-mode preview does. (The settle states must be
+    built on the plan's start state: the perceiver's robot-only observation has no
+    scene objects and the wrong state class.)"""
+    agent = InjectedPlanAgent(_FIXTURE, seed=0)
+    # An obs whose base AND arm differ from the plan start, so both settle
+    # pairs are generated.
+    agent.reset(_make_obs((1.2, 0.4, 1.0), [0.0] * 7), {})
+    overrides = ["env=restock3d-ir", "mode=real", f"env.ir_path={_FIXTURE}"]
+    with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
+        cfg = compose(config_name="config", overrides=overrides)
+    shadow_sim = hydra.utils.instantiate(
+        cfg.env.pipelines.sim.real_env, _convert_="all"
+    )
+    shadow_sim.reset(seed=0)
+    # pylint: disable=protected-access
+    assert len(agent._planned_states) == len(agent._planned_actions) + 1
+    # Both settle pairs were generated: arm-only, then base-only.
+    assert np.abs(agent._planned_actions[0][3:10]).max() > 1e-4
+    assert np.abs(agent._planned_actions[1][:3]).max() > 1e-4
+    for state in agent._planned_states[:3]:
+        shadow_sim.set_state(state)
 
 
 def test_ir_pipeline_fake_mode() -> None:
