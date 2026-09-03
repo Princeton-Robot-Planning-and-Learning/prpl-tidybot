@@ -14,11 +14,11 @@ from spatialmath import SE2
 
 from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
 from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
-from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
-    PurePursuitBaseMotion3DPlanExecutor,
-)
 from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
     StreamingArmMotion3DPlanExecutor,
+)
+from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
+    PurePursuitBaseMotion3DPlanExecutor,
 )
 from prpl_tidybot.real_sim.plan_executors.distance_factories import (
     create_kinova_distance_fn,
