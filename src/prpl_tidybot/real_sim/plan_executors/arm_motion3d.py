@@ -713,6 +713,11 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         prompt_fn: Callable[[str], str] = input,
         compensate_base_error: bool = False,
         compensation_reach: float = 0.8,
+        visual_lateral_mode: str = "off",
+        image_source: Any = None,
+        visual_lateral_gain: float = 0.0003,
+        visual_lateral_sign: float = 1.0,
+        visual_max_lateral: float = 0.04,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -729,6 +734,11 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             prompt_fn=prompt_fn,
             compensate_base_error=compensate_base_error,
             compensation_reach=compensation_reach,
+            visual_lateral_mode=visual_lateral_mode,
+            image_source=image_source,
+            visual_lateral_gain=visual_lateral_gain,
+            visual_lateral_sign=visual_lateral_sign,
+            visual_max_lateral=visual_max_lateral,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")
