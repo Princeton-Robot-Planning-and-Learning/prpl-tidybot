@@ -35,6 +35,7 @@ from __future__ import annotations
 import abc
 import logging
 import math
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -190,6 +191,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         visual_lateral_gain: float = 0.0003,
         visual_lateral_sign: float = 1.0,
         visual_max_lateral: float = 0.04,
+        visual_debug_dir: str | None = None,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if visual_lateral_mode not in ("off", "log", "on"):
@@ -242,6 +244,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._visual_lateral_gain = visual_lateral_gain
         self._visual_lateral_sign = visual_lateral_sign
         self._visual_max_lateral = visual_max_lateral
+        self._visual_debug_dir = visual_debug_dir
+        self._visual_frame_count = 0
         # The base hands over as soon as it is within tolerance, while it is
         # still creeping and the marker-pose stream lags, so the error must
         # be computed from a SETTLED pose: the arm holds until the perceived
@@ -414,6 +418,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._visual_attempts += 1
         image = self._image_source.get_image()
         edges = None if image is None else detect_cylinder_edges(image)
+        if self._visual_debug_dir is not None and image is not None:
+            self._dump_visual_frame(image, edges)
         if edges is None or edges.clipped_left or edges.clipped_right:
             if self._visual_attempts < _VISUAL_MAX_ATTEMPTS:
                 return "retry"
@@ -442,6 +448,21 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             for target in self._targets:
                 target[0] = float(target[0]) + delta
         return "applied"
+
+    def _dump_visual_frame(self, image: Any, edges: Any) -> None:
+        """Save the raw wrist frame (and edge overlay when detected) for offline
+        detector tuning."""
+        import cv2  # type: ignore[import-untyped]
+
+        from prpl_tidybot.visual_servo.cylinder_edges import render_edge_overlay
+
+        directory = Path(self._visual_debug_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        self._visual_frame_count += 1
+        stem = directory / f"grasp_frame_{self._visual_frame_count:04d}"
+        cv2.imwrite(str(stem) + ".png", image[:, :, ::-1])
+        overlay = render_edge_overlay(image, edges)
+        cv2.imwrite(str(stem) + "_overlay.png", overlay[:, :, ::-1])
 
     def _settled_base_pose(
         self, sim_state: ObjectCentricState
@@ -718,6 +739,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         visual_lateral_gain: float = 0.0003,
         visual_lateral_sign: float = 1.0,
         visual_max_lateral: float = 0.04,
+        visual_debug_dir: str | None = None,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -739,6 +761,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             visual_lateral_gain=visual_lateral_gain,
             visual_lateral_sign=visual_lateral_sign,
             visual_max_lateral=visual_max_lateral,
+            visual_debug_dir=visual_debug_dir,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")

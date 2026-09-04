@@ -176,6 +176,9 @@ pipelines:
         visual_lateral_sign: ${env.visual_lateral_sign}
         visual_lateral_gain: ${env.visual_lateral_gain}
         visual_max_lateral: ${env.visual_max_lateral}
+        # Raw + overlay wrist frames from every detection attempt, for
+        # offline detector tuning.
+        visual_debug_dir: ${hydra:runtime.output_dir}/visual_frames
         image_source:
           _target_: prpl_tidybot.visual_servo.image_sources.KinovaWristCameraSource
       confirm_release_segments: ${env.confirm_release_segments}
