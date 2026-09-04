@@ -219,6 +219,12 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # the lateral component dominates and joint 1 corrects exactly it).
         self._compensate_base_error = compensate_base_error
         self._compensation_reach = compensation_reach
+        # The base hands over as soon as it is within tolerance, while it is
+        # still creeping and the marker-pose stream lags, so the error must
+        # be computed from a SETTLED pose: the arm holds until the perceived
+        # base pose is stable for _SETTLE_STABLE_TICKS consecutive ticks
+        # (or the timeout passes), and the correction uses the mean of the
+        # stable window.
 
         self._targets: list[JointPositions] = []
         self._start_joints: JointPositions = []
@@ -235,6 +241,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._last_gripper_goal: float | None = None
         self._confirmed_close_cursor: int = -1
         self._compensation_applied: bool = False
+        self._settle_history: list[tuple[float, float, float]] = []
 
     def _on_set_trajectory(self) -> None:
         self._targets = [
@@ -259,6 +266,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._last_gripper_goal = None
         self._confirmed_close_cursor = -1
         self._compensation_applied = False
+        self._settle_history = []
 
     def step(
         self, sim_state: ObjectCentricState
@@ -268,8 +276,24 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                 "StreamingArmMotion3DPlanExecutor.step called with no trajectory"
             )
         if self._compensate_base_error and not self._compensation_applied:
+            settled = self._settled_base_pose(sim_state)
+            if settled is None:
+                # Hold the arm at its perceived joints until the base pose
+                # settles; the base target inside the action holds too.
+                perceived = _perceived_joints(sim_state, self._robot_name)
+                hold = np.zeros(11)
+                action = _build_tidybot_action(
+                    sim_state,
+                    perceived,
+                    hold,
+                    self._robot_name,
+                    self._last_gripper_goal,
+                    self._gripper_close_position,
+                )
+                self._tick_count += 1
+                return action, hold
             self._compensation_applied = True
-            self._apply_base_error_compensation(sim_state)
+            self._apply_base_error_compensation(settled)
         perceived = _perceived_joints(sim_state, self._robot_name)
         self._advance_cursor(perceived)
         target = self._command_target(perceived)
@@ -323,7 +347,45 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                 self._cursor += 1
         return action, sim_action
 
-    def _apply_base_error_compensation(self, sim_state: ObjectCentricState) -> None:
+    def _settled_base_pose(
+        self, sim_state: ObjectCentricState
+    ) -> tuple[float, float, float] | None:
+        """The mean perceived base pose once it is stable, else None (keep waiting).
+
+        Stable means _SETTLE_STABLE_TICKS consecutive readings within
+        _SETTLE_POS_TOL / _SETTLE_ROT_TOL of the newest one. After
+        _SETTLE_TIMEOUT_TICKS the newest reading is used anyway (with a
+        warning) so a drifting marker stream cannot stall the rollout.
+        """
+        pose = _perceived_base(sim_state, self._robot_name)
+        self._settle_history.append(pose)
+        recent = self._settle_history[-_SETTLE_STABLE_TICKS:]
+        stable = len(recent) == _SETTLE_STABLE_TICKS and all(
+            math.hypot(b[0] - pose[0], b[1] - pose[1]) < _SETTLE_POS_TOL
+            and abs(_wrap(b[2] - pose[2])) < _SETTLE_ROT_TOL
+            for b in recent
+        )
+        if not stable:
+            if len(self._settle_history) < _SETTLE_TIMEOUT_TICKS:
+                return None
+            _logger.warning(
+                "Base pose did not settle within %d ticks; compensating from "
+                "the latest reading.",
+                _SETTLE_TIMEOUT_TICKS,
+            )
+            recent = [pose]
+        return (
+            sum(b[0] for b in recent) / len(recent),
+            sum(b[1] for b in recent) / len(recent),
+            math.atan2(
+                sum(math.sin(b[2]) for b in recent),
+                sum(math.cos(b[2]) for b in recent),
+            ),
+        )
+
+    def _apply_base_error_compensation(
+        self, actual: tuple[float, float, float]
+    ) -> None:
         """Offset joint 1 of every target for the perceived base staging error.
 
         The map-frame end-effector target is reconstructed from the PLANNED
@@ -337,7 +399,6 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         if not self._pairs or not self._targets:
             return
         planned = _perceived_base(self._pairs[0][0], self._robot_name)
-        actual = _perceived_base(sim_state, self._robot_name)
         last_j1 = float(self._targets[-1][0])
         # Joint 1 positive rotates the arm plane CLOCKWISE in the map frame
         # (verified against the kinder robot model in
@@ -663,6 +724,15 @@ def _perceived_base(
 
 def _wrap(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+# Base-pose settle detection for the compensation (see compensate_base_error):
+# consecutive readings required, their agreement tolerances, and the give-up
+# horizon (ticks are ~0.1 s in real mode).
+_SETTLE_STABLE_TICKS = 4
+_SETTLE_POS_TOL = 0.004
+_SETTLE_ROT_TOL = 0.006
+_SETTLE_TIMEOUT_TICKS = 50
 
 
 def _absolute_target(

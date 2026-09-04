@@ -885,7 +885,10 @@ def test_base_error_compensation_recovers_ee_position():
     action = np.zeros(11)
     executor.set_trajectory([(planned_state, action)])
     perceived_state = _make_state(base_xytheta=actual_base, arm_conf=list(joints))
-    executor.step(perceived_state)
+    # The correction waits for the perceived base pose to be stable for a few
+    # consecutive ticks before it is computed.
+    for _ in range(6):
+        executor.step(perceived_state)
     corrected = executor._targets[0]  # pylint: disable=protected-access
 
     err_uncorrected = np.linalg.norm((fk(actual_base, joints) - target_ee)[:2])
