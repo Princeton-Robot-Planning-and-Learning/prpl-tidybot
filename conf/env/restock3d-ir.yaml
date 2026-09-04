@@ -65,6 +65,14 @@ confirm_release_segments: true
 # `env.confirm_release_segments=false`).
 confirm_grasp_closes: false
 
+# Base-error compensation: at each arm segment's first tick, compare the
+# perceived base pose (marker detector) with the plan's and offset joint 1
+# so the arm plane swings back onto the map-frame target. Corrects the
+# dominant (lateral + yaw) part of base staging error; forward error is
+# absorbed by the grasp/place standoffs. Disable with
+# `env.compensate_base_error=false` to compare.
+compensate_base_error: true
+
 pipelines:
   fake:
     real_env:
@@ -95,6 +103,7 @@ pipelines:
         lookahead: ${env.arm_lookahead}
         gripper_close_position: ${env.gripper_close_position}
         confirm_grasp_closes: ${env.confirm_grasp_closes}
+        compensate_base_error: ${env.compensate_base_error}
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv

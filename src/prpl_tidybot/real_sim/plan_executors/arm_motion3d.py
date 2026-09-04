@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import abc
 import logging
+import math
 from typing import Callable
 
 import numpy as np
@@ -180,6 +181,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         stall_advance_min_progress: float = 0.5,
         confirm_grasp_closes: bool = False,
         prompt_fn: Callable[[str], str] = input,
+        compensate_base_error: bool = False,
+        compensation_reach: float = 0.8,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if advance_radius <= 0:
@@ -207,6 +210,15 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # open-loop grasp to land on it.
         self._confirm_grasp_closes = confirm_grasp_closes
         self._prompt_fn = prompt_fn
+        # Base-error lateral compensation: at each segment's first tick the
+        # perceived base pose is compared with the plan's, and joint 1 of
+        # every target is offset so the arm plane swings back onto the
+        # map-frame end-effector target ~compensation_reach ahead (the
+        # planned joints reproduce the end effector in the BASE frame, so a
+        # base staging error maps one-to-one into a map-frame arm error;
+        # the lateral component dominates and joint 1 corrects exactly it).
+        self._compensate_base_error = compensate_base_error
+        self._compensation_reach = compensation_reach
 
         self._targets: list[JointPositions] = []
         self._start_joints: JointPositions = []
@@ -222,6 +234,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._gripper_ticks_remaining: int = 0
         self._last_gripper_goal: float | None = None
         self._confirmed_close_cursor: int = -1
+        self._compensation_applied: bool = False
 
     def _on_set_trajectory(self) -> None:
         self._targets = [
@@ -245,6 +258,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._gripper_ticks_remaining = 0
         self._last_gripper_goal = None
         self._confirmed_close_cursor = -1
+        self._compensation_applied = False
 
     def step(
         self, sim_state: ObjectCentricState
@@ -253,6 +267,9 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             raise RuntimeError(
                 "StreamingArmMotion3DPlanExecutor.step called with no trajectory"
             )
+        if self._compensate_base_error and not self._compensation_applied:
+            self._compensation_applied = True
+            self._apply_base_error_compensation(sim_state)
         perceived = _perceived_joints(sim_state, self._robot_name)
         self._advance_cursor(perceived)
         target = self._command_target(perceived)
@@ -305,6 +322,55 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             else:
                 self._cursor += 1
         return action, sim_action
+
+    def _apply_base_error_compensation(self, sim_state: ObjectCentricState) -> None:
+        """Offset joint 1 of every target for the perceived base staging error.
+
+        The map-frame end-effector target is reconstructed from the PLANNED
+        base pose and the last target's joint 1 (arm plane heading = base
+        heading + joint 1, target ~compensation_reach along it); the offset
+        is whatever joint 1 must become for the ACTUAL base to point the arm
+        plane at that same map point. First order and lateral-only: the
+        forward error component (a few millimetres for centimetre-scale base
+        errors) is absorbed by the grasp/place standoffs.
+        """
+        if not self._pairs or not self._targets:
+            return
+        planned = _perceived_base(self._pairs[0][0], self._robot_name)
+        actual = _perceived_base(sim_state, self._robot_name)
+        last_j1 = float(self._targets[-1][0])
+        # Joint 1 positive rotates the arm plane CLOCKWISE in the map frame
+        # (verified against the kinder robot model in
+        # test_base_error_compensation_recovers_ee_position), hence the
+        # negations: plane bearing = base heading - joint 1.
+        heading = planned[2] - last_j1
+        target_x = planned[0] + self._compensation_reach * math.cos(heading)
+        target_y = planned[1] + self._compensation_reach * math.sin(heading)
+        needed_j1 = -_wrap(
+            math.atan2(target_y - actual[1], target_x - actual[0]) - actual[2]
+        )
+        delta = _wrap(needed_j1 - last_j1)
+        if abs(delta) > 0.15:
+            # A correction this large means the base is nowhere near its
+            # staging pose (or perception glitched); trust the plan instead.
+            _logger.warning(
+                "Base-error compensation of %.3f rad exceeds the 0.15 cap; "
+                "skipping (planned base %s, perceived %s).",
+                delta,
+                np.round(planned, 3),
+                np.round(actual, 3),
+            )
+            return
+        if abs(delta) > 1e-4:
+            _logger.info(
+                "Base-error compensation: joint 1 offset %.4f rad "
+                "(~%.1f cm lateral at %.2f m).",
+                delta,
+                100 * delta * self._compensation_reach,
+                self._compensation_reach,
+            )
+        for target in self._targets:
+            target[0] = float(target[0]) + delta
 
     def done(self, sim_state: ObjectCentricState) -> bool:
         if self._done_latched:
@@ -488,6 +554,8 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         stall_advance_min_progress: float = 0.5,
         confirm_grasp_closes: bool = False,
         prompt_fn: Callable[[str], str] = input,
+        compensate_base_error: bool = False,
+        compensation_reach: float = 0.8,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -502,6 +570,8 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             stall_advance_min_progress=stall_advance_min_progress,
             confirm_grasp_closes=confirm_grasp_closes,
             prompt_fn=prompt_fn,
+            compensate_base_error=compensate_base_error,
+            compensation_reach=compensation_reach,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")
@@ -578,6 +648,21 @@ def _path_progress(
 def _perceived_joints(sim_state: ObjectCentricState, robot_name: str) -> JointPositions:
     robot = sim_state.get_object_from_name(robot_name)
     return [sim_state.get(robot, f"joint_{j + 1}") for j in range(7)]
+
+
+def _perceived_base(
+    sim_state: ObjectCentricState, robot_name: str
+) -> tuple[float, float, float]:
+    robot = sim_state.get_object_from_name(robot_name)
+    return (
+        float(sim_state.get(robot, "pos_base_x")),
+        float(sim_state.get(robot, "pos_base_y")),
+        float(sim_state.get(robot, "pos_base_rot")),
+    )
+
+
+def _wrap(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
 
 
 def _absolute_target(

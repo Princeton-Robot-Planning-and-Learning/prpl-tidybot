@@ -817,3 +817,78 @@ def test_confirm_grasp_closes_prompts_once_per_close():
     # for several ticks); none for the open.
     assert len(prompts) == 1
     assert "CLOSE" in prompts[0]
+
+
+def test_base_error_compensation_recovers_ee_position():
+    """With compensate_base_error, a lateral/yaw base staging error is largely
+    cancelled: the corrected joints put the end effector (checked with the
+    kinder robot model's forward kinematics) markedly closer to the planned
+    map-frame position than the uncorrected ones."""
+    import math
+
+    import kinder
+    from kinder.envs.kinematic3d.cylinder_shelf3d import (
+        ObjectCentricCylinderShelf3DEnv,
+    )
+    from kinder.envs.kinematic3d.utils import extend_joints_to_include_fingers
+    from kinder_models.kinematic3d.constants import HOME_JOINT_POSITIONS
+    from kinder_models.kinematic3d.cylinder_shelf3d.parameterized_skills import (
+        _solve_planar_joints,
+    )
+    from pybullet_helpers.geometry import SE2Pose
+
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    kinder.register_all_environments()
+    sim = ObjectCentricCylinderShelf3DEnv(num_cylinders=1, allow_state_access=True)
+    arm = sim.robot.arm
+
+    def fk(base, joints):
+        sim.robot.set_base(SE2Pose(*base))
+        arm.set_joints(extend_joints_to_include_fingers(list(joints)))
+        return np.array(arm.get_end_effector_pose().position)
+
+    planned_base = (1.0, 0.5, 1.2)
+    sim.robot.set_base(SE2Pose(*planned_base))
+    reach_target = np.array(
+        [
+            planned_base[0] + 0.75 * math.cos(planned_base[2]),
+            planned_base[1] + 0.75 * math.sin(planned_base[2]),
+            0.45,
+        ]
+    )
+    joints = _solve_planar_joints(
+        arm, reach_target, 0.79, list(HOME_JOINT_POSITIONS[:7])
+    )
+    assert joints is not None
+    target_ee = fk(planned_base, joints)
+
+    # A lateral base staging error (2 cm perpendicular to the arm plane,
+    # plus 0.02 rad of yaw) — the component the joint-1 correction targets;
+    # forward error is deliberately excluded (it is absorbed by the grasp
+    # and place standoffs, not corrected).
+    lateral = (-math.sin(planned_base[2]), math.cos(planned_base[2]))
+    actual_base = (
+        planned_base[0] + 0.02 * lateral[0],
+        planned_base[1] + 0.02 * lateral[1],
+        planned_base[2] + 0.02,
+    )
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        compensate_base_error=True,
+        compensation_reach=0.8,
+    )
+    planned_state = _make_state(base_xytheta=planned_base, arm_conf=list(joints))
+    action = np.zeros(11)
+    executor.set_trajectory([(planned_state, action)])
+    perceived_state = _make_state(base_xytheta=actual_base, arm_conf=list(joints))
+    executor.step(perceived_state)
+    corrected = executor._targets[0]  # pylint: disable=protected-access
+
+    err_uncorrected = np.linalg.norm((fk(actual_base, joints) - target_ee)[:2])
+    err_corrected = np.linalg.norm((fk(actual_base, corrected) - target_ee)[:2])
+    assert err_uncorrected > 0.015
+    assert err_corrected < 0.6 * err_uncorrected
