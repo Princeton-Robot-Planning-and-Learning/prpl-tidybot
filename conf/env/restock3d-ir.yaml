@@ -58,6 +58,12 @@ gripper_close_position: 0.7
 # robot stands still at the staging pose. Disable with
 # `env.confirm_release_segments=false` once trusted.
 confirm_release_segments: true
+# Staging-calibration gate: pause once per grasp with the fingers holding
+# open at the grasp pose, so the operator can mark where each can must be
+# staged for the open-loop grasp to land on it. Enable for a marking run
+# with `env.confirm_grasp_closes=true` (usually together with
+# `env.confirm_release_segments=false`).
+confirm_grasp_closes: false
 
 pipelines:
   fake:
@@ -88,6 +94,7 @@ pipelines:
         gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
         lookahead: ${env.arm_lookahead}
         gripper_close_position: ${env.gripper_close_position}
+        confirm_grasp_closes: ${env.confirm_grasp_closes}
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv

@@ -178,6 +178,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         stall_warning_ticks: int = 50,
         stall_advance_ticks: int = 30,
         stall_advance_min_progress: float = 0.5,
+        confirm_grasp_closes: bool = False,
+        prompt_fn: Callable[[str], str] = input,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if advance_radius <= 0:
@@ -199,6 +201,12 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._stall_warning_ticks = stall_warning_ticks
         self._stall_advance_ticks = stall_advance_ticks
         self._stall_advance_min_progress = stall_advance_min_progress
+        # A staging-calibration gate: with confirm_grasp_closes, the operator
+        # is prompted once per gripper CLOSE, with the fingers holding at the
+        # grasp pose — e.g. to mark where the object must be staged for the
+        # open-loop grasp to land on it.
+        self._confirm_grasp_closes = confirm_grasp_closes
+        self._prompt_fn = prompt_fn
 
         self._targets: list[JointPositions] = []
         self._start_joints: JointPositions = []
@@ -213,6 +221,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._gripper_cursor: int = -1
         self._gripper_ticks_remaining: int = 0
         self._last_gripper_goal: float | None = None
+        self._confirmed_close_cursor: int = -1
 
     def _on_set_trajectory(self) -> None:
         self._targets = [
@@ -235,6 +244,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._gripper_cursor = -1
         self._gripper_ticks_remaining = 0
         self._last_gripper_goal = None
+        self._confirmed_close_cursor = -1
 
     def step(
         self, sim_state: ObjectCentricState
@@ -247,6 +257,20 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._advance_cursor(perceived)
         target = self._command_target(perceived)
         _, sim_action = self._pairs[self._cursor]
+        if (
+            self._confirm_grasp_closes
+            and _is_gripper_cmd(sim_action)
+            and float(sim_action[10]) < -0.5
+            and self._cursor != self._confirmed_close_cursor
+        ):
+            # First tick at a CLOSE waypoint: the fingers hold at the grasp
+            # pose while the operator responds; the close is commanded on
+            # this same tick afterwards.
+            self._confirmed_close_cursor = self._cursor
+            self._prompt_fn(
+                "Gripper is at the grasp pose and about to CLOSE. Mark the "
+                "object spot, then press Enter to close..."
+            )
         # Remember the most recent explicit open/close so that subsequent "hold"
         # ticks (e.g. the entire retract phase) re-issue the same gripper goal.
         # The planning sim's finger_state may not reflect the real gripper state
@@ -462,6 +486,8 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         stall_warning_ticks: int = 50,
         stall_advance_ticks: int = 30,
         stall_advance_min_progress: float = 0.5,
+        confirm_grasp_closes: bool = False,
+        prompt_fn: Callable[[str], str] = input,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -474,6 +500,8 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             stall_warning_ticks=stall_warning_ticks,
             stall_advance_ticks=stall_advance_ticks,
             stall_advance_min_progress=stall_advance_min_progress,
+            confirm_grasp_closes=confirm_grasp_closes,
+            prompt_fn=prompt_fn,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")

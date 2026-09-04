@@ -783,3 +783,37 @@ def test_stall_needs_progress_and_stillness():
         moving = _make_state(arm_conf=[0.36 + 0.006 * i, 0, 0, 0, 0.2, 0, 0])
         real_action, _ = executor.step(moving)
     assert real_action.gripper_goal == pytest.approx(0.4)
+
+
+def test_confirm_grasp_closes_prompts_once_per_close():
+    """With confirm_grasp_closes, the executor prompts exactly once per gripper
+    CLOSE event (with the arm holding at the grasp pose) and never for opens."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    prompts: list[str] = []
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        gripper_dwell_ticks=2,
+        confirm_grasp_closes=True,
+        prompt_fn=lambda msg: prompts.append(msg) or "",
+    )
+    state = _make_state()
+    close = np.zeros(11)
+    close[10] = -1.0
+    open_cmd = np.zeros(11)
+    open_cmd[10] = 1.0
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    executor.set_trajectory(
+        [(state, close), (state, reach), (state, open_cmd), (state, reach)]
+    )
+    for _ in range(30):
+        if executor.done(state):
+            break
+        executor.step(state)
+    # One prompt for the close (despite the dwell holding the cursor there
+    # for several ticks); none for the open.
+    assert len(prompts) == 1
+    assert "CLOSE" in prompts[0]
