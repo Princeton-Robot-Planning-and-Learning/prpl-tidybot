@@ -35,9 +35,10 @@ from __future__ import annotations
 import abc
 import logging
 import math
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
+from kinder_models.structs import SkillCall
 from numpy.typing import NDArray
 from prpl_utils.real_sim import PlanExecutor
 from relational_structs import ObjectCentricState
@@ -45,6 +46,7 @@ from spatialmath import SE2
 
 from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.structs import TidyBotAction
+from prpl_tidybot.visual_servo.cylinder_edges import detect_cylinder_edges
 
 _logger = logging.getLogger(__name__)
 
@@ -183,8 +185,15 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         prompt_fn: Callable[[str], str] = input,
         compensate_base_error: bool = False,
         compensation_reach: float = 0.8,
+        visual_lateral_mode: str = "off",
+        image_source: Any = None,
+        visual_lateral_gain: float = 0.0003,
+        visual_lateral_sign: float = 1.0,
+        visual_max_lateral: float = 0.04,
     ) -> None:
         super().__init__(robot_name=robot_name)
+        if visual_lateral_mode not in ("off", "log", "on"):
+            raise ValueError("visual_lateral_mode must be off, log or on")
         if advance_radius <= 0:
             raise ValueError("advance_radius must be > 0")
         if arrival_tolerance <= 0:
@@ -219,6 +228,20 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # the lateral component dominates and joint 1 corrects exactly it).
         self._compensate_base_error = compensate_base_error
         self._compensation_reach = compensation_reach
+        # Wrist-camera lateral correction for grasp segments (segments that
+        # contain a gripper CLOSE start at the pre-grasp pose, thanks to the
+        # kinder grasp controller's segment marker). The camera measures the
+        # can's true lateral offset, which SUPERSEDES the marker-based base
+        # compensation for that segment: when a detection succeeds the
+        # marker correction is skipped; on detection failure it is the
+        # fallback. "log" measures and logs the would-be correction without
+        # applying it — run that first on the robot to verify the sign at
+        # the 45-degree view (visual_lateral_sign).
+        self._visual_lateral_mode = visual_lateral_mode
+        self._image_source = image_source
+        self._visual_lateral_gain = visual_lateral_gain
+        self._visual_lateral_sign = visual_lateral_sign
+        self._visual_max_lateral = visual_max_lateral
         # The base hands over as soon as it is within tolerance, while it is
         # still creeping and the marker-pose stream lags, so the error must
         # be computed from a SETTLED pose: the arm holds until the perceived
@@ -242,6 +265,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._confirmed_close_cursor: int = -1
         self._compensation_applied: bool = False
         self._settle_history: list[tuple[float, float, float]] = []
+        self._visual_attempts: int = 0
 
     def _on_set_trajectory(self) -> None:
         self._targets = [
@@ -267,6 +291,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._confirmed_close_cursor = -1
         self._compensation_applied = False
         self._settle_history = []
+        self._visual_attempts = 0
 
     def step(
         self, sim_state: ObjectCentricState
@@ -275,7 +300,9 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             raise RuntimeError(
                 "StreamingArmMotion3DPlanExecutor.step called with no trajectory"
             )
-        if self._compensate_base_error and not self._compensation_applied:
+        if (
+            self._compensate_base_error or self._visual_applicable()
+        ) and not self._compensation_applied:
             settled = self._settled_base_pose(sim_state)
             if settled is None:
                 # Hold the arm at its perceived joints until the base pose
@@ -292,8 +319,28 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                 )
                 self._tick_count += 1
                 return action, hold
-            self._compensation_applied = True
-            self._apply_base_error_compensation(settled)
+            if self._visual_applicable():
+                outcome = self._attempt_visual_correction()
+                if outcome == "retry":
+                    perceived = _perceived_joints(sim_state, self._robot_name)
+                    hold = np.zeros(11)
+                    action = _build_tidybot_action(
+                        sim_state,
+                        perceived,
+                        hold,
+                        self._robot_name,
+                        self._last_gripper_goal,
+                        self._gripper_close_position,
+                    )
+                    self._tick_count += 1
+                    return action, hold
+                self._compensation_applied = True
+                if outcome == "failed" and self._compensate_base_error:
+                    self._apply_base_error_compensation(settled)
+            else:
+                self._compensation_applied = True
+                if self._compensate_base_error:
+                    self._apply_base_error_compensation(settled)
         perceived = _perceived_joints(sim_state, self._robot_name)
         self._advance_cursor(perceived)
         target = self._command_target(perceived)
@@ -346,6 +393,55 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             else:
                 self._cursor += 1
         return action, sim_action
+
+    def _visual_applicable(self) -> bool:
+        """Visual lateral correction is configured and this is a grasp segment."""
+        return (
+            self._visual_lateral_mode != "off"
+            and self._image_source is not None
+            and any(
+                float(action[10]) < -0.5
+                for _, action in self._pairs
+                if not isinstance(action, SkillCall)
+            )
+        )
+
+    def _attempt_visual_correction(self) -> str:
+        """Try one wrist-camera detection; returns "applied", "retry" or "failed".
+
+        "applied" also covers log-only mode (measured, logged, not applied).
+        """
+        self._visual_attempts += 1
+        image = self._image_source.get_image()
+        edges = None if image is None else detect_cylinder_edges(image)
+        if edges is None or edges.clipped_left or edges.clipped_right:
+            if self._visual_attempts < _VISUAL_MAX_ATTEMPTS:
+                return "retry"
+            _logger.warning(
+                "Visual lateral correction: no usable detection after %d "
+                "attempts; falling back to the marker-based compensation.",
+                self._visual_attempts,
+            )
+            return "failed"
+        lateral = (
+            self._visual_lateral_sign
+            * self._visual_lateral_gain
+            * float(edges.servo_error_px)
+        )
+        clamped = max(-self._visual_max_lateral, min(self._visual_max_lateral, lateral))
+        delta = clamped / self._compensation_reach
+        _logger.info(
+            "Visual lateral correction: %.1f px -> %.1f mm lateral -> joint 1 "
+            "offset %+.4f rad%s.",
+            edges.servo_error_px,
+            1000 * clamped,
+            delta,
+            " (log only, NOT applied)" if self._visual_lateral_mode == "log" else "",
+        )
+        if self._visual_lateral_mode == "on":
+            for target in self._targets:
+                target[0] = float(target[0]) + delta
+        return "applied"
 
     def _settled_base_pose(
         self, sim_state: ObjectCentricState
@@ -733,6 +829,9 @@ _SETTLE_STABLE_TICKS = 4
 _SETTLE_POS_TOL = 0.004
 _SETTLE_ROT_TOL = 0.006
 _SETTLE_TIMEOUT_TICKS = 50
+# Wrist-camera detection attempts (one per tick) before the visual lateral
+# correction gives up and falls back to the marker-based compensation.
+_VISUAL_MAX_ATTEMPTS = 10
 
 
 def _absolute_target(

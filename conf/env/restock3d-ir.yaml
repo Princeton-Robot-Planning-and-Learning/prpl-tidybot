@@ -73,6 +73,24 @@ confirm_grasp_closes: false
 # `env.compensate_base_error=false` to compare.
 compensate_base_error: true
 
+# Wrist-camera lateral correction at each grasp (real mode): with the arm
+# holding at the pre-grasp, the camera measures the can's true lateral
+# offset and joint 1 shifts the remaining planned approach onto it; the
+# marker-based compensation is skipped for that segment (the camera
+# supersedes it) and remains the fallback when detection fails.
+#   log  - measure and log the would-be correction, apply nothing. Run
+#          this first and check the logged sign/magnitude against the
+#          misses you see at the 45-degree view; flip
+#          env.visual_lateral_sign=-1 if it points the wrong way.
+#   on   - apply the correction.
+#   off  - never consult the camera.
+visual_lateral_mode: log
+visual_lateral_sign: 1.0
+# Metres of lateral correction per pixel of offset (same scale as the
+# visual-servo executor's lateral gain), and the per-grasp cap.
+visual_lateral_gain: 0.0003
+visual_max_lateral: 0.04
+
 pipelines:
   fake:
     real_env:
@@ -140,5 +158,24 @@ pipelines:
     plan_executor:
       _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
       base_executor: ${env.pipelines.fake.plan_executor.base_executor}
-      arm_executor: ${env.pipelines.fake.plan_executor.arm_executor}
+      # Same knobs as the fake arm executor, plus the wrist-camera lateral
+      # correction (real hardware only).
+      arm_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.CarrotArmMotion3DPlanExecutor
+        distance_fn:
+          _target_: prpl_tidybot.real_sim.plan_executors.distance_factories.create_kinova_distance_fn
+        advance_radius: ${env.arm_advance_radius}
+        arrival_tolerance: ${env.arm_arrival_tolerance}
+        max_iter_total: ${env.arm_max_iter_total}
+        gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
+        lookahead: ${env.arm_lookahead}
+        gripper_close_position: ${env.gripper_close_position}
+        confirm_grasp_closes: ${env.confirm_grasp_closes}
+        compensate_base_error: ${env.compensate_base_error}
+        visual_lateral_mode: ${env.visual_lateral_mode}
+        visual_lateral_sign: ${env.visual_lateral_sign}
+        visual_lateral_gain: ${env.visual_lateral_gain}
+        visual_max_lateral: ${env.visual_max_lateral}
+        image_source:
+          _target_: prpl_tidybot.visual_servo.image_sources.KinovaWristCameraSource
       confirm_release_segments: ${env.confirm_release_segments}

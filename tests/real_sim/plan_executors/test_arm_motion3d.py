@@ -9,6 +9,7 @@ Production wires in pybullet-helpers' weighted joint distance.
 """
 
 import logging
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -895,3 +896,85 @@ def test_base_error_compensation_recovers_ee_position():
     err_corrected = np.linalg.norm((fk(actual_base, corrected) - target_ee)[:2])
     assert err_uncorrected > 0.015
     assert err_corrected < 0.6 * err_uncorrected
+
+
+def _grasp_segment_executor(mode: str, image: np.ndarray):
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+    from prpl_tidybot.visual_servo.image_sources import SequenceImageSource
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        visual_lateral_mode=mode,
+        image_source=SequenceImageSource([image] * 20),
+        visual_lateral_gain=0.0003,
+        visual_lateral_sign=1.0,
+        compensation_reach=0.8,
+    )
+    state = _make_state()
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    close = np.zeros(11)
+    close[10] = -1.0
+    executor.set_trajectory([(state, reach), (state, close)])
+    return executor, state
+
+
+def test_visual_lateral_correction_shifts_joint_one():
+    """A can detected off-centre in the wrist frame shifts joint 1 of every
+    target by gain * error / reach with the configured sign; log-only mode
+    measures but leaves the targets untouched."""
+    import sys
+
+    sys.path.insert(
+        0, str(Path(__file__).resolve().parent.parent.parent / "visual_servo")
+    )
+    from test_cylinder_edges import _synthetic_frame
+
+    # Cylinder spanning columns [200, 260): centre 229.5 vs image centre
+    # 159.5 -> error +70 px -> 21 mm lateral -> j1 offset +0.02625 rad.
+    frame = _synthetic_frame(200, 260)
+    executor, state = _grasp_segment_executor("on", frame)
+    before = [
+        float(t[0]) for t in executor._targets
+    ]  # pylint: disable=protected-access
+    # Several ticks: the base-pose settle wait runs before the camera is
+    # consulted.
+    for _ in range(8):
+        executor.step(state)
+    after = [float(t[0]) for t in executor._targets]  # pylint: disable=protected-access
+    deltas = [a - b for a, b in zip(after, before)]
+    assert all(abs(d - deltas[0]) < 1e-9 for d in deltas)
+    assert deltas[0] == pytest.approx(0.0003 * 70 / 0.8, abs=0.002)
+
+    executor, state = _grasp_segment_executor("log", frame)
+    before = [
+        float(t[0]) for t in executor._targets
+    ]  # pylint: disable=protected-access
+    for _ in range(8):
+        executor.step(state)
+    after = [float(t[0]) for t in executor._targets]  # pylint: disable=protected-access
+    assert after == before
+
+
+def test_visual_correction_skipped_for_non_grasp_segments():
+    """Arm segments without a gripper close never consult the camera."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    class _ExplodingSource:
+        def get_image(self):
+            raise AssertionError("camera consulted for a non-grasp segment")
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        visual_lateral_mode="on",
+        image_source=_ExplodingSource(),
+    )
+    state = _make_state()
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    executor.set_trajectory([(state, reach)])
+    executor.step(state)
