@@ -148,6 +148,7 @@ class InjectedPlanAgent(
                 grasp_params=restock_scene.real_restock_grasp_params(),
                 move_params=restock_scene.real_restock_move_params(),
                 carry_lift_z=restock_scene.CARRY_LIFT_Z,
+                place_release_heights=restock_scene.PLACE_RELEASE_HEIGHTS,
             )
             obs, _ = env.reset(seed=self._plan_seed)
             x0 = env_models.observation_to_state(obs)
