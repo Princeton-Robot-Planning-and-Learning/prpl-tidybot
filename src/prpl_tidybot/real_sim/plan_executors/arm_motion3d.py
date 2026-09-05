@@ -281,6 +281,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # ruler vs the logged end-effector height).
         self._debug_kinematics = debug_kinematics
         self._fk_env: Any = None
+        self._fk_extend: Any = None
+        self._fk_se2: Any = None
         # Walk-phase integrator for release segments: the deadband also sags
         # the whole level insertion, not just the event at its end, so the
         # slide enters low and only gets lifted at the release. Winds up
