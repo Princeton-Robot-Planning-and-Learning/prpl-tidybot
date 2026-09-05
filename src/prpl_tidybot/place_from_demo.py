@@ -139,6 +139,8 @@ def rewrite_places_with_demo(
     demo: dict[str, Any],
     fk: Callable[[Sequence[float], tuple[float, float, float]], Sequence[float]],
     robot_name: str = "robot",
+    place_delta_z: list[float] | None = None,
+    shift_config: Callable[[Sequence[float], float], Sequence[float]] | None = None,
 ) -> tuple[list[ObjectCentricState], list[NDArray[np.floating]]]:
     """Splice the demonstration into the targeted placements.
 
@@ -147,6 +149,13 @@ def rewrite_places_with_demo(
     unchanged (a place on a different board). ``fk`` maps (7 joints, base SE2
     tuple) to an end-effector map position; it grounds the demonstration's own
     release x so the per-can base shift is exact.
+
+    ``place_delta_z`` (aligned with ``place_targets_x``) raises or lowers a
+    place's demonstrated arm configurations by that height, via
+    ``shift_config`` (config, delta_z) -> config: the demo defines where the
+    gripper goes, so a can that hangs differently below the gripper (a taller
+    or shorter object) is placed at the same board height by shifting the
+    whole insertion vertically.
     """
     base_map = demo["base_map"]
     demo_base: tuple[float, float, float] = (
@@ -184,10 +193,13 @@ def rewrite_places_with_demo(
     # Each place spans from the base run before its release's arm run through
     # the end of that arm run (the retract), replaced in place. Work back to
     # front so indices stay valid.
+    deltas_z = (
+        place_delta_z if place_delta_z is not None else [0.0] * len(place_targets_x)
+    )
     out_states = list(states)
     out_actions = list(actions)
-    for release_pos, target_x in reversed(
-        list(zip(release_positions, place_targets_x))
+    for release_pos, target_x, delta_z in reversed(
+        list(zip(release_positions, place_targets_x, deltas_z))
     ):
         arm_start = release_pos
         while arm_start > 0 and not _is_base(out_actions[arm_start - 1]):
@@ -206,9 +218,12 @@ def rewrite_places_with_demo(
             demo_base[1],
             demo_base[2],
         )
+        place_configs = configs
+        if abs(delta_z) > 1e-4 and shift_config is not None:
+            place_configs = [list(shift_config(c, delta_z)) for c in configs]
         base_pairs = _base_drive_pairs(carry_state, base_target, robot_name)
         arm_pairs = _arm_pairs(
-            base_target, configs, carry_state, robot_name, release_config_index
+            base_target, place_configs, carry_state, robot_name, release_config_index
         )
         new_pairs = base_pairs + arm_pairs
         # The trailing state (arm_end + 1) is preserved as the segment's exit

@@ -35,6 +35,10 @@ place_demo_path: null
 # A bottom-board (talls) placement demonstration; null keeps the model
 # insertion for the talls.
 place_demo_bottom_path: null
+# Which cylinder the bottom demo was recorded holding (its hang below the
+# gripper is the reference the other talls' heights are offset against).
+# Default cylinder2, the green Pringles.
+place_demo_bottom_ref_cylinder: 2
 
 # The agent replaces the default bilevel planner (see pipeline.py). It plans
 # once on the first reset (~10-60 s), then serves the trajectory one-shot,
@@ -47,6 +51,7 @@ agent:
   only_pick_index: ${env.only_pick}
   place_demo_path: ${env.place_demo_path}
   place_demo_bottom_path: ${env.place_demo_bottom_path}
+  place_demo_bottom_ref_cylinder: ${env.place_demo_bottom_ref_cylinder}
 
 # The boxed real-restock scene, single-sourced from kinder-bilevel-planning;
 # used by the sim pipeline below (the agent builds its own copy internally).

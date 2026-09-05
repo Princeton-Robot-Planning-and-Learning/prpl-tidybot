@@ -37,6 +37,10 @@ from kinder.envs.kinematic3d.cylinder_shelf3d import (
     ObjectCentricCylinderShelf3DEnv,
 )
 from kinder.envs.kinematic3d.utils import extend_joints_to_include_fingers
+from kinder_models.kinematic3d.cylinder_shelf3d.parameterized_skills import (
+    _approach_pitch,
+    _solve_planar_joints,
+)
 from kinder_bilevel_planning import restock_scene
 from kinder_bilevel_planning.agent import AgentFailure
 from kinder_bilevel_planning.env_models import create_bilevel_planning_models
@@ -47,7 +51,7 @@ from kinder_bilevel_planning.injection import (
 )
 from numpy.typing import NDArray
 from prpl_utils.planning_agent import PlanningAgent
-from pybullet_helpers.geometry import SE2Pose
+from pybullet_helpers.geometry import SE2Pose, matrix_from_quat
 from relational_structs import ObjectCentricState
 
 from prpl_tidybot.place_from_demo import load_demo, rewrite_places_with_demo
@@ -73,6 +77,7 @@ class InjectedPlanAgent(
         only_pick_index: int | None = None,
         place_demo_path: str | None = None,
         place_demo_bottom_path: str | None = None,
+        place_demo_bottom_ref_cylinder: int = 2,
     ) -> None:
         super().__init__(seed)
         self._plan_seed = seed
@@ -100,6 +105,10 @@ class InjectedPlanAgent(
             if place_demo_bottom_path is not None
             else None
         )
+        # Which cylinder the bottom-board demo was recorded holding: its hang
+        # below the gripper is the reference the per-can height offsets are
+        # measured against (default the green Pringles, cylinder2).
+        self._place_demo_bottom_ref = place_demo_bottom_ref_cylinder
         self._config = restock_scene.real_restock_config()
         self._check_ir_objects()
         # Filled by the lazy planning pass on the first reset.
@@ -232,6 +241,21 @@ class InjectedPlanAgent(
                 )
                 return list(fk_env.robot.arm.get_end_effector_pose().position)
 
+            def shift_config(config, delta_z):
+                # Re-solve the planar joints for the config's end effector
+                # raised by delta_z (the existing rigid planar solver, not
+                # full IK); joints 1/3/5/7 stay frozen at the config's values.
+                fk_env.robot.arm.set_joints(
+                    extend_joints_to_include_fingers(list(config[:7]))
+                )
+                ee = fk_env.robot.arm.get_end_effector_pose()
+                target = np.array(ee.position) + np.array([0.0, 0.0, delta_z])
+                pitch = _approach_pitch(matrix_from_quat(ee.orientation))
+                solved = _solve_planar_joints(
+                    fk_env.robot.arm, target, pitch, list(config[:7])
+                )
+                return solved if solved is not None else list(config[:7])
+
             for demo, layer in ((self._place_demo, 1), (self._place_demo_bottom, 0)):
                 if demo is None:
                     continue
@@ -243,12 +267,49 @@ class InjectedPlanAgent(
                     )
                     for cyl in place_cylinders
                 ]
+                deltas_z = self._place_delta_z(place_cylinders, layer, demo)
                 states, actions = rewrite_places_with_demo(
-                    states, actions, targets_x, demo, fk, self._robot_name
+                    states,
+                    actions,
+                    targets_x,
+                    demo,
+                    fk,
+                    self._robot_name,
+                    place_delta_z=deltas_z,
+                    shift_config=shift_config,
                 )
             return states, actions
         finally:
             fk_env.close()
+
+    def _place_delta_z(
+        self, place_cylinders: list[str], layer: int, demo: dict
+    ) -> list[float]:
+        """Per-place vertical shift so each can's BOTTOM lands where the demo's
+        did, despite different heights.
+
+        A can grasped ``grasp_depth`` below its top hangs
+        ``height - grasp_depth`` below the gripper. The demo was recorded with
+        the reference can (``demo['ref_cylinder']`` or
+        ``place_demo_bottom_ref_cylinder``); another can on the same board is
+        raised by the difference in that hang.
+        """
+        heights = self._config.cylinder_heights
+        depths = [d for _, d in restock_scene.real_restock_grasp_params()]
+
+        def hang(idx: int) -> float:
+            return float(heights[idx]) - float(depths[idx])
+
+        ref = int(demo.get("ref_cylinder", self._place_demo_bottom_ref))
+        ref_hang = hang(ref)
+        deltas: list[float] = []
+        for cyl in place_cylinders:
+            idx = int(cyl.removeprefix("cylinder"))
+            if self._ir["placements"][cyl]["layer"] == layer:
+                deltas.append(hang(idx) - ref_hang)
+            else:
+                deltas.append(0.0)
+        return deltas
 
     def _settle_pairs(
         self, obs: ObjectCentricState

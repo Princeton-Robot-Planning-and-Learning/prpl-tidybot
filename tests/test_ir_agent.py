@@ -162,3 +162,35 @@ def test_place_demo_replaces_top_board_placements():
         base_moves = bool(np.abs(action[:3]).max() > 1e-4)
         arm_moves = bool(np.abs(action[3:]).max() > 1e-4)
         assert not (base_moves and arm_moves)
+
+
+def test_bottom_demo_applies_per_can_height_offset():
+    """A bottom-board demo replaces the three tall (layer-0) placements, and
+    each is shifted vertically by its can's hang difference vs the reference
+    can so all three land at the same board height. Reuses the top-demo
+    fixture as a stand-in bottom demo (the test checks structure, not the exact
+    demonstrated pose)."""
+    demo = str(Path(__file__).resolve().parent / "fixtures" / "place_demo.json")
+    agent = InjectedPlanAgent(
+        _FIXTURE, seed=0, place_demo_bottom_path=demo, place_demo_bottom_ref_cylinder=2
+    )
+    # pylint: disable=protected-access
+    deltas = agent._place_delta_z(
+        [args[1] for op, args in agent._ir["skeleton"] if op == "Place"],
+        0,
+        agent._place_demo_bottom,
+    )
+    place_cyls = [args[1] for op, args in agent._ir["skeleton"] if op == "Place"]
+    layer0 = [
+        d
+        for d, c in zip(deltas, place_cyls)
+        if agent._ir["placements"][c]["layer"] == 0
+    ]
+    # Three tall placements, reference (green) at zero, the others nonzero.
+    assert len(layer0) == 3
+    assert any(abs(d) > 0.02 for d in layer0)
+    assert any(abs(d) < 1e-9 for d in layer0)
+    # The plan still refines and executes: six releases total.
+    agent.reset(_make_obs((1.48, 0.67, 1.54), [0.0] * 7), {})
+    gripper = [float(a[10]) for _, a in agent.plan()]
+    assert sum(1 for g in gripper if g > 0.5) == 6
