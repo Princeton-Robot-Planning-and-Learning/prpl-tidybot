@@ -197,6 +197,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         visual_max_lateral: float = 0.04,
         visual_debug_dir: str | None = None,
         edge_detector: Callable[[Any], Any] | None = None,
+        recover_segment_start: bool = False,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if visual_lateral_mode not in ("off", "log", "on"):
@@ -254,6 +255,10 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # The CylinderEdges producer for the correction: the SAM service
         # detector by config, the OpenCV column detector by default.
         self._edge_detector = edge_detector or detect_cylinder_edges
+        # Command gaps (operator pauses, settle waits) let the compliant arm
+        # sag under gravity at extension; with this flag each segment first
+        # recovers its start configuration before the walk begins.
+        self._recover_segment_start = recover_segment_start
         # The base hands over as soon as it is within tolerance, while it is
         # still creeping and the marker-pose stream lags, so the error must
         # be computed from a SETTLED pose: the arm holds until the perceived
@@ -278,6 +283,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._compensation_applied: bool = False
         self._settle_history: list[tuple[float, float, float]] = []
         self._visual_attempts: int = 0
+        self._start_recovered: bool = False
+        self._recover_ticks: int = 0
 
     def _on_set_trajectory(self) -> None:
         self._targets = [
@@ -304,6 +311,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._compensation_applied = False
         self._settle_history = []
         self._visual_attempts = 0
+        self._start_recovered = False
+        self._recover_ticks = 0
 
     def step(
         self, sim_state: ObjectCentricState
@@ -317,13 +326,19 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         ) and not self._compensation_applied:
             settled = self._settled_base_pose(sim_state)
             if settled is None:
-                # Hold the arm at its perceived joints until the base pose
-                # settles; the base target inside the action holds too.
-                perceived = _perceived_joints(sim_state, self._robot_name)
+                # Hold the arm AT THE SEGMENT START while the base pose
+                # settles: commanding the perceived joints instead would
+                # follow the compliant arm's gravity sag downward tick by
+                # tick.
+                hold_joints = (
+                    self._start_joints
+                    if self._targets
+                    else _perceived_joints(sim_state, self._robot_name)
+                )
                 hold = np.zeros(11)
                 action = _build_tidybot_action(
                     sim_state,
-                    perceived,
+                    hold_joints,
                     hold,
                     self._robot_name,
                     self._last_gripper_goal,
@@ -334,11 +349,15 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             if self._visual_applicable():
                 outcome = self._attempt_visual_correction()
                 if outcome == "retry":
-                    perceived = _perceived_joints(sim_state, self._robot_name)
+                    hold_joints = (
+                        self._start_joints
+                        if self._targets
+                        else _perceived_joints(sim_state, self._robot_name)
+                    )
                     hold = np.zeros(11)
                     action = _build_tidybot_action(
                         sim_state,
-                        perceived,
+                        hold_joints,
                         hold,
                         self._robot_name,
                         self._last_gripper_goal,
@@ -354,6 +373,36 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                 if self._compensate_base_error:
                     self._apply_base_error_compensation(settled)
         perceived = _perceived_joints(sim_state, self._robot_name)
+        if self._recover_segment_start and not self._start_recovered:
+            # The arm may have sagged away from the plan during a command
+            # gap (an operator confirmation pause, a settle wait): recover
+            # the segment's start configuration first, so the walk begins
+            # ON the planned path instead of blending the sag forward into
+            # it (e.g. dipping a held can into the board it rides over).
+            if (
+                self._start_joints
+                and self._recover_ticks < _RECOVER_MAX_TICKS
+                and self._distance_fn(perceived, self._start_joints) > _RECOVER_TOL
+            ):
+                if self._recover_ticks == 0:
+                    _logger.info(
+                        "Recovering the segment start configuration "
+                        "(distance %.3f) before the walk.",
+                        self._distance_fn(perceived, self._start_joints),
+                    )
+                self._recover_ticks += 1
+                hold = np.zeros(11)
+                action = _build_tidybot_action(
+                    sim_state,
+                    self._start_joints,
+                    hold,
+                    self._robot_name,
+                    self._last_gripper_goal,
+                    self._gripper_close_position,
+                )
+                self._tick_count += 1
+                return action, hold
+            self._start_recovered = True
         self._advance_cursor(perceived)
         target = self._command_target(perceived)
         _, sim_action = self._pairs[self._cursor]
@@ -745,6 +794,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         visual_max_lateral: float = 0.04,
         visual_debug_dir: str | None = None,
         edge_detector: Callable[[Any], Any] | None = None,
+        recover_segment_start: bool = False,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -768,6 +818,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             visual_max_lateral=visual_max_lateral,
             visual_debug_dir=visual_debug_dir,
             edge_detector=edge_detector,
+            recover_segment_start=recover_segment_start,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")
@@ -871,6 +922,11 @@ _SETTLE_TIMEOUT_TICKS = 50
 # Wrist-camera detection attempts (one per tick) before the visual lateral
 # correction gives up and falls back to the marker-based compensation.
 _VISUAL_MAX_ATTEMPTS = 10
+# Segment-start recovery (see step): how close (distance_fn metric) the arm
+# must be to the segment's first configuration before the walk starts, and
+# the tick budget for getting there.
+_RECOVER_TOL = 0.1
+_RECOVER_MAX_TICKS = 60
 
 
 def _absolute_target(

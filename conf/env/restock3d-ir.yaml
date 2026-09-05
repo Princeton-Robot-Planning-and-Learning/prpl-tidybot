@@ -91,6 +91,11 @@ visual_lateral_sign: 1.0
 visual_lateral_gain: 0.0003
 visual_max_lateral: 0.04
 
+# Command gaps (operator pauses, waits) let the compliant arm sag under
+# gravity at extension; each arm segment recovers its start configuration
+# before its walk begins, so a sag never blends forward into the path.
+recover_segment_start: true
+
 pipelines:
   fake:
     real_env:
@@ -122,6 +127,7 @@ pipelines:
         gripper_close_position: ${env.gripper_close_position}
         confirm_grasp_closes: ${env.confirm_grasp_closes}
         compensate_base_error: ${env.compensate_base_error}
+        recover_segment_start: ${env.recover_segment_start}
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv

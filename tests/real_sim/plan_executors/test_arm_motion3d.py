@@ -1029,3 +1029,32 @@ def test_injected_edge_detector_replaces_opencv():
     assert after[0] - before[0] == pytest.approx(
         0.0003 * (229.5 - 159.5) / 0.8, abs=1e-6
     )
+
+
+def test_segment_start_recovered_after_sag():
+    """When the perceived joints have sagged away from the segment's start
+    (e.g. during an operator pause with no commands flowing), the executor
+    first commands the start configuration back, and only begins the walk
+    once the arm is close to it."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(), recover_segment_start=True
+    )
+    start_conf = [0.0, 0.5, 0.0, 1.0, 0.0, -0.5, 0.0]
+    reach = np.zeros(11)
+    reach[3] = 0.3
+    planned_start = _make_state(arm_conf=list(start_conf))
+    executor.set_trajectory([(planned_start, reach)])
+    sagged = _make_state(arm_conf=[0.0, 0.9, 0.0, 1.4, 0.0, -0.9, 0.0])
+    action, _ = executor.step(sagged)
+    # The recovery move commands the segment start, not the reach target.
+    assert action.arm_goal == pytest.approx(start_conf)
+    recovered = _make_state(arm_conf=list(start_conf))
+    action, _ = executor.step(recovered)
+    # Now the walk proceeds toward the reach target (joint 1 moves).
+    assert action.arm_goal[1] > start_conf[
+        1
+    ] + 1e-6 or action.arm_goal != pytest.approx(start_conf)
