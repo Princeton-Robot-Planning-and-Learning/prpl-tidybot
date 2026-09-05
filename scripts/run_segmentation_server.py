@@ -33,24 +33,44 @@ _logger = logging.getLogger("segmentation_server")
 
 
 class SamService:
-    """SAM 3 wrapped for single-frame text-prompted instance queries."""
+    """A text-promptable segmenter/detector behind one request interface.
+
+    Two backends, chosen from the model name: SAM 3 (gated; mask-based
+    extents) and Grounding DINO (ungated fallback; box-based extents —
+    the servo geometry only needs column extents, so boxes suffice).
+    """
 
     def __init__(self, model_name: str, threshold: float) -> None:
         # torch/transformers live only in the laptop's dedicated venv, not in
         # the repo venv this file is linted from.
         # pylint: disable=import-outside-toplevel,import-error
         import torch
-        from transformers import Sam3Model, Sam3Processor
 
         self._torch = torch
         self._threshold = threshold
+        self._grounding = "grounding-dino" in model_name
         start = time.time()
-        self._processor = Sam3Processor.from_pretrained(model_name)
-        self._model = (
-            Sam3Model.from_pretrained(model_name, dtype=torch.bfloat16)
-            .to("cuda")
-            .eval()
-        )
+        if self._grounding:
+            from transformers import (
+                AutoModelForZeroShotObjectDetection,
+                AutoProcessor,
+            )
+
+            self._processor = AutoProcessor.from_pretrained(model_name)
+            self._model = (
+                AutoModelForZeroShotObjectDetection.from_pretrained(model_name)
+                .to("cuda")
+                .eval()
+            )
+        else:
+            from transformers import Sam3Model, Sam3Processor
+
+            self._processor = Sam3Processor.from_pretrained(model_name)
+            self._model = (
+                Sam3Model.from_pretrained(model_name, dtype=torch.bfloat16)
+                .to("cuda")
+                .eval()
+            )
         # Inference must be serialized across connection threads.
         self._lock = Lock()
         _logger.info("Loaded %s in %.1fs", model_name, time.time() - start)
@@ -60,17 +80,32 @@ class SamService:
         height, width = image.shape[:2]
         with self._lock:
             start = time.time()
-            inputs = self._processor(images=image, text=prompt, return_tensors="pt").to(
-                "cuda"
-            )
-            with self._torch.inference_mode():
-                outputs = self._model(**inputs)
-            result = self._processor.post_process_instance_segmentation(
-                outputs,
-                threshold=self._threshold,
-                mask_threshold=0.5,
-                target_sizes=[(height, width)],
-            )[0]
+            if self._grounding:
+                instances = self._segment_grounding(image, prompt, height, width)
+            else:
+                instances = self._segment_sam(image, prompt, height, width)
+        _logger.info(
+            "prompt=%r -> %d instance(s) in %.0f ms",
+            prompt,
+            len(instances),
+            1000 * (time.time() - start),
+        )
+        return instances
+
+    def _segment_sam(
+        self, image: np.ndarray, prompt: str, height: int, width: int
+    ) -> list[dict[str, Any]]:
+        inputs = self._processor(images=image, text=prompt, return_tensors="pt").to(
+            "cuda"
+        )
+        with self._torch.inference_mode():
+            outputs = self._model(**inputs)
+        result = self._processor.post_process_instance_segmentation(
+            outputs,
+            threshold=self._threshold,
+            mask_threshold=0.5,
+            target_sizes=[(height, width)],
+        )[0]
         instances: list[dict[str, Any]] = []
         masks = result.get("masks")
         scores = result.get("scores")
@@ -91,12 +126,38 @@ class SamService:
                         "area": int(mask.sum()),
                     }
                 )
-        _logger.info(
-            "prompt=%r -> %d instance(s) in %.0f ms",
-            prompt,
-            len(instances),
-            1000 * (time.time() - start),
+        return instances
+
+    def _segment_grounding(
+        self, image: np.ndarray, prompt: str, height: int, width: int
+    ) -> list[dict[str, Any]]:
+        # Grounding DINO expects lowercase queries ending in periods.
+        text = prompt.lower().rstrip(".") + "."
+        inputs = self._processor(images=image, text=text, return_tensors="pt").to(
+            "cuda"
         )
+        with self._torch.inference_mode():
+            outputs = self._model(**inputs)
+        result = self._processor.post_process_grounded_object_detection(
+            outputs,
+            inputs.input_ids,
+            threshold=self._threshold,
+            text_threshold=self._threshold,
+            target_sizes=[(height, width)],
+        )[0]
+        instances = []
+        for box, score in zip(result["boxes"], result["scores"]):
+            x0, y0, x1, y1 = (float(v) for v in box)
+            instances.append(
+                {
+                    "left_x": max(0.0, x0),
+                    "right_x": min(float(width - 1), x1),
+                    "top_y": max(0.0, y0),
+                    "bottom_y": min(float(height - 1), y1),
+                    "score": float(score),
+                    "area": int((x1 - x0) * (y1 - y0)),
+                }
+            )
         return instances
 
 
