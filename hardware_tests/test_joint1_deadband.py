@@ -50,11 +50,11 @@ def main() -> int:
             goal[0] = start[0] + offset
             achieved = _settle(arm, goal, gripper)
             moved = achieved[0] - start[0]
+            frac = abs(moved) / max(abs(offset), 1e-9) * 100
             print(
                 f"{label}: commanded joint 1 {goal[0]:+.4f} "
                 f"(offset {offset:+.4f}) -> achieved {achieved[0]:+.4f} "
-                f"(moved {moved:+.4f} rad = {abs(moved) / max(abs(offset), 1e-9) * 100:.0f}% "
-                "of commanded)"
+                f"(moved {moved:+.4f} rad = {frac:.0f}% of commanded)"
             )
         return 0
     finally:
