@@ -15,11 +15,13 @@ import time
 import numpy as np
 from ruckig import InputParameter, OutputParameter, Result, Ruckig
 
-# Scale the OTG velocity and acceleration limits, for slowing the arm without
-# editing code: export PRPL_ARM_SPEED_SCALE=0.5 before starting the arm server
-# to run at half speed (default 1.0 = the original limits). Useful when a fast
-# transition trips a joint velocity/effort fault (the red-light condition).
-_SPEED_SCALE = float(os.environ.get("PRPL_ARM_SPEED_SCALE", "1.0"))
+# Scale the OTG velocity and acceleration limits. Default 0.6 (slower than the
+# original limits): a fast transition (e.g. carry -> demonstrated pre-place) was
+# tripping a joint velocity/effort fault (the red-light condition), and a
+# uniformly gentler arm avoids it without any launch-script change. Override
+# with PRPL_ARM_SPEED_SCALE (e.g. 1.0 for full speed, 0.4 for slower) before
+# starting the arm server.
+_SPEED_SCALE = float(os.environ.get("PRPL_ARM_SPEED_SCALE", "0.6"))
 
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD
 from prpl_tidybot.third_party.kinova import TorqueControlledArm
