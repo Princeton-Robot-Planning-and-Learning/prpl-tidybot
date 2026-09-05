@@ -78,6 +78,11 @@ confirm_release_segments: true
 # with `env.confirm_grasp_closes=true` (usually together with
 # `env.confirm_release_segments=false`).
 confirm_grasp_closes: false
+# When the arm stalls just short of a gripper waypoint (the compliant
+# controller cannot close the last bit of the commanded push), prompt the
+# operator to fire the gripper at the current pose. On by default in real
+# runs; the operator judges whether the pose is a good grasp.
+confirm_stall_grasp: true
 
 # Base-error compensation: at each arm segment's first tick, compare the
 # perceived base pose (marker detector) with the plan's and offset joint 1
@@ -151,6 +156,7 @@ pipelines:
         lookahead: ${env.arm_lookahead}
         gripper_close_position: ${env.gripper_close_position}
         confirm_grasp_closes: ${env.confirm_grasp_closes}
+        confirm_stall_grasp: ${env.confirm_stall_grasp}
         compensate_base_error: ${env.compensate_base_error}
         recover_segment_start: ${env.recover_segment_start}
         gripper_event_tolerance: ${env.gripper_event_tolerance}
@@ -203,6 +209,7 @@ pipelines:
         lookahead: ${env.arm_lookahead}
         gripper_close_position: ${env.gripper_close_position}
         confirm_grasp_closes: ${env.confirm_grasp_closes}
+        confirm_stall_grasp: ${env.confirm_stall_grasp}
         compensate_base_error: ${env.compensate_base_error}
         recover_segment_start: ${env.recover_segment_start}
         gripper_event_tolerance: ${env.gripper_event_tolerance}

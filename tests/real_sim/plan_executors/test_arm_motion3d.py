@@ -1176,3 +1176,38 @@ def test_visual_servo_converges_by_iterated_nudges():
     assert executor._compensation_applied  # pylint: disable=protected-access
     # Converged near the offset that centres the can (0.15 rad).
     assert after - before == pytest.approx(0.15, abs=0.03)
+
+
+def test_confirm_stall_grasp_fires_gripper_at_current_pose():
+    """When the arm stalls just short of a gripper waypoint and
+    confirm_stall_grasp is set, the operator is prompted and, on confirm, the
+    cursor jumps to the gripper waypoint so it fires at the current pose."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    prompts: list[str] = []
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        advance_radius=0.15,
+        gripper_dwell_ticks=2,
+        confirm_stall_grasp=True,
+        prompt_fn=lambda msg: prompts.append(msg) or "",
+    )
+    # A reach the arm can never finish (target far away), then a close.
+    reach = np.zeros(11)
+    reach[3] = 5.0
+    close = np.zeros(11)
+    close[10] = -1.0
+    start = _make_state(arm_conf=[0.0] * 7)
+    executor.set_trajectory([(start, reach), (start, close)])
+    stuck = _make_state(arm_conf=[0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    fired = False
+    for _ in range(400):
+        _, sim_action = executor.step(stuck)
+        if float(sim_action[10]) < -0.5:
+            fired = True
+            break
+    assert prompts, "operator was not prompted at the stall"
+    assert "CLOSE" in prompts[0]
+    assert fired, "the gripper never fired after the confirmed stall"

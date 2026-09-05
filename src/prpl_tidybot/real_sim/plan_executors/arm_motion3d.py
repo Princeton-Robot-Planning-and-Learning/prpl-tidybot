@@ -188,6 +188,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         stall_advance_min_progress: float = 0.5,
         confirm_grasp_closes: bool = False,
         prompt_fn: Callable[[str], str] = input,
+        confirm_stall_grasp: bool = False,
         compensate_base_error: bool = False,
         compensation_reach: float = 0.8,
         visual_lateral_mode: str = "off",
@@ -229,6 +230,11 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # open-loop grasp to land on it.
         self._confirm_grasp_closes = confirm_grasp_closes
         self._prompt_fn = prompt_fn
+        # When the arm stalls just short of a gripper waypoint, prompt the
+        # operator to fire the gripper at the current pose rather than hang
+        # or fail (see the stall block).
+        self._confirm_stall_grasp = confirm_stall_grasp
+        self._stall_prompted = False
         # Base-error lateral compensation: at each segment's first tick the
         # perceived base pose is compared with the plan's, and joint 1 of
         # every target is offset so the arm plane swings back onto the
@@ -342,6 +348,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._tick_count = 0
         self._ticks_since_advance = 0
         self._stall_warned = False
+        self._stall_prompted = False
         self._last_perceived = None
         self._still_ticks = 0
         self._lead_from_segment_start = False
@@ -982,6 +989,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         if advanced:
             self._ticks_since_advance = 0
             self._stall_warned = False
+            self._stall_prompted = False
         else:
             self._ticks_since_advance += 1
             if (
@@ -1001,6 +1009,34 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                     self._advance_radius,
                     self._progress(perceived),
                 )
+            gripper_ahead = self._gripper_waypoint_ahead()
+            if (
+                self._confirm_stall_grasp
+                and not self._stall_prompted
+                and self._ticks_since_advance >= _STALL_GRASP_PROMPT_TICKS
+                and gripper_ahead is not None
+            ):
+                # Stalled just short of a gripper waypoint. The arm has settled
+                # near the grasp/release pose but the compliant controller
+                # cannot close the last bit of the commanded push, so the
+                # cursor never reaches the gripper command. Ask the operator
+                # to judge: on Enter, jump the cursor to the gripper waypoint
+                # so it fires at the current pose (close where it is); to
+                # abort, Ctrl-C.
+                self._stall_prompted = True
+                is_close = float(self._pairs[gripper_ahead][1][10]) < -0.5
+                gap = self._distance_fn(perceived, self._targets[gripper_ahead])
+                self._prompt_fn(
+                    f"Arm stalled {gap:.3f} "
+                    f"short of the gripper {'CLOSE' if is_close else 'OPEN'} "
+                    f"(waypoint {gripper_ahead + 1}/{len(self._targets)}). Press "
+                    "Enter to fire the gripper at the current pose, or Ctrl-C to "
+                    "abort..."
+                )
+                self._cursor = gripper_ahead
+                self._ticks_since_advance = 0
+                self._stall_warned = False
+                return
             if (
                 self._ticks_since_advance >= _STUCK_FAIL_TICKS
                 and self._progress(perceived) < self._stall_advance_min_progress
@@ -1018,6 +1054,19 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                     "grasp correction can stretch the arm into a wall or joint "
                     "limit — re-stage the object closer to its spot."
                 )
+
+    def _gripper_waypoint_ahead(self) -> int | None:
+        """Index of a gripper waypoint at or just ahead of the cursor.
+
+        Only within _STALL_GRASP_WINDOW waypoints, so the prompt fires when
+        the stall is genuinely right before a grasp/release, not mid-reach.
+        """
+        for i in range(
+            self._cursor, min(len(self._pairs), self._cursor + _STALL_GRASP_WINDOW)
+        ):
+            if _is_gripper_cmd(self._pairs[i][1]):
+                return i
+        return None
 
     def _track_stillness(self, perceived: JointPositions) -> None:
         """Count consecutive ticks on which the perceived joints did not move."""
@@ -1112,6 +1161,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         stall_advance_min_progress: float = 0.5,
         confirm_grasp_closes: bool = False,
         prompt_fn: Callable[[str], str] = input,
+        confirm_stall_grasp: bool = False,
         compensate_base_error: bool = False,
         compensation_reach: float = 0.8,
         visual_lateral_mode: str = "off",
@@ -1138,6 +1188,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             stall_advance_min_progress=stall_advance_min_progress,
             confirm_grasp_closes=confirm_grasp_closes,
             prompt_fn=prompt_fn,
+            confirm_stall_grasp=confirm_stall_grasp,
             compensate_base_error=compensate_base_error,
             compensation_reach=compensation_reach,
             visual_lateral_mode=visual_lateral_mode,
@@ -1265,6 +1316,13 @@ _SERVO_MAX_STEP = 0.06
 _SERVO_MAX_OFFSET = 0.30
 # Ticks a cursor may stall with sub-threshold progress before the walk
 # fails fast (rather than hanging to max_iter_total): ~15 s at 0.1 s/tick.
+# Ticks a cursor may stall just short of a gripper waypoint before
+# prompting the operator to fire the gripper at the current pose
+# (confirm_stall_grasp). Fires before _STUCK_FAIL_TICKS.
+_STALL_GRASP_PROMPT_TICKS = 60
+# How many waypoints ahead of a stalled cursor a gripper command may be
+# for the confirm_stall_grasp prompt to consider it 'right before' it.
+_STALL_GRASP_WINDOW = 4
 _STUCK_FAIL_TICKS = 150
 _SERVO_MAX_ITERS = 25
 # Segment-start recovery (see step): how close (distance_fn metric) the arm
