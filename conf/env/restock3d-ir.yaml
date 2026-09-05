@@ -92,12 +92,14 @@ compensate_base_error: true
 # offset and joint 1 shifts the remaining planned approach onto it; the
 # marker-based compensation is skipped for that segment (the camera
 # supersedes it) and remains the fallback when detection fails.
-#   log  - measure and log the would-be correction, apply nothing. Run
-#          this first and check the logged sign/magnitude against the
-#          misses you see at the 45-degree view; flip
-#          env.visual_lateral_sign=-1 if it points the wrong way.
-#   on   - apply the correction.
-#   off  - never consult the camera.
+#   servo - closed-loop: nudge joint 1 toward the detected can and
+#           re-check until it is centred, converging despite the compliant
+#           joint's imperfect tracking (the sign auto-flips if a nudge
+#           worsens the error). This is the reliable mode on hardware.
+#   log   - measure and log the would-be correction, apply nothing.
+#   on    - apply a single open-loop correction (unreliable: the joint-1
+#           deadband/hysteresis swallows a one-shot nudge).
+#   off   - never consult the camera.
 visual_lateral_mode: log
 visual_lateral_sign: 1.0
 # Metres of lateral correction per pixel of offset (same scale as the

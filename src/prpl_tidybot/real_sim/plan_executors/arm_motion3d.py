@@ -202,8 +202,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         debug_kinematics: bool = False,
     ) -> None:
         super().__init__(robot_name=robot_name)
-        if visual_lateral_mode not in ("off", "log", "on"):
-            raise ValueError("visual_lateral_mode must be off, log or on")
+        if visual_lateral_mode not in ("off", "log", "on", "servo"):
+            raise ValueError("visual_lateral_mode must be off, log, on or servo")
         if advance_radius <= 0:
             raise ValueError("advance_radius must be > 0")
         if arrival_tolerance <= 0:
@@ -315,6 +315,16 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._compensation_applied: bool = False
         self._settle_history: list[tuple[float, float, float]] = []
         self._visual_attempts: int = 0
+        # Closed-loop servo state (visual_lateral_mode == 'servo'): joint 1
+        # is nudged toward the detected can and re-checked until the can is
+        # centred, converging despite the compliant joint's imperfect
+        # tracking. The sign auto-flips if a nudge makes the error worse.
+        self._servo_j1_offset: float = 0.0
+        self._servo_aligned: int = 0
+        self._servo_iters: int = 0
+        self._servo_cooldown: int = 0
+        self._servo_prev_error: float | None = None
+        self._servo_sign: float = visual_lateral_sign
         self._start_recovered: bool = False
         self._recover_ticks: int = 0
 
@@ -350,6 +360,12 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._compensation_applied = False
         self._settle_history = []
         self._visual_attempts = 0
+        self._servo_j1_offset = 0.0
+        self._servo_aligned = 0
+        self._servo_iters = 0
+        self._servo_cooldown = 0
+        self._servo_prev_error = None
+        self._servo_sign = self._visual_lateral_sign
         self._start_recovered = False
         self._recover_ticks = 0
 
@@ -369,11 +385,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                 # settles: commanding the perceived joints instead would
                 # follow the compliant arm's gravity sag downward tick by
                 # tick.
-                hold_joints = (
-                    self._start_joints
-                    if self._targets
-                    else _perceived_joints(sim_state, self._robot_name)
-                )
+                hold_joints = self._servo_hold_joints(sim_state)
                 hold = np.zeros(11)
                 action = _build_tidybot_action(
                     sim_state,
@@ -388,11 +400,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             if self._visual_applicable():
                 outcome = self._attempt_visual_correction()
                 if outcome == "retry":
-                    hold_joints = (
-                        self._start_joints
-                        if self._targets
-                        else _perceived_joints(sim_state, self._robot_name)
-                    )
+                    hold_joints = self._servo_hold_joints(sim_state)
                     hold = np.zeros(11)
                     action = _build_tidybot_action(
                         sim_state,
@@ -599,11 +607,30 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             )
         )
 
-    def _attempt_visual_correction(self) -> str:
-        """Try one wrist-camera detection; returns "applied", "retry" or "failed".
+    def _servo_hold_joints(self, sim_state: ObjectCentricState) -> JointPositions:
+        """The pre-grasp hold configuration with the accumulated servo offset.
 
-        "applied" also covers log-only mode (measured, logged, not applied).
+        The arm holds here while the visual servo (or the base-settle wait)
+        runs; joint 1 carries the offset the servo has commanded so far.
         """
+        base = (
+            list(self._start_joints)
+            if self._targets
+            else list(_perceived_joints(sim_state, self._robot_name))
+        )
+        base[0] = float(base[0]) + self._servo_j1_offset
+        return base
+
+    def _attempt_visual_correction(self) -> str:
+        """One iteration of the visual lateral correction.
+
+        Returns "applied" (done — offset baked into the targets), "retry"
+        (keep holding), or "failed" (no usable detection, fall back). In
+        ``servo`` mode this is a closed loop: nudge joint 1, wait, re-detect,
+        repeat until the can is centred. In ``on``/``log`` it is one shot.
+        """
+        if self._visual_lateral_mode == "servo":
+            return self._servo_iteration()
         self._visual_attempts += 1
         image = self._image_source.get_image()
         edges = None if image is None else self._edge_detector(image)
@@ -637,6 +664,87 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             for target in self._targets:
                 target[0] = float(target[0]) + delta
         return "applied"
+
+    def _servo_iteration(self) -> str:
+        """Closed-loop joint-1 visual servo: nudge, settle, re-detect, repeat.
+
+        The arm holds at the pre-grasp with the accumulated joint-1 offset;
+        after each nudge it waits _SERVO_SETTLE_TICKS for the compliant joint
+        to move before trusting a new frame. Converges to within
+        _SERVO_TOLERANCE_PX, self-flipping the sign if a nudge worsened the
+        error, then bakes the offset into the reach targets.
+        """
+        if self._servo_cooldown > 0:
+            self._servo_cooldown -= 1
+            return "retry"
+        image = self._image_source.get_image()
+        edges = None if image is None else self._edge_detector(image)
+        if self._visual_debug_dir is not None and image is not None:
+            self._dump_visual_frame(image, edges)
+        if edges is None or edges.clipped_left or edges.clipped_right:
+            self._visual_attempts += 1
+            if self._visual_attempts < _VISUAL_MAX_ATTEMPTS:
+                return "retry"
+            _logger.warning(
+                "Visual servo: no usable detection after %d attempts; falling "
+                "back to the marker-based compensation.",
+                self._visual_attempts,
+            )
+            return "failed"
+        self._visual_attempts = 0
+        error = float(edges.servo_error_px)
+        if abs(error) <= _SERVO_TOLERANCE_PX:
+            self._servo_aligned += 1
+            if self._servo_aligned >= _SERVO_CONFIRM_TICKS:
+                _logger.info(
+                    "Visual servo aligned: |error| %.1f px <= %.1f, joint 1 "
+                    "offset %+.4f rad after %d nudges.",
+                    error,
+                    _SERVO_TOLERANCE_PX,
+                    self._servo_j1_offset,
+                    self._servo_iters,
+                )
+                for target in self._targets:
+                    target[0] = float(target[0]) + self._servo_j1_offset
+                return "applied"
+            return "retry"
+        self._servo_aligned = 0
+        # Auto-flip the sign if the previous nudge made the error worse.
+        if (
+            self._servo_prev_error is not None
+            and abs(error) > abs(self._servo_prev_error) + 2.0
+        ):
+            self._servo_sign = -self._servo_sign
+            _logger.info("Visual servo: error grew, flipping sign.")
+        self._servo_prev_error = error
+        step = self._servo_sign * self._visual_lateral_gain * error
+        step = max(
+            -_SERVO_MAX_STEP, min(_SERVO_MAX_STEP, step / self._compensation_reach)
+        )
+        self._servo_j1_offset = max(
+            -_SERVO_MAX_OFFSET,
+            min(_SERVO_MAX_OFFSET, self._servo_j1_offset + step),
+        )
+        self._servo_iters += 1
+        self._servo_cooldown = _SERVO_SETTLE_TICKS
+        _logger.info(
+            "Visual servo nudge %d: error %.1f px -> joint 1 offset %+.4f rad.",
+            self._servo_iters,
+            error,
+            self._servo_j1_offset,
+        )
+        if self._servo_iters >= _SERVO_MAX_ITERS:
+            _logger.warning(
+                "Visual servo hit the %d-nudge cap at error %.1f px; proceeding "
+                "with joint 1 offset %+.4f rad.",
+                _SERVO_MAX_ITERS,
+                error,
+                self._servo_j1_offset,
+            )
+            for target in self._targets:
+                target[0] = float(target[0]) + self._servo_j1_offset
+            return "applied"
+        return "retry"
 
     def _dump_visual_frame(self, image: Any, edges: Any) -> None:
         """Save the raw wrist frame (and edge overlay when detected) for offline
@@ -1128,6 +1236,17 @@ _SETTLE_TIMEOUT_TICKS = 50
 # Wrist-camera detection attempts (one per tick) before the visual lateral
 # correction gives up and falls back to the marker-based compensation.
 _VISUAL_MAX_ATTEMPTS = 10
+# Closed-loop visual servo (visual_lateral_mode == 'servo'): converge the
+# can to within _SERVO_TOLERANCE_PX for _SERVO_CONFIRM_TICKS frames, one
+# joint-1 nudge (capped at _SERVO_MAX_STEP, total _SERVO_MAX_OFFSET) every
+# _SERVO_SETTLE_TICKS ticks so the compliant joint settles between frames,
+# up to _SERVO_MAX_ITERS nudges.
+_SERVO_TOLERANCE_PX = 12.0
+_SERVO_CONFIRM_TICKS = 2
+_SERVO_SETTLE_TICKS = 5
+_SERVO_MAX_STEP = 0.06
+_SERVO_MAX_OFFSET = 0.30
+_SERVO_MAX_ITERS = 25
 # Segment-start recovery (see step): how close (distance_fn metric) the arm
 # must be to the segment's first configuration before the walk starts, and
 # the tick budget for getting there.

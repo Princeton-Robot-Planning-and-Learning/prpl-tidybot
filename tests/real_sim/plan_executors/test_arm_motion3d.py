@@ -1116,3 +1116,63 @@ def test_event_integrator_pushes_command_past_target():
     # The command is pushed past the target, and further on the second tick.
     assert action1.arm_goal[1] < conf[1]
     assert action2.arm_goal[1] < action1.arm_goal[1]
+
+
+def test_visual_servo_converges_by_iterated_nudges():
+    """In servo mode joint 1 is nudged and re-checked until the detected offset
+    is within tolerance, then the accumulated offset is baked into the targets.
+    A detector whose reported error shrinks as joint 1 moves (mimicking the
+    real feedback) drives convergence over several nudges."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+    from prpl_tidybot.visual_servo.cylinder_edges import CylinderEdges
+    from prpl_tidybot.visual_servo.image_sources import SequenceImageSource
+
+    state_box = {"j1": 0.0}
+
+    class _FeedbackDetector:
+        """Reports a pixel error proportional to how far joint 1 still is from
+        the value that centres the can (0.15 rad here)."""
+
+        def __call__(self, image):
+            del image
+            err_px = (0.15 - state_box["j1"]) / 0.0003 * 0.8
+            return CylinderEdges(
+                left_x=160.0 + err_px - 30,
+                right_x=160.0 + err_px + 30,
+                image_width=320,
+                image_height=240,
+                left_response=1.0,
+                right_response=1.0,
+                contrast=1.0,
+            )
+
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        visual_lateral_mode="servo",
+        image_source=SequenceImageSource([frame] * 400),
+        edge_detector=_FeedbackDetector(),
+        visual_lateral_gain=0.0003,
+        visual_lateral_sign=1.0,
+        compensation_reach=0.8,
+    )
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    close = np.zeros(11)
+    close[10] = -1.0
+    state = _make_state()
+    executor.set_trajectory([(state, reach), (state, close)])
+    before = float(executor._targets[0][0])  # pylint: disable=protected-access
+    # Drive the loop: each step reflects the committed joint-1 offset back into
+    # the detector, as the real arm would once it has moved.
+    for _ in range(300):
+        executor.step(state)
+        state_box["j1"] = executor._servo_j1_offset  # pylint: disable=protected-access
+        if executor._compensation_applied:  # pylint: disable=protected-access
+            break
+    after = float(executor._targets[0][0])  # pylint: disable=protected-access
+    assert executor._compensation_applied  # pylint: disable=protected-access
+    # Converged near the offset that centres the can (0.15 rad).
+    assert after - before == pytest.approx(0.15, abs=0.03)
