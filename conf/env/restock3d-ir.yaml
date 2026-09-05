@@ -188,6 +188,8 @@ pipelines:
         gripper_close_position: ${env.gripper_close_position}
         confirm_grasp_closes: ${env.confirm_grasp_closes}
         compensate_base_error: ${env.compensate_base_error}
+        recover_segment_start: ${env.recover_segment_start}
+        gripper_event_tolerance: ${env.gripper_event_tolerance}
         visual_lateral_mode: ${env.visual_lateral_mode}
         visual_lateral_sign: ${env.visual_lateral_sign}
         visual_lateral_gain: ${env.visual_lateral_gain}
