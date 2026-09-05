@@ -23,6 +23,10 @@ env_name: restock3d_ir
 # Path to the plan_ir.json export. Required.
 ir_path: ???
 
+# Execute only the N-th pick-and-place of the plan (0-based, plan order);
+# null runs the whole plan. E.g. `env.only_pick=1` for the second can.
+only_pick: null
+
 # The agent replaces the default bilevel planner (see pipeline.py). It plans
 # once on the first reset (~10-60 s), then serves the trajectory one-shot,
 # prepending unplanned settle pairs from the perceived start configuration
@@ -31,6 +35,7 @@ agent:
   _target_: prpl_tidybot.ir_agent.InjectedPlanAgent
   ir_path: ${env.ir_path}
   seed: ${seed}
+  only_pick_index: ${env.only_pick}
 
 # The boxed real-restock scene, single-sourced from kinder-bilevel-planning;
 # used by the sim pipeline below (the agent builds its own copy internally).

@@ -63,6 +63,7 @@ class InjectedPlanAgent(
         planning_timeout: float = 300.0,
         robot_name: str = "robot",
         settle_first: bool = True,
+        only_pick_index: int | None = None,
     ) -> None:
         super().__init__(seed)
         self._plan_seed = seed
@@ -71,6 +72,11 @@ class InjectedPlanAgent(
         self._planning_timeout = planning_timeout
         self._robot_name = robot_name
         self._settle_first = settle_first
+        # Execute only the N-th pick-and-place of the plan (0-based, plan
+        # order): the full plan is still refined, then sliced to that
+        # pick's segment; the settle pairs drive the robot from wherever
+        # it stands to the slice's start. For testing one can at a time.
+        self._only_pick_index = only_pick_index
         self._config = restock_scene.real_restock_config()
         self._check_ir_objects()
         # Filled by the lazy planning pass on the first reset.
@@ -167,7 +173,10 @@ class InjectedPlanAgent(
         actions = _collapse_gripper_runs(
             [np.asarray(a, dtype=float).ravel() for a in plan.actions]
         )
-        return list(plan.states), actions
+        states = list(plan.states)
+        if self._only_pick_index is not None:
+            states, actions = _slice_pick(states, actions, self._only_pick_index)
+        return states, actions
 
     def _settle_pairs(
         self, obs: ObjectCentricState
@@ -224,6 +233,34 @@ class InjectedPlanAgent(
             action[:3] = base_delta
             pairs.append((state, action))
         return pairs
+
+
+def _slice_pick(
+    states: list[ObjectCentricState],
+    actions: list[NDArray[np.floating]],
+    pick_index: int,
+) -> tuple[list[ObjectCentricState], list[NDArray[np.floating]]]:
+    """The sub-trajectory of the ``pick_index``-th pick-and-place (plan order).
+
+    A pick-and-place runs from its staging base motion to the end of its
+    release's retract: each gripper OPEN is followed by arm-only retract
+    actions, and the next base motion begins the next pick.
+    """
+    starts = [0]
+    for i, action in enumerate(actions):
+        if float(action[10]) > 0.5:  # a release
+            for j in range(i + 1, len(actions)):
+                if np.abs(actions[j][:3]).max() > 1e-9:  # next base motion
+                    starts.append(j)
+                    break
+    if not 0 <= pick_index < len(starts):
+        raise ValueError(
+            f"only_pick_index {pick_index} out of range: the plan has "
+            f"{len(starts)} pick-and-places"
+        )
+    start = starts[pick_index]
+    stop = starts[pick_index + 1] if pick_index + 1 < len(starts) else len(actions)
+    return states[start : stop + 1], actions[start:stop]
 
 
 def _collapse_gripper_runs(

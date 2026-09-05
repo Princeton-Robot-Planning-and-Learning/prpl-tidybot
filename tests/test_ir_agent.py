@@ -133,3 +133,16 @@ def test_ir_pipeline_fake_mode() -> None:
     # one-shot plan, which is the natural rollout end in fake mode.
     assert result.steps == 1
     assert result.finish_reason.startswith("agent_failure")
+
+
+def test_only_pick_index_slices_one_pick_and_place():
+    """With only_pick_index the agent serves exactly one pick-and-place: one
+    close, one open, starting with that pick's base staging motion."""
+    agent = InjectedPlanAgent(_FIXTURE, seed=0, only_pick_index=1)
+    agent.reset(_make_obs((1.48, 0.67, 1.54), [0.0] * 7), {})
+    pairs = agent.plan()
+    gripper = [float(a[10]) for _, a in pairs]
+    assert sum(1 for g in gripper if g < -0.5) == 1
+    assert sum(1 for g in gripper if g > 0.5) == 1
+    # The slice is a strict subset of the full plan.
+    assert 50 < len(pairs) < 400
