@@ -42,12 +42,12 @@ sim_config:
 # max_iter_total: a refined skill segment is a few hundred densely spaced
 # waypoints (reach + gripper event + lift-and-tuck stow in one segment).
 arm_advance_radius: 0.15
-# 0.15: the compromise between the original 0.25 (uncomfortably fast around
-# the boxes and shelf, 2026-09-03) and the calm 0.1 — which sat at the
-# Kinova compliant controller's deadband, so the arm stalled after every
-# few millimetres of progress (visible as stop-start jitter, and each
-# micro-pause at extension is dwell time for gravity sag).
-arm_lookahead: 0.15
+# 0.2: smooth on the robot (validated 2026-09-05). Below ~0.15 the carrot
+# lead sits at the Kinova compliant controller's deadband and the arm
+# stalls after every few millimetres of progress (stop-start jitter, and
+# each micro-pause at extension is dwell time for gravity sag); the
+# original 0.25 was uncomfortably fast around the boxes and shelf.
+arm_lookahead: 0.2
 arm_arrival_tolerance: 0.4
 arm_gripper_dwell_ticks: 20
 arm_max_iter_total: 5000
@@ -98,6 +98,13 @@ visual_max_lateral: 0.04
 # before its walk begins, so a sag never blends forward into the path.
 recover_segment_start: true
 
+# Gripper events (close on a can, release over the board) wait for the arm
+# to converge within this (weighted joint metric) of the exact event
+# configuration, instead of firing at the cruising advance_radius (0.15):
+# measured residuals of ~0.11-0.14 at events meant closes landed high on
+# the cans and releases dropped short of the commanded height.
+gripper_event_tolerance: 0.05
+
 pipelines:
   fake:
     real_env:
@@ -130,6 +137,7 @@ pipelines:
         confirm_grasp_closes: ${env.confirm_grasp_closes}
         compensate_base_error: ${env.compensate_base_error}
         recover_segment_start: ${env.recover_segment_start}
+        gripper_event_tolerance: ${env.gripper_event_tolerance}
   sim:
     real_env:
       _target_: prpl_tidybot.sim_env.KinderSimEnv

@@ -198,6 +198,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         visual_debug_dir: str | None = None,
         edge_detector: Callable[[Any], Any] | None = None,
         recover_segment_start: bool = False,
+        gripper_event_tolerance: float | None = None,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if visual_lateral_mode not in ("off", "log", "on"):
@@ -259,6 +260,14 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # sag under gravity at extension; with this flag each segment first
         # recovers its start configuration before the walk begins.
         self._recover_segment_start = recover_segment_start
+        # The cursor reaches a gripper pair through advance_radius — a
+        # cruising tolerance (0.15). Acting on the gripper at that slack
+        # closes on fingers that have not finished arriving and releases
+        # cans short of the commanded configuration; with this set, the
+        # command is deferred (the carrot holds the exact event target)
+        # until the arm is within the tighter tolerance.
+        self._gripper_event_tolerance = gripper_event_tolerance
+        self._gripper_wait_ticks = 0
         # The base hands over as soon as it is within tolerance, while it is
         # still creeping and the marker-pose stream lags, so the error must
         # be computed from a SETTLED pose: the arm holds until the perceived
@@ -308,6 +317,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._gripper_ticks_remaining = 0
         self._last_gripper_goal = None
         self._confirmed_close_cursor = -1
+        self._gripper_wait_ticks = 0
         self._compensation_applied = False
         self._settle_history = []
         self._visual_attempts = 0
@@ -426,6 +436,29 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # (kinder does not update finger_state after close actions), so we cannot
         # rely on the planned state; tracking the last command is authoritative.
         if _is_gripper_cmd(sim_action):
+            if (
+                self._gripper_event_tolerance is not None
+                and self._cursor != self._gripper_cursor
+                and self._gripper_wait_ticks < _GRIPPER_EVENT_MAX_WAIT
+                and self._distance_fn(perceived, self._targets[self._cursor])
+                > self._gripper_event_tolerance
+            ):
+                # Not converged on the event configuration yet: keep the
+                # carrot on the exact target and defer the gripper command.
+                self._gripper_wait_ticks += 1
+                hold = sim_action.copy()
+                hold[10] = 0.0
+                action = _build_tidybot_action(
+                    sim_state,
+                    target,
+                    hold,
+                    self._robot_name,
+                    self._last_gripper_goal,
+                    self._gripper_close_position,
+                )
+                self._tick_count += 1
+                return action, hold
+            self._gripper_wait_ticks = 0
             self._last_gripper_goal = (
                 self._gripper_close_position if float(sim_action[10]) < -0.5 else 0.0
             )
@@ -806,6 +839,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         visual_debug_dir: str | None = None,
         edge_detector: Callable[[Any], Any] | None = None,
         recover_segment_start: bool = False,
+        gripper_event_tolerance: float | None = None,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -830,6 +864,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             visual_debug_dir=visual_debug_dir,
             edge_detector=edge_detector,
             recover_segment_start=recover_segment_start,
+            gripper_event_tolerance=gripper_event_tolerance,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")
@@ -938,6 +973,9 @@ _VISUAL_MAX_ATTEMPTS = 10
 # the tick budget for getting there.
 _RECOVER_TOL = 0.1
 _RECOVER_MAX_TICKS = 60
+# Tick budget for converging on a gripper event configuration before the
+# command issues anyway (with the residual logged either way).
+_GRIPPER_EVENT_MAX_WAIT = 50
 
 
 def _absolute_target(

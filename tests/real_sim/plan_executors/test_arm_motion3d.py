@@ -1058,3 +1058,34 @@ def test_segment_start_recovered_after_sag():
     assert action.arm_goal[1] > start_conf[
         1
     ] + 1e-6 or action.arm_goal != pytest.approx(start_conf)
+
+
+def test_gripper_event_waits_for_tight_convergence():
+    """With gripper_event_tolerance set, the close command is deferred (gripper
+    held) until the perceived joints are within the tolerance of the event
+    configuration; the cruising advance_radius alone must not fire it."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        advance_radius=0.15,
+        gripper_event_tolerance=0.05,
+        gripper_close_position=0.9,
+    )
+    conf = [0.0, 0.5, 0.0, 1.0, 0.0, -0.5, 0.0]
+    close = np.zeros(11)
+    close[10] = -1.0
+    state = _make_state(arm_conf=list(conf))
+    executor.set_trajectory([(state, close)])
+    # Within advance_radius but outside the event tolerance: no close yet.
+    near = list(conf)
+    near[1] += 0.10
+    action, sim_action = executor.step(_make_state(arm_conf=near, gripper=0.0))
+    assert sim_action[10] == 0.0
+    assert action.gripper_goal != pytest.approx(0.9)
+    # Converged: the close issues.
+    action, sim_action = executor.step(_make_state(arm_conf=list(conf), gripper=0.0))
+    assert sim_action[10] == -1.0
+    assert action.gripper_goal == pytest.approx(0.9)
