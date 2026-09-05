@@ -12,6 +12,12 @@ and record a handful of key waypoints:
     u<Enter>  undo the last waypoint
     q<Enter>  save and quit
 
+Record the carry pose and the insertion up to the release (press o there),
+THEN keep recording the retract you want — the waypoints after the release
+are replayed as the retract (drive the gripper back out and up the way you
+want it to leave the shelf). Without any post-release waypoints the retract
+just reverses the insertion.
+
 Output JSON: {"base_map": [x, y, rot], "waypoints": [[7 joints (rad)], ...],
 "release_index": int}. The joints are kortex positions converted to radians
 and wrapped to (-pi, pi], matching the executor's perceived-joint convention.

@@ -14,8 +14,10 @@ the demonstrated placement for each of them.
 trajectory: each targeted place's base-staging and arm insertion are replaced
 by a base drive to the laterally-shifted demonstration pose plus the
 demonstrated arm waypoints (densified, gripper held closed, released at the
-demonstrated release waypoint, then reversed to retract). Places not in the
-target set (e.g. a different board) are left untouched.
+demonstrated release waypoint, then following any waypoints recorded after
+the release as the retract — or reversing the forward path when none were
+recorded). Places not in the target set (e.g. a different board) are left
+untouched.
 """
 
 from __future__ import annotations
@@ -156,15 +158,21 @@ def rewrite_places_with_demo(
     release_index = int(demo["release_index"])
     demo_release_x = float(fk(waypoints[release_index], demo_base)[0])
 
-    # Densified demonstrated forward path (carry -> release) then retract
-    # (release -> carry), as absolute joint configs.
+    # Densified absolute joint configs: the forward path (carry -> release),
+    # then the retract. If the demonstration recorded waypoints after the
+    # release, those are the demonstrated retract; otherwise the forward path
+    # is reversed back to the carry pose.
     forward = [waypoints[0]]
     for i in range(1, release_index + 1):
         forward.extend(_interpolate_joints(forward[-1], waypoints[i]))
     release_config_index = len(forward) - 1
     configs = list(forward)
-    for i in range(release_index - 1, -1, -1):
-        configs.extend(_interpolate_joints(configs[-1], waypoints[i]))
+    if release_index + 1 < len(waypoints):
+        for i in range(release_index + 1, len(waypoints)):
+            configs.extend(_interpolate_joints(configs[-1], waypoints[i]))
+    else:
+        for i in range(release_index - 1, -1, -1):
+            configs.extend(_interpolate_joints(configs[-1], waypoints[i]))
 
     release_positions = [i for i, a in enumerate(actions) if float(a[10]) > 0.5]
     if len(release_positions) != len(place_targets_x):
