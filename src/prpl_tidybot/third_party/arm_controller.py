@@ -9,10 +9,17 @@
 # pylint: disable=all
 
 import math
+import os
 import time
 
 import numpy as np
 from ruckig import InputParameter, OutputParameter, Result, Ruckig
+
+# Scale the OTG velocity and acceleration limits, for slowing the arm without
+# editing code: export PRPL_ARM_SPEED_SCALE=0.5 before starting the arm server
+# to run at half speed (default 1.0 = the original limits). Useful when a fast
+# transition trips a joint velocity/effort fault (the red-light condition).
+_SPEED_SCALE = float(os.environ.get("PRPL_ARM_SPEED_SCALE", "1.0"))
 
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD
 from prpl_tidybot.third_party.kinova import TorqueControlledArm
@@ -72,9 +79,13 @@ class JointCompliantController:
             self.otg = Ruckig(arm.actuator_count, DT)
             self.otg_inp = InputParameter(arm.actuator_count)
             self.otg_out = OutputParameter(arm.actuator_count)
-            self.otg_inp.max_velocity = 4 * [math.radians(80)] + 3 * [math.radians(140)]
-            self.otg_inp.max_acceleration = 4 * [math.radians(240)] + 3 * [
-                math.radians(450)
+            self.otg_inp.max_velocity = [
+                _SPEED_SCALE * v
+                for v in 4 * [math.radians(80)] + 3 * [math.radians(140)]
+            ]
+            self.otg_inp.max_acceleration = [
+                _SPEED_SCALE * a
+                for a in 4 * [math.radians(240)] + 3 * [math.radians(450)]
             ]
             self.otg_inp.current_position = arm.q.copy()
             self.otg_inp.current_velocity = arm.dq.copy()
