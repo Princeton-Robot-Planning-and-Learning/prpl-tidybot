@@ -34,7 +34,7 @@ class SamEdgeDetector:
         self,
         host: str = SERVER_HOSTNAME,
         port: int = SEGMENTATION_PORT,
-        prompt: str = "a can. a jar.",
+        prompt: str = "a can",
         min_score: float = 0.3,
         min_width_frac: float = 0.06,
         max_width_frac: float = 0.7,
