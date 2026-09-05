@@ -42,10 +42,12 @@ sim_config:
 # max_iter_total: a refined skill segment is a few hundred densely spaced
 # waypoints (reach + gripper event + lift-and-tuck stow in one segment).
 arm_advance_radius: 0.15
-# 0.1 (the settle-move cruise) rather than the cylinder-shelf env's 0.25:
-# at 0.25 the arm moved uncomfortably fast around the boxes and shelf on
-# the 2026-09-03 runs. Raise back toward 0.25 for speed once trusted.
-arm_lookahead: 0.1
+# 0.15: the compromise between the original 0.25 (uncomfortably fast around
+# the boxes and shelf, 2026-09-03) and the calm 0.1 — which sat at the
+# Kinova compliant controller's deadband, so the arm stalled after every
+# few millimetres of progress (visible as stop-start jitter, and each
+# micro-pause at extension is dwell time for gravity sag).
+arm_lookahead: 0.15
 arm_arrival_tolerance: 0.4
 arm_gripper_dwell_ticks: 20
 arm_max_iter_total: 5000
