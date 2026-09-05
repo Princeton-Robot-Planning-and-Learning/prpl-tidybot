@@ -52,18 +52,38 @@ def main() -> None:
         if not faulted:
             print("  no per-actuator fault flags set")
 
-        if before == Base_pb2.ARMSTATE_IN_FAULT:
-            print("Clearing faults...")
-            base.ClearFaults()
-            deadline = time.time() + 10.0
-            while time.time() < deadline:
-                if base.GetArmState().active_state == Base_pb2.ARMSTATE_SERVOING_READY:
-                    print("Arm is SERVOING_READY.")
-                    return
-                time.sleep(0.1)
-            print(f"Timed out; arm state: {_state_name(base.GetArmState().active_state)}")
-        else:
+        if before != Base_pb2.ARMSTATE_IN_FAULT:
             print("Arm is not in fault; nothing to clear.")
+            return
+
+        # After a low-level-servoing fault the base stays in LOW_LEVEL_SERVOING;
+        # ClearFaults only returns the arm to SERVOING_READY once it is back in
+        # single-level servoing. Set that first, then clear (retrying, since the
+        # first clear right after the fault is sometimes ignored).
+        servo_mode = Base_pb2.ServoingModeInformation()
+        servo_mode.servoing_mode = Base_pb2.SINGLE_LEVEL_SERVOING
+        try:
+            base.SetServoingMode(servo_mode)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"SetServoingMode failed (continuing): {exc}")
+
+        print("Clearing faults...")
+        deadline = time.time() + 20.0
+        last_clear = 0.0
+        while time.time() < deadline:
+            if time.time() - last_clear > 3.0:
+                base.ClearFaults()
+                last_clear = time.time()
+            state = base.GetArmState().active_state
+            if state == Base_pb2.ARMSTATE_SERVOING_READY:
+                print("Arm is SERVOING_READY.")
+                return
+            time.sleep(0.2)
+        print(f"Timed out; arm state: {_state_name(base.GetArmState().active_state)}")
+        print(
+            "If it stays IN_FAULT, power-cycle the arm (the switch on the base) "
+            "and relaunch."
+        )
 
 
 if __name__ == "__main__":
