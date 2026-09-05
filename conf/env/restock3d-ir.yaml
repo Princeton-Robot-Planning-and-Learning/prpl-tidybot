@@ -181,4 +181,13 @@ pipelines:
         visual_debug_dir: ${hydra:runtime.output_dir}/visual_frames
         image_source:
           _target_: prpl_tidybot.visual_servo.image_sources.KinovaWristCameraSource
+        # The SAM segmentation service on the perception laptop (issue #136;
+        # scripts/run_segmentation_server.py must be running there). On
+        # service failure the detector returns no edges and the correction
+        # falls back to the marker-based compensation; the OpenCV column
+        # detector is not in the chain here because it cannot segment the
+        # box-interior background at the 45-degree view.
+        edge_detector:
+          _target_: prpl_tidybot.segmentation.detector.SamEdgeDetector
+          host: ${lab.marker_detector_host}
       confirm_release_segments: ${env.confirm_release_segments}

@@ -978,3 +978,54 @@ def test_visual_correction_skipped_for_non_grasp_segments():
     reach[3] = 0.05
     executor.set_trajectory([(state, reach)])
     executor.step(state)
+
+
+def test_injected_edge_detector_replaces_opencv():
+    """A configured edge_detector is what the visual correction consults."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+    from prpl_tidybot.visual_servo.cylinder_edges import CylinderEdges
+    from prpl_tidybot.visual_servo.image_sources import SequenceImageSource
+
+    calls: list[tuple] = []
+
+    def fake_detector(image):
+        calls.append(image.shape)
+        # Centre at column 229.5 vs image centre 159.5: +70 px error.
+        return CylinderEdges(
+            left_x=200.0,
+            right_x=259.0,
+            image_width=320,
+            image_height=240,
+            left_response=1.0,
+            right_response=1.0,
+            contrast=1.0,
+        )
+
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        visual_lateral_mode="on",
+        image_source=SequenceImageSource([frame] * 20),
+        edge_detector=fake_detector,
+        visual_lateral_gain=0.0003,
+        visual_lateral_sign=1.0,
+        compensation_reach=0.8,
+    )
+    state = _make_state()
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    close = np.zeros(11)
+    close[10] = -1.0
+    executor.set_trajectory([(state, reach), (state, close)])
+    before = [
+        float(t[0]) for t in executor._targets
+    ]  # pylint: disable=protected-access
+    for _ in range(8):
+        executor.step(state)
+    after = [float(t[0]) for t in executor._targets]  # pylint: disable=protected-access
+    assert calls, "the injected detector was never consulted"
+    assert after[0] - before[0] == pytest.approx(
+        0.0003 * (229.5 - 159.5) / 0.8, abs=1e-6
+    )

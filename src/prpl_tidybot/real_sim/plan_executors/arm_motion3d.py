@@ -192,6 +192,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         visual_lateral_sign: float = 1.0,
         visual_max_lateral: float = 0.04,
         visual_debug_dir: str | None = None,
+        edge_detector: Callable[[Any], Any] | None = None,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if visual_lateral_mode not in ("off", "log", "on"):
@@ -246,6 +247,9 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._visual_max_lateral = visual_max_lateral
         self._visual_debug_dir = visual_debug_dir
         self._visual_frame_count = 0
+        # The CylinderEdges producer for the correction: the SAM service
+        # detector by config, the OpenCV column detector by default.
+        self._edge_detector = edge_detector or detect_cylinder_edges
         # The base hands over as soon as it is within tolerance, while it is
         # still creeping and the marker-pose stream lags, so the error must
         # be computed from a SETTLED pose: the arm holds until the perceived
@@ -417,7 +421,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         """
         self._visual_attempts += 1
         image = self._image_source.get_image()
-        edges = None if image is None else detect_cylinder_edges(image)
+        edges = None if image is None else self._edge_detector(image)
         if self._visual_debug_dir is not None and image is not None:
             self._dump_visual_frame(image, edges)
         if edges is None or edges.clipped_left or edges.clipped_right:
@@ -740,6 +744,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         visual_lateral_sign: float = 1.0,
         visual_max_lateral: float = 0.04,
         visual_debug_dir: str | None = None,
+        edge_detector: Callable[[Any], Any] | None = None,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -762,6 +767,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             visual_lateral_sign=visual_lateral_sign,
             visual_max_lateral=visual_max_lateral,
             visual_debug_dir=visual_debug_dir,
+            edge_detector=edge_detector,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")
