@@ -49,6 +49,10 @@ def main() -> int:
         BaseCyclicClient,
     )
 
+    # The kinova module uses these connections as context managers entered
+    # for the process lifetime; mirror that (the dunder calls are the
+    # established pattern there).
+    # pylint: disable=unnecessary-dunder-call
     tcp.__enter__()
     base_cyclic = BaseCyclicClient(udp.__enter__())
 
@@ -56,6 +60,7 @@ def main() -> int:
 
     def read_joints() -> list[float]:
         feedback = base_cyclic.RefreshFeedback()
+        # pylint: disable=no-member  # protobuf message fields
         return [
             _wrap(math.radians(actuator.position))
             for actuator in feedback.actuators[:7]
