@@ -467,6 +467,14 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         if _is_gripper_cmd(sim_action):
             if (
                 self._gripper_event_tolerance is not None
+                # Releases only: a converged, integrator-held release is what
+                # fixed the placement height. Closes fire at the cruising
+                # tolerance as they always did — the side-grasp picking was
+                # calibrated against that behaviour (the deadband-high grip
+                # lengthens the real hang, which the place ride absorbs),
+                # and forcing closes onto the exact commanded pose gripped
+                # the cans low enough to whiff.
+                and float(sim_action[10]) > 0.5
                 and self._cursor != self._gripper_cursor
                 and self._gripper_wait_ticks < _GRIPPER_EVENT_MAX_WAIT
                 and self._distance_fn(perceived, self._targets[self._cursor])

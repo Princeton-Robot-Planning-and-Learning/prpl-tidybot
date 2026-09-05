@@ -1075,20 +1075,19 @@ def test_gripper_event_waits_for_tight_convergence():
         gripper_close_position=0.9,
     )
     conf = [0.0, 0.5, 0.0, 1.0, 0.0, -0.5, 0.0]
-    close = np.zeros(11)
-    close[10] = -1.0
+    open_cmd = np.zeros(11)
+    open_cmd[10] = 1.0
     state = _make_state(arm_conf=list(conf))
-    executor.set_trajectory([(state, close)])
-    # Within advance_radius but outside the event tolerance: no close yet.
+    executor.set_trajectory([(state, open_cmd)])
+    # Within advance_radius but outside the event tolerance: no release yet.
     near = list(conf)
     near[1] += 0.10
-    action, sim_action = executor.step(_make_state(arm_conf=near, gripper=0.0))
+    action, sim_action = executor.step(_make_state(arm_conf=near, gripper=0.9))
     assert sim_action[10] == 0.0
-    assert action.gripper_goal != pytest.approx(0.9)
-    # Converged: the close issues.
-    action, sim_action = executor.step(_make_state(arm_conf=list(conf), gripper=0.0))
-    assert sim_action[10] == -1.0
-    assert action.gripper_goal == pytest.approx(0.9)
+    # Converged: the release issues.
+    action, sim_action = executor.step(_make_state(arm_conf=list(conf), gripper=0.9))
+    assert sim_action[10] == 1.0
+    assert action.gripper_goal == pytest.approx(0.0)
 
 
 def test_event_integrator_pushes_command_past_target():
@@ -1105,14 +1104,14 @@ def test_event_integrator_pushes_command_past_target():
         gripper_close_position=0.9,
     )
     conf = [0.0, 0.5, 0.0, 1.0, 0.0, -0.5, 0.0]
-    close = np.zeros(11)
-    close[10] = -1.0
-    executor.set_trajectory([(_make_state(arm_conf=list(conf)), close)])
+    open_cmd = np.zeros(11)
+    open_cmd[10] = 1.0
+    executor.set_trajectory([(_make_state(arm_conf=list(conf)), open_cmd)])
     # The arm rests below the commanded pose (a positive gap on joint 2).
     sagged = list(conf)
     sagged[1] += 0.10
-    action1, sim1 = executor.step(_make_state(arm_conf=sagged, gripper=0.0))
-    action2, sim2 = executor.step(_make_state(arm_conf=sagged, gripper=0.0))
+    action1, sim1 = executor.step(_make_state(arm_conf=sagged, gripper=0.9))
+    action2, sim2 = executor.step(_make_state(arm_conf=sagged, gripper=0.9))
     assert sim1[10] == 0.0 and sim2[10] == 0.0
     # The command is pushed past the target, and further on the second tick.
     assert action1.arm_goal[1] < conf[1]
