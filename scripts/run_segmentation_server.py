@@ -36,6 +36,9 @@ class SamService:
     """SAM 3 wrapped for single-frame text-prompted instance queries."""
 
     def __init__(self, model_name: str, threshold: float) -> None:
+        # torch/transformers live only in the laptop's dedicated venv, not in
+        # the repo venv this file is linted from.
+        # pylint: disable=import-outside-toplevel,import-error
         import torch
         from transformers import Sam3Model, Sam3Processor
 
@@ -117,6 +120,7 @@ def _handle(conn: Connection, service: SamService) -> None:
 
 
 def main() -> None:
+    """Load the model and serve forever."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=6004)
