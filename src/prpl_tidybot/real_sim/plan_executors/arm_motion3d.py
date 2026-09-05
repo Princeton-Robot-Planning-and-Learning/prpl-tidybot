@@ -274,6 +274,14 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # whatever it is commanded, so commanding the desired pose directly
         # leaves a steady ~0.1 residual that no amount of waiting removes.
         self._event_integrator: list[float] | None = None
+        # Walk-phase integrator for release segments: the deadband also sags
+        # the whole level insertion, not just the event at its end, so the
+        # slide enters low and only gets lifted at the release. Winds up
+        # only on lag beyond the intended carrot lead, so healthy cruising
+        # is unaffected; active only in segments that contain a gripper
+        # OPEN, and only when gripper_event_tolerance is configured.
+        self._walk_integrator: list[float] | None = None
+        self._segment_has_open: bool = False
         # The base hands over as soon as it is within tolerance, while it is
         # still creeping and the marker-pose stream lags, so the error must
         # be computed from a SETTLED pose: the arm holds until the perceived
@@ -325,6 +333,11 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._confirmed_close_cursor = -1
         self._gripper_wait_ticks = 0
         self._event_integrator = None
+        self._walk_integrator = None
+        self._segment_has_open = any(
+            not isinstance(action, SkillCall) and float(action[10]) > 0.5
+            for _, action in self._pairs
+        )
         self._compensation_applied = False
         self._settle_history = []
         self._visual_attempts = 0
@@ -504,6 +517,28 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             ]
         elif self._event_integrator is not None:
             self._event_integrator = None
+        if (
+            self._gripper_event_tolerance is not None
+            and self._segment_has_open
+            and not _is_gripper_cmd(sim_action)
+        ):
+            lead = self._distance_fn(perceived, target)
+            excess = lead - self._walk_integrator_reference()
+            if self._walk_integrator is None:
+                self._walk_integrator = [0.0] * len(target)
+            if excess > 0 and lead > 1e-9:
+                scale = _EVENT_INTEGRATOR_GAIN * excess / lead
+                self._walk_integrator = [
+                    max(
+                        -_EVENT_INTEGRATOR_CAP,
+                        min(
+                            _EVENT_INTEGRATOR_CAP,
+                            c + scale * _wrap(t - p),
+                        ),
+                    )
+                    for c, t, p in zip(self._walk_integrator, target, perceived)
+                ]
+            target = [t + c for t, c in zip(target, self._walk_integrator)]
         action = _build_tidybot_action(
             sim_state,
             target,
@@ -591,6 +626,10 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         cv2.imwrite(str(stem) + ".png", image[:, :, ::-1])
         overlay = render_edge_overlay(image, edges)
         cv2.imwrite(str(stem) + "_overlay.png", overlay[:, :, ::-1])
+
+    def _walk_integrator_reference(self) -> float:
+        """The lead the walk integrator treats as healthy (no wind-up)."""
+        return getattr(self, "_lookahead", self._advance_radius)
 
     def _settled_base_pose(
         self, sim_state: ObjectCentricState

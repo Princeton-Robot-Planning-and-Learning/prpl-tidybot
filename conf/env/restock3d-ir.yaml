@@ -103,7 +103,9 @@ recover_segment_start: true
 # configuration, instead of firing at the cruising advance_radius (0.15):
 # measured residuals of ~0.11-0.14 at events meant closes landed high on
 # the cans and releases dropped short of the commanded height.
-gripper_event_tolerance: 0.05
+# 0.02: the close converges to 0.016, and at 0.05 the open stopped at
+# 0.043 — still ~1.5 cm of end-effector height in this metric.
+gripper_event_tolerance: 0.02
 
 pipelines:
   fake:
