@@ -114,7 +114,9 @@ compensate_base_error: true
 #   on    - apply a single open-loop correction (unreliable: the joint-1
 #           deadband/hysteresis swallows a one-shot nudge).
 #   off   - never consult the camera.
-visual_lateral_mode: log
+# Default servo: the reliable closed-loop mode now that the sign is
+# confirmed. env.visual_lateral_mode=log measures only; off disables.
+visual_lateral_mode: servo
 visual_lateral_sign: 1.0
 # Metres of lateral correction per pixel of offset (same scale as the
 # visual-servo executor's lateral gain), and the per-grasp cap.
