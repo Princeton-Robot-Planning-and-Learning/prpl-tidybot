@@ -1,0 +1,241 @@
+# Execute an alphatamp restock plan from its intermediate representation (IR).
+#
+# The IR (`plan_ir.json`, format restock3d-ir-v1) is exported by alphatamp's
+# `experiments/spectre/restock3d_deploy/deploy.py`: the skill skeleton plus
+# the continuous placement decisions, and nothing else. `InjectedPlanAgent`
+# refines it into a full trajectory here, in the measured boxed lab scene
+# (`kinder_bilevel_planning.restock_scene`, map frame) with this robot's
+# calibrated skills, then the standard executor stack tracks it.
+#
+#   python scripts/run_planner.py env=restock3d-ir mode=fake \
+#       env.ir_path=/path/to/plan_ir.json
+#
+# Unlike the npz replay env, the planning scene lives in this venv, so there
+# IS a sim pipeline: `mode=sim` rolls the plan out in the kinder env, and in
+# real mode the same env serves as the shadow sim for the preview video and
+# the side-by-side recorder.
+#
+# Physical staging must match restock_scene: shelf at map (1.63, 1.51), the
+# two boxes at their surveyed poses, each can at its spot inside them.
+
+env_name: restock3d_ir
+
+# Path to the plan_ir.json export. Required.
+ir_path: ???
+
+# Execute only the N-th pick-and-place of the plan (0-based, plan order);
+# null runs the whole plan. E.g. `env.only_pick=1` for the second can.
+only_pick: null
+
+# A teleoperated place demonstration (scripts/record_place_waypoints.py):
+# when set, every top-board placement replays the demonstrated arm motion,
+# base-shifted laterally per can, instead of the model's insertion. null
+# keeps the model place.
+place_demo_path: null
+# A bottom-board (talls) placement demonstration; null keeps the model
+# insertion for the talls.
+place_demo_bottom_path: null
+
+# The agent replaces the default bilevel planner (see pipeline.py). It plans
+# once on the first reset (~10-60 s), then serves the trajectory one-shot,
+# prepending unplanned settle pairs from the perceived start configuration
+# (arm first, then base).
+agent:
+  _target_: prpl_tidybot.ir_agent.InjectedPlanAgent
+  ir_path: ${env.ir_path}
+  seed: ${seed}
+  only_pick_index: ${env.only_pick}
+  place_demo_path: ${env.place_demo_path}
+  place_demo_bottom_path: ${env.place_demo_bottom_path}
+
+# The boxed real-restock scene, single-sourced from kinder-bilevel-planning;
+# used by the sim pipeline below (the agent builds its own copy internally).
+sim_config:
+  _target_: kinder_bilevel_planning.restock_scene.real_restock_config
+
+# Streaming arm executor knobs — same values as the cylinder-shelf env (see
+# conf/env/kinematic-cylinder-shelf3d.yaml for the rationale), except
+# max_iter_total: a refined skill segment is a few hundred densely spaced
+# waypoints (reach + gripper event + lift-and-tuck stow in one segment).
+arm_advance_radius: 0.15
+# 0.2: smooth on the robot (validated 2026-09-05). Below ~0.15 the carrot
+# lead sits at the Kinova compliant controller's deadband and the arm
+# stalls after every few millimetres of progress (stop-start jitter, and
+# each micro-pause at extension is dwell time for gravity sag); the
+# original 0.25 was uncomfortably fast around the boxes and shelf.
+arm_lookahead: 0.2
+arm_arrival_tolerance: 0.4
+arm_gripper_dwell_ticks: 20
+arm_max_iter_total: 5000
+# The cans are compliant (Pringles); stop short of a full close so they are
+# squeezed, not crushed. Tune with `env.gripper_close_position=...`.
+gripper_close_position: 0.7
+
+# Testing gate (real mode only): prompt the operator before every arm
+# segment that carries a can into the shelf and releases it, while the
+# robot stands still at the staging pose. Disable with
+# `env.confirm_release_segments=false` once trusted.
+confirm_release_segments: true
+# Staging-calibration gate: pause once per grasp with the fingers holding
+# open at the grasp pose, so the operator can mark where each can must be
+# staged for the open-loop grasp to land on it. Enable for a marking run
+# with `env.confirm_grasp_closes=true` (usually together with
+# `env.confirm_release_segments=false`).
+confirm_grasp_closes: false
+# When the arm stalls just short of a gripper waypoint (the compliant
+# controller cannot close the last bit of the commanded push), prompt the
+# operator to fire the gripper at the current pose. On by default in real
+# runs; the operator judges whether the pose is a good grasp.
+confirm_stall_grasp: true
+
+# Base-error compensation: at each arm segment's first tick, compare the
+# perceived base pose (marker detector) with the plan's and offset joint 1
+# so the arm plane swings back onto the map-frame target. Corrects the
+# dominant (lateral + yaw) part of base staging error; forward error is
+# absorbed by the grasp/place standoffs. Disable with
+# `env.compensate_base_error=false` to compare.
+compensate_base_error: true
+
+# Wrist-camera lateral correction at each grasp (real mode): with the arm
+# holding at the pre-grasp, the camera measures the can's true lateral
+# offset and joint 1 shifts the remaining planned approach onto it; the
+# marker-based compensation is skipped for that segment (the camera
+# supersedes it) and remains the fallback when detection fails.
+#   servo - closed-loop: nudge joint 1 toward the detected can and
+#           re-check until it is centred, converging despite the compliant
+#           joint's imperfect tracking (the sign auto-flips if a nudge
+#           worsens the error). This is the reliable mode on hardware.
+#   log   - measure and log the would-be correction, apply nothing.
+#   on    - apply a single open-loop correction (unreliable: the joint-1
+#           deadband/hysteresis swallows a one-shot nudge).
+#   off   - never consult the camera.
+visual_lateral_mode: log
+visual_lateral_sign: 1.0
+# Metres of lateral correction per pixel of offset (same scale as the
+# visual-servo executor's lateral gain), and the per-grasp cap.
+visual_lateral_gain: 0.0003
+visual_max_lateral: 0.04
+
+# Command gaps (operator pauses, waits) let the compliant arm sag under
+# gravity at extension; each arm segment recovers its start configuration
+# before its walk begins, so a sag never blends forward into the path.
+recover_segment_start: true
+
+# Gripper events (close on a can, release over the board) wait for the arm
+# to converge within this (weighted joint metric) of the exact event
+# configuration, instead of firing at the cruising advance_radius (0.15):
+# measured residuals of ~0.11-0.14 at events meant closes landed high on
+# the cans and releases dropped short of the commanded height.
+# 0.02: the close converges to 0.016, and at 0.05 the open stopped at
+# 0.043 — still ~1.5 cm of end-effector height in this metric.
+gripper_event_tolerance: 0.02
+
+pipelines:
+  fake:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      # FakeInterface stores commanded poses, so the executor converges on
+      # the first tick; skip the per-tick sleep to keep tests fast.
+      control_period: 0.0
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.FakeInterface
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.RobotOnlyPerceiver
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
+      base_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.base_motion3d.PurePursuitBaseMotion3DPlanExecutor
+        # Same tight heading tolerance as the cylinder-shelf env: the grasp
+        # standoff is ~0.72-0.88 m, so heading error becomes lateral grasp
+        # error.
+        angle_tolerance: 0.03
+      arm_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.CarrotArmMotion3DPlanExecutor
+        distance_fn:
+          _target_: prpl_tidybot.real_sim.plan_executors.distance_factories.create_kinova_distance_fn
+        advance_radius: ${env.arm_advance_radius}
+        arrival_tolerance: ${env.arm_arrival_tolerance}
+        max_iter_total: ${env.arm_max_iter_total}
+        gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
+        lookahead: ${env.arm_lookahead}
+        gripper_close_position: ${env.gripper_close_position}
+        confirm_grasp_closes: ${env.confirm_grasp_closes}
+        confirm_stall_grasp: ${env.confirm_stall_grasp}
+        compensate_base_error: ${env.compensate_base_error}
+        recover_segment_start: ${env.recover_segment_start}
+        gripper_event_tolerance: ${env.gripper_event_tolerance}
+  sim:
+    real_env:
+      _target_: prpl_tidybot.sim_env.KinderSimEnv
+      # kindergarden registers this env only up to o3; gymnasium.make lets
+      # call-time kwargs override the registered ones, so the o3 id plus an
+      # explicit num_cylinders yields the 6-can scene.
+      env_id: kinder/KinematicCylinderShelf3D-o3-v0
+      num_cylinders: 6
+      config: ${env.sim_config}
+      # Enable inner-env `set_state` so this same pipeline can serve as a
+      # shadow sim for the preview video and the side-by-side recorder.
+      allow_state_access: true
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.passthrough.PassThroughPerceiver
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.passthrough.PassThroughPlanExecutor
+  real:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.RealInterface
+        # Real arm + real base; the camera stays faked — the rollout needs
+        # no on-robot perception, and the ceiling cameras feed the renderer.
+        base_interface:
+          _target_: prpl_tidybot.interfaces.base_interface.RealBaseInterface
+          marker_detector_host: ${lab.marker_detector_host}
+        camera_interface:
+          _target_: prpl_tidybot.interfaces.camera_interface.FakeCameraInterface
+      # Off-host render source (JPEG publisher inside the marker-detector
+      # daemon) so recording works without the on-robot cameras.
+      renderer:
+        _target_: prpl_tidybot.rendering.CeilingCameraRenderer
+    perceiver: ${env.pipelines.fake.perceiver}
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
+      base_executor: ${env.pipelines.fake.plan_executor.base_executor}
+      # Same knobs as the fake arm executor, plus the wrist-camera lateral
+      # correction (real hardware only).
+      arm_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.CarrotArmMotion3DPlanExecutor
+        distance_fn:
+          _target_: prpl_tidybot.real_sim.plan_executors.distance_factories.create_kinova_distance_fn
+        advance_radius: ${env.arm_advance_radius}
+        arrival_tolerance: ${env.arm_arrival_tolerance}
+        max_iter_total: ${env.arm_max_iter_total}
+        gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
+        lookahead: ${env.arm_lookahead}
+        gripper_close_position: ${env.gripper_close_position}
+        confirm_grasp_closes: ${env.confirm_grasp_closes}
+        confirm_stall_grasp: ${env.confirm_stall_grasp}
+        compensate_base_error: ${env.compensate_base_error}
+        recover_segment_start: ${env.recover_segment_start}
+        gripper_event_tolerance: ${env.gripper_event_tolerance}
+        # Model-FK end-effector logging at every gripper event, for
+        # comparing the model's idea of the gripper height against a ruler.
+        debug_kinematics: true
+        visual_lateral_mode: ${env.visual_lateral_mode}
+        visual_lateral_sign: ${env.visual_lateral_sign}
+        visual_lateral_gain: ${env.visual_lateral_gain}
+        visual_max_lateral: ${env.visual_max_lateral}
+        # Raw + overlay wrist frames from every detection attempt, for
+        # offline detector tuning.
+        visual_debug_dir: ${hydra:runtime.output_dir}/visual_frames
+        image_source:
+          _target_: prpl_tidybot.visual_servo.image_sources.KinovaWristCameraSource
+        # The SAM segmentation service on the perception laptop (issue #136;
+        # scripts/run_segmentation_server.py must be running there). On
+        # service failure the detector returns no edges and the correction
+        # falls back to the marker-based compensation; the OpenCV column
+        # detector is not in the chain here because it cannot segment the
+        # box-interior background at the 45-degree view.
+        edge_detector:
+          _target_: prpl_tidybot.segmentation.detector.SamEdgeDetector
+          host: ${lab.marker_detector_host}
+      confirm_release_segments: ${env.confirm_release_segments}

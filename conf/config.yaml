@@ -70,7 +70,9 @@ preview:
   # base_margin, or the plan is refused before the operator is asked. These
   # are limits on the base's centre: the same box the base motion planner
   # samples in for the cylinder-shelf env (env.base_pose_lower_bound /
-  # upper_bound), which the place staging pose next to the shelf (x ~ 1.62)
-  # has to fit. Tighten per lab; set floor_bounds to null to disable.
-  floor_bounds: [-1.5, 1.7, -1.5, 1.5]
+  # upper_bound), which the place staging poses next to the shelf have to
+  # fit — the restock scene's right-of-centre placements park the base at
+  # x ~ 1.73 (physical tile edge ~ 1.83). Tighten per lab; set
+  # floor_bounds to null to disable.
+  floor_bounds: [-1.5, 1.8, -1.5, 1.5]
   base_margin: 0.0
