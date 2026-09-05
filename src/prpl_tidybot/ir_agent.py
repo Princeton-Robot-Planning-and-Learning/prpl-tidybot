@@ -72,6 +72,7 @@ class InjectedPlanAgent(
         settle_first: bool = True,
         only_pick_index: int | None = None,
         place_demo_path: str | None = None,
+        place_demo_bottom_path: str | None = None,
     ) -> None:
         super().__init__(seed)
         self._plan_seed = seed
@@ -91,6 +92,13 @@ class InjectedPlanAgent(
         # the refined plan.
         self._place_demo = (
             load_demo(place_demo_path) if place_demo_path is not None else None
+        )
+        # The bottom-board (layer-0) demonstration for the talls; the top-board
+        # demo above covers the layer-1 shorts.
+        self._place_demo_bottom = (
+            load_demo(place_demo_bottom_path)
+            if place_demo_bottom_path is not None
+            else None
         )
         self._config = restock_scene.real_restock_config()
         self._check_ir_objects()
@@ -187,7 +195,7 @@ class InjectedPlanAgent(
                 [np.asarray(a, dtype=float).ravel() for a in plan.actions]
             )
             states = list(plan.states)
-            if self._place_demo is not None:
+            if self._place_demo is not None or self._place_demo_bottom is not None:
                 states, actions = self._apply_place_demo(states, actions)
         finally:
             env.close()
@@ -200,17 +208,16 @@ class InjectedPlanAgent(
         states: list[ObjectCentricState],
         actions: list[NDArray[np.floating]],
     ) -> tuple[list[ObjectCentricState], list[NDArray[np.floating]]]:
-        """Replace top-board (layer-1) placements with the demonstration."""
+        """Replace each board's placements with its demonstration.
+
+        The top-board demo covers layer-1 (shorts) and the bottom-board demo
+        covers layer-0 (talls); either may be absent, leaving that board's
+        placements on the model insertion.
+        """
         shelf_x = float(self._config.shelf_pose.position[0])
         place_cylinders = [
             args[1] for op, args in self._ir["skeleton"] if op == "Place"
         ]
-        targets_x: list[float | None] = []
-        for cyl in place_cylinders:
-            placement = self._ir["placements"][cyl]
-            targets_x.append(
-                shelf_x + placement["x_offset"] if placement["layer"] == 1 else None
-            )
         fk_env = ObjectCentricCylinderShelf3DEnv(
             num_cylinders=len(self._config.cylinder_heights),
             config=self._config,
@@ -225,9 +232,21 @@ class InjectedPlanAgent(
                 )
                 return list(fk_env.robot.arm.get_end_effector_pose().position)
 
-            return rewrite_places_with_demo(
-                states, actions, targets_x, self._place_demo, fk, self._robot_name
-            )
+            for demo, layer in ((self._place_demo, 1), (self._place_demo_bottom, 0)):
+                if demo is None:
+                    continue
+                targets_x: list[float | None] = [
+                    (
+                        shelf_x + self._ir["placements"][cyl]["x_offset"]
+                        if self._ir["placements"][cyl]["layer"] == layer
+                        else None
+                    )
+                    for cyl in place_cylinders
+                ]
+                states, actions = rewrite_places_with_demo(
+                    states, actions, targets_x, demo, fk, self._robot_name
+                )
+            return states, actions
         finally:
             fk_env.close()
 
