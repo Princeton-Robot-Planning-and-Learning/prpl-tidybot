@@ -20,8 +20,8 @@ dependencies = [
    # kindergarden release.
    "kindergarden @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kindergarden.git@582aaeb6fd96d1d9a56b4cf02d0061b8e6ce6df5",
    "hydra-core",
-   "kinder_bilevel_planning @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@3ae14c489543f089ed39a097d11fb1c5de450710#subdirectory=kinder-bilevel-planning",
-   "kinder_models @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@3ae14c489543f089ed39a097d11fb1c5de450710#subdirectory=kinder-models",
+   "kinder_bilevel_planning @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@fabadf75fd637bbe3d00a9bf156cd7bdb24b9a39#subdirectory=kinder-bilevel-planning",
+   "kinder_models @ git+https://github.com/Princeton-Robot-Planning-and-Learning/kinder-baselines.git@fabadf75fd637bbe3d00a9bf156cd7bdb24b9a39#subdirectory=kinder-models",
    "pybullet_helpers>=0.1.2",
    "phoenix6==25.1.0",
    "ruckig",
