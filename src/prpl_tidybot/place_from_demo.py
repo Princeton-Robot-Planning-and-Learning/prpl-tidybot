@@ -133,7 +133,7 @@ def _arm_pairs(
 def rewrite_places_with_demo(
     states: list[ObjectCentricState],
     actions: list[NDArray[np.floating]],
-    place_targets_x: list[float],
+    place_targets_x: list[float | None],
     demo: dict[str, Any],
     fk: Callable[[Sequence[float], tuple[float, float, float]], Sequence[float]],
     robot_name: str = "robot",
@@ -146,7 +146,12 @@ def rewrite_places_with_demo(
     tuple) to an end-effector map position; it grounds the demonstration's own
     release x so the per-can base shift is exact.
     """
-    demo_base = tuple(float(v) for v in demo["base_map"])
+    base_map = demo["base_map"]
+    demo_base: tuple[float, float, float] = (
+        float(base_map[0]),
+        float(base_map[1]),
+        float(base_map[2]),
+    )
     waypoints = [list(map(float, w)) for w in demo["waypoints"]]
     release_index = int(demo["release_index"])
     demo_release_x = float(fk(waypoints[release_index], demo_base)[0])
