@@ -1309,7 +1309,7 @@ _VISUAL_MAX_ATTEMPTS = 10
 # joint-1 nudge (capped at _SERVO_MAX_STEP, total _SERVO_MAX_OFFSET) every
 # _SERVO_SETTLE_TICKS ticks so the compliant joint settles between frames,
 # up to _SERVO_MAX_ITERS nudges.
-_SERVO_TOLERANCE_PX = 12.0
+_SERVO_TOLERANCE_PX = 20.0
 _SERVO_CONFIRM_TICKS = 2
 _SERVO_SETTLE_TICKS = 8
 _SERVO_MAX_STEP = 0.06
