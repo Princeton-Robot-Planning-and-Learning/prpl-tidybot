@@ -429,6 +429,17 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             self._last_gripper_goal = (
                 self._gripper_close_position if float(sim_action[10]) < -0.5 else 0.0
             )
+            if self._cursor != self._gripper_cursor:
+                # First tick at a gripper event: log the tracking residual.
+                # At an OPEN this is the droop measurement — how far the arm
+                # actually sits from the commanded release configuration.
+                gaps = [t - p for t, p in zip(self._targets[self._cursor], perceived)]
+                _logger.info(
+                    "Gripper %s: joint tracking residual %s (distance %.3f).",
+                    "CLOSE" if float(sim_action[10]) < -0.5 else "OPEN",
+                    [round(g, 3) for g in gaps],
+                    self._distance_fn(perceived, self._targets[self._cursor]),
+                )
         action = _build_tidybot_action(
             sim_state,
             target,
