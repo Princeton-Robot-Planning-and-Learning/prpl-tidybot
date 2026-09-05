@@ -1001,6 +1001,23 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                     self._advance_radius,
                     self._progress(perceived),
                 )
+            if (
+                self._ticks_since_advance >= _STUCK_FAIL_TICKS
+                and self._progress(perceived) < self._stall_advance_min_progress
+            ):
+                # Stuck with too little forward progress for the stall-advance
+                # to fire (e.g. the arm wedged against a box wall after a large
+                # lateral correction). Fail fast instead of hanging to
+                # max_iter_total, which would be minutes of no motion.
+                raise ExecutionFailure(
+                    f"{type(self).__name__} wedged at waypoint "
+                    f"{self._cursor + 1}/{len(self._targets)} for "
+                    f"{self._ticks_since_advance} ticks (distance "
+                    f"{self._distance_fn(perceived, self._targets[self._cursor]):.3f}, "
+                    f"progress {self._progress(perceived):.2f}); giving up. A large "
+                    "grasp correction can stretch the arm into a wall or joint "
+                    "limit — re-stage the object closer to its spot."
+                )
 
     def _track_stillness(self, perceived: JointPositions) -> None:
         """Count consecutive ticks on which the perceived joints did not move."""
@@ -1243,9 +1260,12 @@ _VISUAL_MAX_ATTEMPTS = 10
 # up to _SERVO_MAX_ITERS nudges.
 _SERVO_TOLERANCE_PX = 12.0
 _SERVO_CONFIRM_TICKS = 2
-_SERVO_SETTLE_TICKS = 5
+_SERVO_SETTLE_TICKS = 8
 _SERVO_MAX_STEP = 0.06
 _SERVO_MAX_OFFSET = 0.30
+# Ticks a cursor may stall with sub-threshold progress before the walk
+# fails fast (rather than hanging to max_iter_total): ~15 s at 0.1 s/tick.
+_STUCK_FAIL_TICKS = 150
 _SERVO_MAX_ITERS = 25
 # Segment-start recovery (see step): how close (distance_fn metric) the arm
 # must be to the segment's first configuration before the walk starts, and
