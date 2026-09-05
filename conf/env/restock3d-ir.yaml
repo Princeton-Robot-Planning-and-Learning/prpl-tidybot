@@ -192,6 +192,9 @@ pipelines:
         compensate_base_error: ${env.compensate_base_error}
         recover_segment_start: ${env.recover_segment_start}
         gripper_event_tolerance: ${env.gripper_event_tolerance}
+        # Model-FK end-effector logging at every gripper event, for
+        # comparing the model's idea of the gripper height against a ruler.
+        debug_kinematics: true
         visual_lateral_mode: ${env.visual_lateral_mode}
         visual_lateral_sign: ${env.visual_lateral_sign}
         visual_lateral_gain: ${env.visual_lateral_gain}

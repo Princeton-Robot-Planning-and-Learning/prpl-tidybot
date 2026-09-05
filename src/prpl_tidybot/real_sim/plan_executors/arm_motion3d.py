@@ -199,6 +199,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         edge_detector: Callable[[Any], Any] | None = None,
         recover_segment_start: bool = False,
         gripper_event_tolerance: float | None = None,
+        debug_kinematics: bool = False,
     ) -> None:
         super().__init__(robot_name=robot_name)
         if visual_lateral_mode not in ("off", "log", "on"):
@@ -274,6 +275,12 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # whatever it is commanded, so commanding the desired pose directly
         # leaves a steady ~0.1 residual that no amount of waiting removes.
         self._event_integrator: list[float] | None = None
+        # Model-FK logging at gripper events (see _log_event_kinematics):
+        # the discriminator between "the arm is not where it is commanded"
+        # (joint residuals) and "the model disagrees with the metal" (a
+        # ruler vs the logged end-effector height).
+        self._debug_kinematics = debug_kinematics
+        self._fk_env: Any = None
         # Walk-phase integrator for release segments: the deadband also sags
         # the whole level insertion, not just the event at its end, so the
         # slide enters low and only gets lifted at the release. Winds up
@@ -500,13 +507,18 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                 # First tick at a gripper event: log the tracking residual.
                 # At an OPEN this is the droop measurement — how far the arm
                 # actually sits from the commanded release configuration.
-                gaps = [t - p for t, p in zip(self._targets[self._cursor], perceived)]
+                gaps = [
+                    math.atan2(math.sin(t - p), math.cos(t - p))
+                    for t, p in zip(self._targets[self._cursor], perceived)
+                ]
                 _logger.info(
                     "Gripper %s: joint tracking residual %s (distance %.3f).",
                     "CLOSE" if float(sim_action[10]) < -0.5 else "OPEN",
                     [round(g, 3) for g in gaps],
                     self._distance_fn(perceived, self._targets[self._cursor]),
                 )
+                if self._debug_kinematics:
+                    self._log_event_kinematics(sim_state, perceived)
         if _is_gripper_cmd(sim_action) and self._event_integrator is not None:
             # Keep commanding the pushed target through the event and its
             # dwell, so the arm does not relax back off the configuration
@@ -626,6 +638,72 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         cv2.imwrite(str(stem) + ".png", image[:, :, ::-1])
         overlay = render_edge_overlay(image, edges)
         cv2.imwrite(str(stem) + "_overlay.png", overlay[:, :, ::-1])
+
+    def _log_event_kinematics(
+        self, sim_state: ObjectCentricState, perceived: JointPositions
+    ) -> None:
+        """Model-FK end-effector positions at a gripper event.
+
+        Three poses through the model's forward kinematics: the perceived
+        joints (where the model thinks the gripper IS — compare its z
+        against the physical gripper height with a ruler to expose any
+        model-vs-metal kinematic bias), the planned event configuration,
+        and the currently commanded (integrator-pushed) target. Also dumps
+        both integrator states.
+        """
+        try:
+            # Lazy construction: FK needs a kinder sim robot, only worth
+            # building when this debugging is enabled.
+            # pylint: disable=import-outside-toplevel
+            if self._fk_env is None:
+                from kinder.envs.kinematic3d.cylinder_shelf3d import (
+                    ObjectCentricCylinderShelf3DEnv,
+                )
+                from kinder.envs.kinematic3d.utils import (
+                    extend_joints_to_include_fingers,
+                )
+                from pybullet_helpers.geometry import SE2Pose
+
+                self._fk_env = ObjectCentricCylinderShelf3DEnv(
+                    num_cylinders=1, allow_state_access=True
+                )
+                self._fk_extend = extend_joints_to_include_fingers
+                self._fk_se2 = SE2Pose
+            base = _perceived_base(sim_state, self._robot_name)
+
+            def fk(joints: JointPositions) -> list[float]:
+                self._fk_env.robot.set_base(self._fk_se2(*base))
+                self._fk_env.robot.arm.set_joints(self._fk_extend(list(joints[:7])))
+                pose = self._fk_env.robot.arm.get_end_effector_pose()
+                return [round(float(v), 4) for v in pose.position]
+
+            planned = self._targets[self._cursor]
+            pushed = (
+                [d + c for d, c in zip(planned, self._event_integrator)]
+                if self._event_integrator is not None
+                else planned
+            )
+            _logger.info(
+                "EE model-FK at event: perceived %s | planned %s | commanded %s "
+                "| event integrator %s | walk integrator %s. Check the REAL "
+                "gripper height against the perceived z to expose a "
+                "model-vs-metal kinematic bias.",
+                fk(perceived),
+                fk(planned),
+                fk(pushed),
+                (
+                    None
+                    if self._event_integrator is None
+                    else [round(c, 3) for c in self._event_integrator]
+                ),
+                (
+                    None
+                    if self._walk_integrator is None
+                    else [round(c, 3) for c in self._walk_integrator]
+                ),
+            )
+        except Exception:  # pylint: disable=broad-except
+            _logger.exception("EE model-FK debug failed")
 
     def _walk_integrator_reference(self) -> float:
         """The lead the walk integrator treats as healthy (no wind-up)."""
@@ -910,6 +988,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         edge_detector: Callable[[Any], Any] | None = None,
         recover_segment_start: bool = False,
         gripper_event_tolerance: float | None = None,
+        debug_kinematics: bool = False,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -935,6 +1014,7 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             edge_detector=edge_detector,
             recover_segment_start=recover_segment_start,
             gripper_event_tolerance=gripper_event_tolerance,
+            debug_kinematics=debug_kinematics,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")
