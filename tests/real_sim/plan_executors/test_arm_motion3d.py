@@ -1089,3 +1089,31 @@ def test_gripper_event_waits_for_tight_convergence():
     action, sim_action = executor.step(_make_state(arm_conf=list(conf), gripper=0.0))
     assert sim_action[10] == -1.0
     assert action.gripper_goal == pytest.approx(0.9)
+
+
+def test_event_integrator_pushes_command_past_target():
+    """While converging on a gripper event, the commanded target moves past the
+    desired configuration by the accumulated error, so a controller that rests
+    a deadband away from its command still lands ON the desired pose."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        gripper_event_tolerance=0.05,
+        gripper_close_position=0.9,
+    )
+    conf = [0.0, 0.5, 0.0, 1.0, 0.0, -0.5, 0.0]
+    close = np.zeros(11)
+    close[10] = -1.0
+    executor.set_trajectory([(_make_state(arm_conf=list(conf)), close)])
+    # The arm rests below the commanded pose (a positive gap on joint 2).
+    sagged = list(conf)
+    sagged[1] += 0.10
+    action1, sim1 = executor.step(_make_state(arm_conf=sagged, gripper=0.0))
+    action2, sim2 = executor.step(_make_state(arm_conf=sagged, gripper=0.0))
+    assert sim1[10] == 0.0 and sim2[10] == 0.0
+    # The command is pushed past the target, and further on the second tick.
+    assert action1.arm_goal[1] < conf[1]
+    assert action2.arm_goal[1] < action1.arm_goal[1]

@@ -268,6 +268,12 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         # until the arm is within the tighter tolerance.
         self._gripper_event_tolerance = gripper_event_tolerance
         self._gripper_wait_ticks = 0
+        # While converging on an event, the commanded target is pushed past
+        # the desired configuration by the accumulated error (an outer-loop
+        # integrator): the compliant controller rests a deadband away from
+        # whatever it is commanded, so commanding the desired pose directly
+        # leaves a steady ~0.1 residual that no amount of waiting removes.
+        self._event_integrator: list[float] | None = None
         # The base hands over as soon as it is within tolerance, while it is
         # still creeping and the marker-pose stream lags, so the error must
         # be computed from a SETTLED pose: the arm holds until the perceived
@@ -318,6 +324,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._last_gripper_goal = None
         self._confirmed_close_cursor = -1
         self._gripper_wait_ticks = 0
+        self._event_integrator = None
         self._compensation_applied = False
         self._settle_history = []
         self._visual_attempts = 0
@@ -443,14 +450,28 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                 and self._distance_fn(perceived, self._targets[self._cursor])
                 > self._gripper_event_tolerance
             ):
-                # Not converged on the event configuration yet: keep the
-                # carrot on the exact target and defer the gripper command.
+                # Not converged on the event configuration: integrate the
+                # remaining error into the command and defer the gripper.
                 self._gripper_wait_ticks += 1
+                desired = self._targets[self._cursor]
+                if self._event_integrator is None:
+                    self._event_integrator = [0.0] * len(desired)
+                self._event_integrator = [
+                    max(
+                        -_EVENT_INTEGRATOR_CAP,
+                        min(
+                            _EVENT_INTEGRATOR_CAP,
+                            c + _EVENT_INTEGRATOR_GAIN * _wrap(d - p),
+                        ),
+                    )
+                    for c, d, p in zip(self._event_integrator, desired, perceived)
+                ]
+                pushed = [d + c for d, c in zip(desired, self._event_integrator)]
                 hold = sim_action.copy()
                 hold[10] = 0.0
                 action = _build_tidybot_action(
                     sim_state,
-                    target,
+                    pushed,
                     hold,
                     self._robot_name,
                     self._last_gripper_goal,
@@ -473,6 +494,16 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                     [round(g, 3) for g in gaps],
                     self._distance_fn(perceived, self._targets[self._cursor]),
                 )
+        if _is_gripper_cmd(sim_action) and self._event_integrator is not None:
+            # Keep commanding the pushed target through the event and its
+            # dwell, so the arm does not relax back off the configuration
+            # while the gripper acts.
+            target = [
+                d + c
+                for d, c in zip(self._targets[self._cursor], self._event_integrator)
+            ]
+        elif self._event_integrator is not None:
+            self._event_integrator = None
         action = _build_tidybot_action(
             sim_state,
             target,
@@ -976,6 +1007,10 @@ _RECOVER_MAX_TICKS = 60
 # Tick budget for converging on a gripper event configuration before the
 # command issues anyway (with the residual logged either way).
 _GRIPPER_EVENT_MAX_WAIT = 50
+# Event-convergence integrator: per-tick gain on the remaining joint error
+# and the per-joint cap on the accumulated push (rad).
+_EVENT_INTEGRATOR_GAIN = 0.4
+_EVENT_INTEGRATOR_CAP = 0.15
 
 
 def _absolute_target(
