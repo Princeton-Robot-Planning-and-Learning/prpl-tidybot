@@ -146,3 +146,19 @@ def test_only_pick_index_slices_one_pick_and_place():
     assert sum(1 for g in gripper if g > 0.5) == 1
     # The slice is a strict subset of the full plan.
     assert 50 < len(pairs) < 400
+
+
+def test_place_demo_replaces_top_board_placements():
+    """With a place demo, the three top-board (layer-1) placements are replaced
+    by the demonstrated motion; the plan still has six releases (three demo,
+    three model) and stays base-XOR-arm per pair."""
+    demo = str(Path(__file__).resolve().parent / "fixtures" / "place_demo.json")
+    agent = InjectedPlanAgent(_FIXTURE, seed=0, place_demo_path=demo)
+    agent.reset(_make_obs((1.48, 0.67, 1.54), [0.0] * 7), {})
+    pairs = agent.plan()
+    gripper = [float(a[10]) for _, a in pairs]
+    assert sum(1 for g in gripper if g > 0.5) == 6
+    for _, action in pairs:
+        base_moves = bool(np.abs(action[:3]).max() > 1e-4)
+        arm_moves = bool(np.abs(action[3:]).max() > 1e-4)
+        assert not (base_moves and arm_moves)

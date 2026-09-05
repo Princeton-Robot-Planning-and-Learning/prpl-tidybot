@@ -32,7 +32,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
-from kinder.envs.kinematic3d.cylinder_shelf3d import CylinderShelf3DEnv
+from kinder.envs.kinematic3d.cylinder_shelf3d import (
+    CylinderShelf3DEnv,
+    ObjectCentricCylinderShelf3DEnv,
+)
+from kinder.envs.kinematic3d.utils import extend_joints_to_include_fingers
 from kinder_bilevel_planning import restock_scene
 from kinder_bilevel_planning.agent import AgentFailure
 from kinder_bilevel_planning.env_models import create_bilevel_planning_models
@@ -43,7 +47,10 @@ from kinder_bilevel_planning.injection import (
 )
 from numpy.typing import NDArray
 from prpl_utils.planning_agent import PlanningAgent
+from pybullet_helpers.geometry import SE2Pose
 from relational_structs import ObjectCentricState
+
+from prpl_tidybot.place_from_demo import load_demo, rewrite_places_with_demo
 
 # Same threshold the plan executor uses to classify a pair as base or arm
 # motion; settle pairs below it would be no-ops.
@@ -64,6 +71,7 @@ class InjectedPlanAgent(
         robot_name: str = "robot",
         settle_first: bool = True,
         only_pick_index: int | None = None,
+        place_demo_path: str | None = None,
     ) -> None:
         super().__init__(seed)
         self._plan_seed = seed
@@ -77,6 +85,13 @@ class InjectedPlanAgent(
         # pick's segment; the settle pairs drive the robot from wherever
         # it stands to the slice's start. For testing one can at a time.
         self._only_pick_index = only_pick_index
+        # A teleoperated place demonstration (see place_from_demo): when set,
+        # every top-board (layer-1) placement is replaced by the demonstrated
+        # motion, base-shifted laterally per can. Bottom-board placements keep
+        # the refined plan.
+        self._place_demo = (
+            load_demo(place_demo_path) if place_demo_path is not None else None
+        )
         self._config = restock_scene.real_restock_config()
         self._check_ir_objects()
         # Filled by the lazy planning pass on the first reset.
@@ -166,17 +181,55 @@ class InjectedPlanAgent(
                 samples_per_step=self._samples_per_step,
                 timeout=self._planning_timeout,
             )
+            if plan is None:
+                raise AgentFailure("Failed to refine the injected IR skeleton")
+            actions = _collapse_gripper_runs(
+                [np.asarray(a, dtype=float).ravel() for a in plan.actions]
+            )
+            states = list(plan.states)
+            if self._place_demo is not None:
+                states, actions = self._apply_place_demo(states, actions)
         finally:
             env.close()
-        if plan is None:
-            raise AgentFailure("Failed to refine the injected IR skeleton")
-        actions = _collapse_gripper_runs(
-            [np.asarray(a, dtype=float).ravel() for a in plan.actions]
-        )
-        states = list(plan.states)
         if self._only_pick_index is not None:
             states, actions = _slice_pick(states, actions, self._only_pick_index)
         return states, actions
+
+    def _apply_place_demo(
+        self,
+        states: list[ObjectCentricState],
+        actions: list[NDArray[np.floating]],
+    ) -> tuple[list[ObjectCentricState], list[NDArray[np.floating]]]:
+        """Replace top-board (layer-1) placements with the demonstration."""
+        shelf_x = float(self._config.shelf_pose.position[0])
+        place_cylinders = [
+            args[1] for op, args in self._ir["skeleton"] if op == "Place"
+        ]
+        targets_x: list[float | None] = []
+        for cyl in place_cylinders:
+            placement = self._ir["placements"][cyl]
+            targets_x.append(
+                shelf_x + placement["x_offset"] if placement["layer"] == 1 else None
+            )
+        fk_env = ObjectCentricCylinderShelf3DEnv(
+            num_cylinders=len(self._config.cylinder_heights),
+            config=self._config,
+            allow_state_access=True,
+        )
+        try:
+
+            def fk(joints, base):
+                fk_env.robot.set_base(SE2Pose(*base))
+                fk_env.robot.arm.set_joints(
+                    extend_joints_to_include_fingers(list(joints[:7]))
+                )
+                return list(fk_env.robot.arm.get_end_effector_pose().position)
+
+            return rewrite_places_with_demo(
+                states, actions, targets_x, self._place_demo, fk, self._robot_name
+            )
+        finally:
+            fk_env.close()
 
     def _settle_pairs(
         self, obs: ObjectCentricState

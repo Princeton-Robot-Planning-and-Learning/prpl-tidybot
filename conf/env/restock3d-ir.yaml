@@ -27,6 +27,12 @@ ir_path: ???
 # null runs the whole plan. E.g. `env.only_pick=1` for the second can.
 only_pick: null
 
+# A teleoperated place demonstration (scripts/record_place_waypoints.py):
+# when set, every top-board placement replays the demonstrated arm motion,
+# base-shifted laterally per can, instead of the model's insertion. null
+# keeps the model place.
+place_demo_path: null
+
 # The agent replaces the default bilevel planner (see pipeline.py). It plans
 # once on the first reset (~10-60 s), then serves the trajectory one-shot,
 # prepending unplanned settle pairs from the perceived start configuration
@@ -36,6 +42,7 @@ agent:
   ir_path: ${env.ir_path}
   seed: ${seed}
   only_pick_index: ${env.only_pick}
+  place_demo_path: ${env.place_demo_path}
 
 # The boxed real-restock scene, single-sourced from kinder-bilevel-planning;
 # used by the sim pipeline below (the agent builds its own copy internally).
