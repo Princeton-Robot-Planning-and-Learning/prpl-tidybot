@@ -1029,3 +1029,23 @@ def test_injected_edge_detector_replaces_opencv():
     assert after[0] - before[0] == pytest.approx(
         0.0003 * (229.5 - 159.5) / 0.8, abs=1e-6
     )
+
+
+def test_base_hold_target_latched_per_segment():
+    """During an arm segment the commanded base target stays at the segment's
+    first perceived pose even as the perceived pose wanders (marker noise
+    must not drive the base while the arm moves)."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    executor = StreamingArmMotion3DPlanExecutor(distance_fn=create_kinova_distance_fn())
+    reach = np.zeros(11)
+    reach[3] = 0.5
+    start = _make_state(base_xytheta=(1.0, 2.0, 0.5))
+    executor.set_trajectory([(start, reach)])
+    first, _ = executor.step(start)
+    wandered = _make_state(base_xytheta=(1.013, 1.991, 0.507))
+    later, _ = executor.step(wandered)
+    assert later.base_pose_target_map.x == first.base_pose_target_map.x == 1.0
+    assert later.base_pose_target_map.y == first.base_pose_target_map.y == 2.0

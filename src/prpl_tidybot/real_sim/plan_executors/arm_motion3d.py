@@ -38,6 +38,7 @@ import math
 from pathlib import Path
 from typing import Any, Callable
 
+import cv2  # type: ignore[import-untyped]
 import numpy as np
 from kinder_models.structs import SkillCall
 from numpy.typing import NDArray
@@ -47,7 +48,10 @@ from spatialmath import SE2
 
 from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.structs import TidyBotAction
-from prpl_tidybot.visual_servo.cylinder_edges import detect_cylinder_edges
+from prpl_tidybot.visual_servo.cylinder_edges import (
+    detect_cylinder_edges,
+    render_edge_overlay,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -274,6 +278,11 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._compensation_applied: bool = False
         self._settle_history: list[tuple[float, float, float]] = []
         self._visual_attempts: int = 0
+        # The base hold target for this segment, latched at the first tick:
+        # commanding the per-tick perceived pose instead would make the base
+        # servo chase marker noise for the whole arm phase (issue #65 in
+        # miniature), visible as base twitching while the arm moves.
+        self._held_base_goal: tuple[float, float, float] | None = None
 
     def _on_set_trajectory(self) -> None:
         self._targets = [
@@ -300,6 +309,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._compensation_applied = False
         self._settle_history = []
         self._visual_attempts = 0
+        self._held_base_goal = None
 
     def step(
         self, sim_state: ObjectCentricState
@@ -308,6 +318,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             raise RuntimeError(
                 "StreamingArmMotion3DPlanExecutor.step called with no trajectory"
             )
+        if self._held_base_goal is None:
+            self._held_base_goal = _perceived_base(sim_state, self._robot_name)
         if (
             self._compensate_base_error or self._visual_applicable()
         ) and not self._compensation_applied:
@@ -324,6 +336,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                     self._robot_name,
                     self._last_gripper_goal,
                     self._gripper_close_position,
+                    base_goal=self._held_base_goal,
                 )
                 self._tick_count += 1
                 return action, hold
@@ -339,6 +352,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                         self._robot_name,
                         self._last_gripper_goal,
                         self._gripper_close_position,
+                        base_goal=self._held_base_goal,
                     )
                     self._tick_count += 1
                     return action, hold
@@ -383,6 +397,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             self._robot_name,
             self._last_gripper_goal,
             self._gripper_close_position,
+            base_goal=self._held_base_goal,
         )
         self._tick_count += 1
         # Advance past a gripper pair after gripper_dwell_ticks extra ticks.
@@ -456,10 +471,6 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
     def _dump_visual_frame(self, image: Any, edges: Any) -> None:
         """Save the raw wrist frame (and edge overlay when detected) for offline
         detector tuning."""
-        import cv2  # type: ignore[import-untyped]
-
-        from prpl_tidybot.visual_servo.cylinder_edges import render_edge_overlay
-
         directory = Path(self._visual_debug_dir)
         directory.mkdir(parents=True, exist_ok=True)
         self._visual_frame_count += 1
@@ -902,8 +913,13 @@ def _build_tidybot_action(
     robot_name: str,
     last_gripper_goal: float | None = None,
     gripper_close_position: float = 1.0,
+    base_goal: tuple[float, float, float] | None = None,
 ) -> TidyBotAction:
     """Pack the commanded arm goal + held base pose + gripper into a TidyBotAction.
+
+    ``base_goal`` is the segment-latched base hold target; without it the
+    perceived pose is used (legacy behaviour: the target wanders with marker
+    noise).
 
     For "hold" gripper commands (|action[10]| <= 0.5), uses ``last_gripper_goal``
     as the hold target when provided (the last explicit open/close command issued
@@ -912,11 +928,14 @@ def _build_tidybot_action(
     retract after a gripper-close pair instead of reverting to perceived state.
     """
     robot = sim_state.get_object_from_name(robot_name)
-    base_goal = SE2(
-        x=float(sim_state.get(robot, "pos_base_x")),
-        y=float(sim_state.get(robot, "pos_base_y")),
-        theta=float(sim_state.get(robot, "pos_base_rot")),
-    )
+    if base_goal is not None:
+        base_se2 = SE2(x=base_goal[0], y=base_goal[1], theta=base_goal[2])
+    else:
+        base_se2 = SE2(
+            x=float(sim_state.get(robot, "pos_base_x")),
+            y=float(sim_state.get(robot, "pos_base_y")),
+            theta=float(sim_state.get(robot, "pos_base_rot")),
+        )
     hold_finger = (
         last_gripper_goal
         if last_gripper_goal is not None
@@ -925,7 +944,7 @@ def _build_tidybot_action(
     gripper_goal = _gripper_target(hold_finger, sim_action, gripper_close_position)
     return TidyBotAction(
         arm_goal=list(arm_target),
-        base_pose_target_map=base_goal,
+        base_pose_target_map=base_se2,
         gripper_goal=gripper_goal,
     )
 
