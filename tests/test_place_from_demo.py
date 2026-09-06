@@ -41,12 +41,10 @@ def _arm_action(delta7, release=False):
     return a
 
 
-def test_rewrite_densifies_carry_to_first_waypoint():
-    """The carry pose to the demo's first waypoint is walked in steps no larger
-    than the densification limit, so the compliant controller never gets a single
-    large jump (the FOLLOWING_ERROR cause)."""
-    carry_joints = [0.0, 0.5, 0.0, 1.0, 0.0, 0.3, 0.0]
-    # The demo's first waypoint is far from the carry pose on joint 2 (index 1).
+def test_rewrite_splices_demo_and_reaches_release():
+    """The splice replaces the place with the demonstrated arm motion: exactly
+    one release, and summing the arm deltas from the demo's first waypoint
+    reaches the demonstrated release waypoint."""
     demo_w0 = [0.0, 1.7, 0.0, 1.0, 0.0, 0.3, 0.0]
     demo_release = [0.0, 1.9, 0.0, 1.2, 0.0, 0.3, 0.0]
     demo = {
@@ -55,52 +53,38 @@ def test_rewrite_densifies_carry_to_first_waypoint():
         "release_index": 1,
     }
 
-    # A trajectory whose single place is a carry state, one arm step, a release.
-    carry_state = _robot_state((0.9, 0.0, 0.0), carry_joints)
+    carry_state = _robot_state((0.9, 0.0, 0.0), [0.0, 0.5, 0.0, 1.0, 0.0, 0.3, 0.0])
     states = [carry_state, carry_state, carry_state]
-    actions = [
-        _arm_action([0.0] * 7),
-        _arm_action([0.0] * 7, release=True),
-    ]
+    actions = [_arm_action([0.0] * 7), _arm_action([0.0] * 7, release=True)]
 
-    out_states, out_actions = rewrite_places_with_demo(
-        states,
-        actions,
-        place_targets_x=[1.5],
-        demo=demo,
-        fk=_fk,
+    _, out_actions = rewrite_places_with_demo(
+        states, actions, place_targets_x=[1.5], demo=demo, fk=_fk
     )
 
-    # Every arm step in the spliced result stays within the densification limit.
-    max_step = 0.0
-    releases = 0
-    for a in out_actions:
-        arm = np.asarray(a)[3:10]
-        base = np.asarray(a)[0:3]
-        if np.any(np.abs(base) > 1e-4):
-            continue  # base drive pair
-        max_step = max(max_step, float(np.max(np.abs(arm))))
-        releases += int(float(a[10]) > 0.5)
-    assert max_step <= 0.03 + 1e-9, max_step
+    releases = sum(int(float(a[10]) > 0.5) for a in out_actions)
     assert releases == 1
 
-    # The arm actually starts from the carry pose: summing arm deltas from the
-    # carry joints reaches the demo's first waypoint, then the release waypoint.
-    joints = np.array(carry_joints)
-    reached_w0 = False
+    # The arm walk starts at the demo's first waypoint; accumulating the deltas
+    # up to the release action reaches the demonstrated release waypoint (the
+    # demo defines the placement, no lead-in added). After the release the walk
+    # retraces to the start, so only check up to the release.
+    joints = np.array(demo_w0)
+    reached_release_at_open = False
     for a in out_actions:
         if np.any(np.abs(np.asarray(a)[0:3]) > 1e-4):
             continue
         joints = joints + np.asarray(a)[3:10]
-        if np.allclose(joints, demo_w0, atol=1e-6):
-            reached_w0 = True
-    assert reached_w0, "lead-in never lands on the demo's first waypoint"
+        if float(a[10]) > 0.5:
+            reached_release_at_open = np.allclose(joints, demo_release, atol=1e-6)
+    assert reached_release_at_open, joints
 
 
-def test_rewrite_unwraps_lead_in_to_carry_branch():
-    """When a joint's demo value differs from the carry value by ~2*pi, the
-    lead-in is unwrapped onto the carry branch instead of sweeping the long way
-    around: no intermediate command is more than pi from the carry pose."""
+def test_rewrite_unwraps_demo_onto_carry_branch():
+    """When a joint's demo value differs from the carry value by ~2*pi, the demo
+    path is unwrapped onto the carry pose's branch, so the executor's transition
+    from the carry pose to the first waypoint does not sweep the long way
+    around: the first arm target stays within pi of the carry pose on that
+    joint."""
     carry_joints = [3.0, 0.5, 0.0, 1.0, 0.0, 0.3, 0.0]
     # Same physical joint-1 angle as carry, but expressed ~2*pi lower.
     demo_w0 = [3.0 - 2 * math.pi, 0.6, 0.0, 1.0, 0.0, 0.3, 0.0]
@@ -118,10 +102,13 @@ def test_rewrite_unwraps_lead_in_to_carry_branch():
         states, actions, place_targets_x=[1.5], demo=demo, fk=_fk
     )
 
-    joints = np.array(carry_joints)
-    for a in out_actions:
-        if np.any(np.abs(np.asarray(a)[0:3]) > 1e-4):
-            continue
-        joints = joints + np.asarray(a)[3:10]
-        # Joint 1 never departs from the carry branch by more than a step.
-        assert abs(joints[0] - 3.0) <= 0.03 + 1e-9, joints[0]
+    # The first arm pair's state holds the (unwrapped) first target; joint 1 must
+    # be on the carry branch (~3.0), not ~2*pi away at the raw demo value.
+    robot = out_states[0].get_object_from_name("robot")
+    first_arm_state = next(
+        s
+        for s, a in zip(out_states, out_actions)
+        if not np.any(np.abs(np.asarray(a)[0:3]) > 1e-4)
+    )
+    j1 = float(first_arm_state.get(robot, "joint_1"))
+    assert abs(j1 - 3.0) <= math.pi, j1

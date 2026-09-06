@@ -221,28 +221,28 @@ def rewrite_places_with_demo(
         place_configs = configs
         if abs(delta_z) > 1e-4 and shift_config is not None:
             place_configs = [list(shift_config(c, delta_z)) for c in configs]
-        # Ramp the arm from the carry pose to the demo's first waypoint rather
-        # than commanding it in a single step. The compliant controller cannot
-        # track a large jump (joint 2, the shoulder, in particular) and trips a
-        # FOLLOWING_ERROR fault; densify this lead-in to _JOINT_STEP like the
-        # rest of the demo path. Unwrap the demo path onto the carry pose's
-        # branch first, per joint, so no joint whose demo value differs from the
-        # carry value by ~2*pi sweeps the long way around.
+        # Unwrap the demo path onto the carry pose's branch, per joint, so the
+        # arm's transition from the carry pose to the demo's first waypoint does
+        # not sweep the long way around a joint whose demo value differs from the
+        # carry value by ~2*pi. The carrot executor tracks that transition as one
+        # segment; do not densify it into a sub-advance_radius lead-in, whose
+        # many short segments let the cursor outrun the deadband-lagged arm and
+        # jam (path progress goes sharply negative, the stall-recovery refuses to
+        # advance, and the wedged arm winds up torque into a FOLLOWING_ERROR).
         robot = carry_state.get_object_from_name(robot_name)
-        carry_joints = [
-            float(carry_state.get(robot, f"joint_{j + 1}")) for j in range(7)
-        ]
         offsets = [
-            round((carry_joints[j] - place_configs[0][j]) / (2 * math.pi)) * 2 * math.pi
+            round(
+                (float(carry_state.get(robot, f"joint_{j + 1}")) - place_configs[0][j])
+                / (2 * math.pi)
+            )
+            * 2
+            * math.pi
             for j in range(7)
         ]
         place_configs = [[c[j] + offsets[j] for j in range(7)] for c in place_configs]
-        lead_in = _interpolate_joints(carry_joints, place_configs[0])
-        full_configs = [carry_joints] + lead_in + place_configs[1:]
-        splice_release_index = len(lead_in) + release_config_index
         base_pairs = _base_drive_pairs(carry_state, base_target, robot_name)
         arm_pairs = _arm_pairs(
-            base_target, full_configs, carry_state, robot_name, splice_release_index
+            base_target, place_configs, carry_state, robot_name, release_config_index
         )
         new_pairs = base_pairs + arm_pairs
         # The trailing state (arm_end + 1) is preserved as the segment's exit
