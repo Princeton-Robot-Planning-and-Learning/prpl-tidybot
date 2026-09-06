@@ -787,6 +787,40 @@ def test_stall_needs_progress_and_stillness():
     assert real_action.gripper_goal == pytest.approx(0.4)
 
 
+def test_release_stall_auto_advances_without_prompt(caplog):
+    """Stalled short of a release with the arm within reach of it, the cursor
+    advances to the release automatically (no operator prompt) so the gripper
+    opens -- the deadband case that wedged the placement one short of release."""
+    from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
+        _STALL_GRASP_PROMPT_TICKS,
+    )
+
+    prompts: list[str] = []
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.05,
+        stall_advance_ticks=5,
+        stall_advance_min_progress=0.5,
+        confirm_stall_grasp=True,
+        prompt_fn=lambda msg: prompts.append(msg) or "",
+    )
+    # Targets 0.1..0.4, then a gripper OPEN at 0.4, then a retract to 0.3.
+    executor.set_trajectory(_approach_then_open(4))
+    # Stuck at 0.31: progress 0.1 on the 0.3->0.4 segment (below 0.5, so the
+    # ordinary stall-arrival never fires) but only 0.09 from the release pose.
+    stuck = _make_state(arm_conf=[0.31, 0, 0, 0, 0, 0, 0])
+    fired = None
+    with caplog.at_level(logging.WARNING):
+        for _ in range(_STALL_GRASP_PROMPT_TICKS + 2):
+            action, _ = executor.step(stuck)
+            fired = action.gripper_goal
+    assert fired == 0.0, "release was never issued"
+    assert prompts == [], "a release must not prompt the operator"
+    assert any(
+        "advancing so the event convergence" in r.getMessage() for r in caplog.records
+    )
+
+
 def test_confirm_grasp_closes_prompts_once_per_close():
     """With confirm_grasp_closes, the executor prompts exactly once per gripper
     CLOSE event (with the arm holding at the grasp pose) and never for opens."""
