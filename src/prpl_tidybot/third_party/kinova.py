@@ -8,6 +8,8 @@
 # mypy: ignore-errors
 # pylint: disable=all
 
+import collections
+import json
 import math
 import os
 import subprocess
@@ -18,6 +20,17 @@ import numpy as np
 import pinocchio as pin
 
 from prpl_tidybot.third_party.utils import create_pid_file
+
+# When the arm faults (the red-light condition) the cause is over by the time
+# the fault is read back out of band. The cyclic loop keeps the last
+# _FAULT_LOG_TICKS ticks (~0.5 s at 1 kHz) of per-joint commanded-vs-measured
+# state in a ring buffer and, the instant the firmware reports a fault, writes
+# it to _FAULT_LOG_DIR/arm_fault_<timestamp>.json so we can see which joint
+# diverged and by how much right before the trip. Disable with
+# PRPL_ARM_FAULT_LOG=0.
+_FAULT_LOG_TICKS = 500
+_FAULT_LOG_ENABLED = os.environ.get("PRPL_ARM_FAULT_LOG", "1") != "0"
+_FAULT_LOG_DIR = os.environ.get("PRPL_ARM_FAULT_LOG_DIR", "/tmp")
 
 
 def _import_kortex():
@@ -331,6 +344,11 @@ class TorqueControlledArm:
         self.cyclic_running = True
         failed_cyclic_count = 0
 
+        # Ring buffer and controller handle for fault diagnostics.
+        controller = getattr(control_callback, "__self__", None)
+        fault_log = collections.deque(maxlen=_FAULT_LOG_TICKS)
+        fault_dumped = False
+
         # Update state before entering loop
         self.update_state()
 
@@ -396,7 +414,93 @@ class TorqueControlledArm:
                 # Update robot state
                 self.update_state()
 
+                if _FAULT_LOG_ENABLED and not fault_dumped:
+                    fault_dumped = self._record_and_check_fault(
+                        fault_log, controller, current_command, t_now
+                    )
+
         self.cyclic_running = False
+
+    def _record_and_check_fault(self, fault_log, controller, current_command, t_now):
+        """Append this tick to the ring buffer; dump it if the arm has faulted.
+
+        This runs inside the 1 kHz cyclic loop, so the per-tick path only reads
+        cheap integer fault flags and appends array copies; the expensive
+        serialization happens once, on the tick a fault is first seen. Returns
+        True once a dump has been written so the caller stops checking.
+        """
+        actuators = self.base_feedback.actuators
+        faulted = False
+        for i in range(self.actuator_count):
+            if actuators[i].fault_bank_a or actuators[i].fault_bank_b:
+                faulted = True
+                break
+
+        # Desired joint position the controller is steering toward this tick
+        # (OTG output), and its final target; the gap to the measured position
+        # is the tracking lag that a FOLLOWING_ERROR fault trips on.
+        if controller is not None and getattr(controller, "q_d", None) is not None:
+            q_des = controller.q_d.copy()
+            q_target = controller.otg_inp.target_position.copy()
+        else:
+            q_des = None
+            q_target = None
+        fault_log.append(
+            (
+                t_now,
+                self.q.copy(),
+                self.dq.copy(),
+                self.tau.copy(),
+                current_command.copy(),
+                q_des,
+                q_target,
+                tuple(int(a.fault_bank_a) for a in actuators),
+                tuple(int(a.fault_bank_b) for a in actuators),
+            )
+        )
+        if not faulted:
+            return False
+
+        which = [
+            i + 1
+            for i in range(self.actuator_count)
+            if actuators[i].fault_bank_a or actuators[i].fault_bank_b
+        ]
+        path = os.path.join(
+            _FAULT_LOG_DIR, f"arm_fault_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        try:
+            records = []
+            for t, q, dq, tau, cur, qd, qt, fa, fb in fault_log:
+                records.append(
+                    {
+                        "t": t,
+                        "q_meas": q.tolist(),
+                        "dq_meas": dq.tolist(),
+                        "tau_meas": tau.tolist(),
+                        "current_cmd": cur.tolist(),
+                        "q_des": None if qd is None else qd.tolist(),
+                        "q_target": None if qt is None else qt.tolist(),
+                        "fault_bank_a": list(fa),
+                        "fault_bank_b": list(fb),
+                    }
+                )
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(records, f)
+            print(
+                f"Arm faulted on joint(s) {which}; wrote {len(records)} "
+                f"ticks of pre-fault state to {path}"
+            )
+            last = records[-1]
+            if last["q_des"] is not None:
+                errs = [
+                    f"j{i + 1}={math.degrees(last['q_des'][i] - last['q_meas'][i]):+.1f}deg"
+                    for i in range(self.actuator_count)
+                ]
+                print("  desired-minus-measured at fault: " + " ".join(errs))
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"Failed to write arm fault log: {exc}")
+        return True
 
     def stop_cyclic(self):
         # Kill cyclic thread
