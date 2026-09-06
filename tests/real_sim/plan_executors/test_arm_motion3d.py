@@ -9,6 +9,8 @@ Production wires in pybullet-helpers' weighted joint distance.
 """
 
 import logging
+import math
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -783,3 +785,525 @@ def test_stall_needs_progress_and_stillness():
         moving = _make_state(arm_conf=[0.36 + 0.006 * i, 0, 0, 0, 0.2, 0, 0])
         real_action, _ = executor.step(moving)
     assert real_action.gripper_goal == pytest.approx(0.4)
+
+
+def test_stall_prompts_then_fires_gripper_ahead():
+    """Stalled short of a gripper (open) waypoint, the executor prompts the
+    operator; on the (mocked) Enter it jumps the cursor to the gripper waypoint
+    and fires it."""
+    from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
+        _STALL_GRASP_PROMPT_TICKS,
+    )
+
+    prompts: list[str] = []
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.05,
+        stall_advance_ticks=5,
+        stall_advance_min_progress=0.5,
+        confirm_stall_grasp=True,
+        prompt_fn=lambda msg: prompts.append(msg) or "",
+    )
+    # Targets 0.1..0.4, then a gripper OPEN at 0.4, then a retract to 0.3.
+    executor.set_trajectory(_approach_then_open(4))
+    stuck = _make_state(arm_conf=[0.31, 0, 0, 0, 0, 0, 0])
+    fired = None
+    for _ in range(_STALL_GRASP_PROMPT_TICKS + 2):
+        action, _ = executor.step(stuck)
+        fired = action.gripper_goal
+    assert len(prompts) == 1
+    assert "fire the gripper OPEN" in prompts[0]
+    assert fired == 0.0, "release was never issued after the prompt"
+
+
+def test_stall_with_no_gripper_prompts_to_skip_segment():
+    """Stalled in a pure motion segment (no gripper ahead, e.g. the carry), the
+    executor prompts to skip to the segment end and, on the mocked Enter, jumps
+    the cursor there so the segment can complete instead of wedging."""
+    from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
+        _STALL_GRASP_PROMPT_TICKS,
+    )
+
+    prompts: list[str] = []
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.05,
+        arrival_tolerance=0.4,
+        stall_advance_ticks=5,
+        stall_advance_min_progress=0.5,
+        confirm_stall_grasp=True,
+        prompt_fn=lambda msg: prompts.append(msg) or "",
+    )
+    executor.set_trajectory(_joint1_chain(6))  # 0.1 .. 0.6, no gripper event
+    # Stuck at 0.35: past waypoint 0.3, short of 0.4, progress 0.5-ish but the
+    # remaining waypoints keep the cursor from advancing to the end.
+    stuck = _make_state(arm_conf=[0.35, 0, 0, 0, 0.3, 0, 0])
+    for _ in range(_STALL_GRASP_PROMPT_TICKS + 2):
+        executor.step(stuck)
+    assert len(prompts) == 1
+    assert "skip to the end of this segment" in prompts[0]
+    # The cursor is now at the last waypoint.
+    assert executor._cursor == len(executor._targets) - 1
+
+
+def test_confirm_grasp_closes_prompts_once_per_close():
+    """With confirm_grasp_closes, the executor prompts exactly once per gripper
+    CLOSE event (with the arm holding at the grasp pose) and never for opens."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    prompts: list[str] = []
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        gripper_dwell_ticks=2,
+        confirm_grasp_closes=True,
+        prompt_fn=lambda msg: prompts.append(msg) or "",
+    )
+    state = _make_state()
+    close = np.zeros(11)
+    close[10] = -1.0
+    open_cmd = np.zeros(11)
+    open_cmd[10] = 1.0
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    executor.set_trajectory(
+        [(state, close), (state, reach), (state, open_cmd), (state, reach)]
+    )
+    for _ in range(30):
+        if executor.done(state):
+            break
+        executor.step(state)
+    # One prompt for the close (despite the dwell holding the cursor there
+    # for several ticks); none for the open.
+    assert len(prompts) == 1
+    assert "CLOSE" in prompts[0]
+
+
+def test_base_error_compensation_recovers_ee_position():
+    """With compensate_base_error, a lateral/yaw base staging error is largely
+    cancelled: the corrected joints put the end effector (checked with the
+    kinder robot model's forward kinematics) markedly closer to the planned
+    map-frame position than the uncorrected ones."""
+    import math
+
+    import kinder
+    from kinder.envs.kinematic3d.cylinder_shelf3d import (
+        ObjectCentricCylinderShelf3DEnv,
+    )
+    from kinder.envs.kinematic3d.utils import extend_joints_to_include_fingers
+    from kinder_models.kinematic3d.constants import HOME_JOINT_POSITIONS
+    from kinder_models.kinematic3d.cylinder_shelf3d.parameterized_skills import (
+        _solve_planar_joints,
+    )
+    from pybullet_helpers.geometry import SE2Pose
+
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    kinder.register_all_environments()
+    sim = ObjectCentricCylinderShelf3DEnv(num_cylinders=1, allow_state_access=True)
+    arm = sim.robot.arm
+
+    def fk(base, joints):
+        sim.robot.set_base(SE2Pose(*base))
+        arm.set_joints(extend_joints_to_include_fingers(list(joints)))
+        return np.array(arm.get_end_effector_pose().position)
+
+    planned_base = (1.0, 0.5, 1.2)
+    sim.robot.set_base(SE2Pose(*planned_base))
+    reach_target = np.array(
+        [
+            planned_base[0] + 0.75 * math.cos(planned_base[2]),
+            planned_base[1] + 0.75 * math.sin(planned_base[2]),
+            0.45,
+        ]
+    )
+    joints = _solve_planar_joints(
+        arm, reach_target, 0.79, list(HOME_JOINT_POSITIONS[:7])
+    )
+    assert joints is not None
+    target_ee = fk(planned_base, joints)
+
+    # A lateral base staging error (2 cm perpendicular to the arm plane,
+    # plus 0.02 rad of yaw) — the component the joint-1 correction targets;
+    # forward error is deliberately excluded (it is absorbed by the grasp
+    # and place standoffs, not corrected).
+    lateral = (-math.sin(planned_base[2]), math.cos(planned_base[2]))
+    actual_base = (
+        planned_base[0] + 0.02 * lateral[0],
+        planned_base[1] + 0.02 * lateral[1],
+        planned_base[2] + 0.02,
+    )
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        compensate_base_error=True,
+        compensation_reach=0.8,
+    )
+    planned_state = _make_state(base_xytheta=planned_base, arm_conf=list(joints))
+    action = np.zeros(11)
+    executor.set_trajectory([(planned_state, action)])
+    perceived_state = _make_state(base_xytheta=actual_base, arm_conf=list(joints))
+    # The correction waits for the perceived base pose to be stable for a few
+    # consecutive ticks before it is computed.
+    for _ in range(6):
+        executor.step(perceived_state)
+    corrected = executor._targets[0]  # pylint: disable=protected-access
+
+    err_uncorrected = np.linalg.norm((fk(actual_base, joints) - target_ee)[:2])
+    err_corrected = np.linalg.norm((fk(actual_base, corrected) - target_ee)[:2])
+    assert err_uncorrected > 0.015
+    assert err_corrected < 0.6 * err_uncorrected
+
+
+def _grasp_segment_executor(mode: str, image: np.ndarray):
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+    from prpl_tidybot.visual_servo.image_sources import SequenceImageSource
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        visual_lateral_mode=mode,
+        image_source=SequenceImageSource([image] * 20),
+        visual_lateral_gain=0.0003,
+        visual_lateral_sign=1.0,
+        compensation_reach=0.8,
+    )
+    state = _make_state()
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    close = np.zeros(11)
+    close[10] = -1.0
+    executor.set_trajectory([(state, reach), (state, close)])
+    return executor, state
+
+
+def test_servo_tolerance_tight_for_steep_grasp():
+    """The servo holds the tight tolerance for a steep (top) grasp and the loose
+    one for a shallow (side) grasp, chosen from the grasp's gripper pitch."""
+    import types
+
+    from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
+        _SERVO_TOLERANCE_PX,
+        _SERVO_TOLERANCE_PX_STEEP,
+    )
+
+    def _tolerance_for_pitch(quat):
+        executor, state = _grasp_segment_executor("servo", np.zeros((1, 1, 3)))
+        # Install a fake FK env so _ensure_fk_env is a no-op and the grasp pose
+        # returns the chosen orientation.
+        pose = types.SimpleNamespace(
+            orientation=np.array(quat), position=[0.0, 0.0, 0.0]
+        )
+        arm = types.SimpleNamespace(
+            set_joints=lambda j: None, get_end_effector_pose=lambda: pose
+        )
+        executor._fk_env = types.SimpleNamespace(
+            robot=types.SimpleNamespace(set_base=lambda p: None, arm=arm)
+        )
+        executor._fk_se2 = lambda *a: None
+        executor._fk_extend = lambda j: j
+        executor._set_servo_tolerance(state)
+        return executor._servo_tolerance_px
+
+    # Rotation about Y by 135 deg -> gripper z-axis pitched 45 deg down (steep).
+    steep = [0.0, math.sin(math.radians(67.5)), 0.0, math.cos(math.radians(67.5))]
+    # Rotation about Y by 105 deg -> 15 deg down (shallow side grasp).
+    shallow = [0.0, math.sin(math.radians(52.5)), 0.0, math.cos(math.radians(52.5))]
+    assert _tolerance_for_pitch(steep) == _SERVO_TOLERANCE_PX_STEEP
+    assert _tolerance_for_pitch(shallow) == _SERVO_TOLERANCE_PX
+
+
+def test_visual_lateral_correction_shifts_joint_one():
+    """A can detected off-centre in the wrist frame shifts joint 1 of every
+    target by gain * error / reach with the configured sign; log-only mode
+    measures but leaves the targets untouched."""
+    import sys
+
+    sys.path.insert(
+        0, str(Path(__file__).resolve().parent.parent.parent / "visual_servo")
+    )
+    from test_cylinder_edges import _synthetic_frame
+
+    # Cylinder spanning columns [200, 260): centre 229.5 vs image centre
+    # 159.5 -> error +70 px -> 21 mm lateral -> j1 offset +0.02625 rad.
+    frame = _synthetic_frame(200, 260)
+    executor, state = _grasp_segment_executor("on", frame)
+    before = [
+        float(t[0]) for t in executor._targets
+    ]  # pylint: disable=protected-access
+    # Several ticks: the base-pose settle wait runs before the camera is
+    # consulted.
+    for _ in range(8):
+        executor.step(state)
+    after = [float(t[0]) for t in executor._targets]  # pylint: disable=protected-access
+    deltas = [a - b for a, b in zip(after, before)]
+    assert all(abs(d - deltas[0]) < 1e-9 for d in deltas)
+    assert deltas[0] == pytest.approx(0.0003 * 70 / 0.8, abs=0.002)
+
+    executor, state = _grasp_segment_executor("log", frame)
+    before = [
+        float(t[0]) for t in executor._targets
+    ]  # pylint: disable=protected-access
+    for _ in range(8):
+        executor.step(state)
+    after = [float(t[0]) for t in executor._targets]  # pylint: disable=protected-access
+    assert after == before
+
+
+def test_visual_correction_skipped_for_non_grasp_segments():
+    """Arm segments without a gripper close never consult the camera."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    class _ExplodingSource:
+        def get_image(self):
+            raise AssertionError("camera consulted for a non-grasp segment")
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        visual_lateral_mode="on",
+        image_source=_ExplodingSource(),
+    )
+    state = _make_state()
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    executor.set_trajectory([(state, reach)])
+    executor.step(state)
+
+
+def test_injected_edge_detector_replaces_opencv():
+    """A configured edge_detector is what the visual correction consults."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+    from prpl_tidybot.visual_servo.cylinder_edges import CylinderEdges
+    from prpl_tidybot.visual_servo.image_sources import SequenceImageSource
+
+    calls: list[tuple] = []
+
+    def fake_detector(image):
+        calls.append(image.shape)
+        # Centre at column 229.5 vs image centre 159.5: +70 px error.
+        return CylinderEdges(
+            left_x=200.0,
+            right_x=259.0,
+            image_width=320,
+            image_height=240,
+            left_response=1.0,
+            right_response=1.0,
+            contrast=1.0,
+        )
+
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        visual_lateral_mode="on",
+        image_source=SequenceImageSource([frame] * 20),
+        edge_detector=fake_detector,
+        visual_lateral_gain=0.0003,
+        visual_lateral_sign=1.0,
+        compensation_reach=0.8,
+    )
+    state = _make_state()
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    close = np.zeros(11)
+    close[10] = -1.0
+    executor.set_trajectory([(state, reach), (state, close)])
+    before = [
+        float(t[0]) for t in executor._targets
+    ]  # pylint: disable=protected-access
+    for _ in range(8):
+        executor.step(state)
+    after = [float(t[0]) for t in executor._targets]  # pylint: disable=protected-access
+    assert calls, "the injected detector was never consulted"
+    assert after[0] - before[0] == pytest.approx(
+        0.0003 * (229.5 - 159.5) / 0.8, abs=1e-6
+    )
+
+
+def test_segment_start_recovered_after_sag():
+    """When the perceived joints have sagged away from the segment's start
+    (e.g. during an operator pause with no commands flowing), the executor
+    first commands the start configuration back, and only begins the walk
+    once the arm is close to it."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(), recover_segment_start=True
+    )
+    start_conf = [0.0, 0.5, 0.0, 1.0, 0.0, -0.5, 0.0]
+    reach = np.zeros(11)
+    reach[3] = 0.3
+    planned_start = _make_state(arm_conf=list(start_conf))
+    executor.set_trajectory([(planned_start, reach)])
+    sagged = _make_state(arm_conf=[0.0, 0.9, 0.0, 1.4, 0.0, -0.9, 0.0])
+    action, _ = executor.step(sagged)
+    # The recovery move commands the segment start, not the reach target.
+    assert action.arm_goal == pytest.approx(start_conf)
+    recovered = _make_state(arm_conf=list(start_conf))
+    action, _ = executor.step(recovered)
+    # Now the walk proceeds toward the reach target (joint 1 moves).
+    assert action.arm_goal[1] > start_conf[
+        1
+    ] + 1e-6 or action.arm_goal != pytest.approx(start_conf)
+
+
+def test_gripper_event_waits_for_tight_convergence():
+    """With gripper_event_tolerance set, the close command is deferred (gripper
+    held) until the perceived joints are within the tolerance of the event
+    configuration; the cruising advance_radius alone must not fire it."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        advance_radius=0.15,
+        gripper_event_tolerance=0.05,
+        gripper_close_position=0.9,
+    )
+    conf = [0.0, 0.5, 0.0, 1.0, 0.0, -0.5, 0.0]
+    open_cmd = np.zeros(11)
+    open_cmd[10] = 1.0
+    state = _make_state(arm_conf=list(conf))
+    executor.set_trajectory([(state, open_cmd)])
+    # Within advance_radius but outside the event tolerance: no release yet.
+    near = list(conf)
+    near[1] += 0.10
+    action, sim_action = executor.step(_make_state(arm_conf=near, gripper=0.9))
+    assert sim_action[10] == 0.0
+    # Converged: the release issues.
+    action, sim_action = executor.step(_make_state(arm_conf=list(conf), gripper=0.9))
+    assert sim_action[10] == 1.0
+    assert action.gripper_goal == pytest.approx(0.0)
+
+
+def test_event_integrator_pushes_command_past_target():
+    """While converging on a gripper event, the commanded target moves past the
+    desired configuration by the accumulated error, so a controller that rests
+    a deadband away from its command still lands ON the desired pose."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        gripper_event_tolerance=0.05,
+        gripper_close_position=0.9,
+    )
+    conf = [0.0, 0.5, 0.0, 1.0, 0.0, -0.5, 0.0]
+    open_cmd = np.zeros(11)
+    open_cmd[10] = 1.0
+    executor.set_trajectory([(_make_state(arm_conf=list(conf)), open_cmd)])
+    # The arm rests below the commanded pose (a positive gap on joint 2).
+    sagged = list(conf)
+    sagged[1] += 0.10
+    action1, sim1 = executor.step(_make_state(arm_conf=sagged, gripper=0.9))
+    action2, sim2 = executor.step(_make_state(arm_conf=sagged, gripper=0.9))
+    assert sim1[10] == 0.0 and sim2[10] == 0.0
+    # The command is pushed past the target, and further on the second tick.
+    assert action1.arm_goal[1] < conf[1]
+    assert action2.arm_goal[1] < action1.arm_goal[1]
+
+
+def test_visual_servo_converges_by_iterated_nudges():
+    """In servo mode joint 1 is nudged and re-checked until the detected offset
+    is within tolerance, then the accumulated offset is baked into the targets.
+    A detector whose reported error shrinks as joint 1 moves (mimicking the
+    real feedback) drives convergence over several nudges."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+    from prpl_tidybot.visual_servo.cylinder_edges import CylinderEdges
+    from prpl_tidybot.visual_servo.image_sources import SequenceImageSource
+
+    state_box = {"j1": 0.0}
+
+    class _FeedbackDetector:
+        """Reports a pixel error proportional to how far joint 1 still is from
+        the value that centres the can (0.15 rad here)."""
+
+        def __call__(self, image):
+            del image
+            err_px = (0.15 - state_box["j1"]) / 0.0003 * 0.8
+            return CylinderEdges(
+                left_x=160.0 + err_px - 30,
+                right_x=160.0 + err_px + 30,
+                image_width=320,
+                image_height=240,
+                left_response=1.0,
+                right_response=1.0,
+                contrast=1.0,
+            )
+
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        visual_lateral_mode="servo",
+        image_source=SequenceImageSource([frame] * 400),
+        edge_detector=_FeedbackDetector(),
+        visual_lateral_gain=0.0003,
+        visual_lateral_sign=1.0,
+        compensation_reach=0.8,
+    )
+    reach = np.zeros(11)
+    reach[3] = 0.05
+    close = np.zeros(11)
+    close[10] = -1.0
+    state = _make_state()
+    executor.set_trajectory([(state, reach), (state, close)])
+    before = float(executor._targets[0][0])  # pylint: disable=protected-access
+    # Drive the loop: each step reflects the committed joint-1 offset back into
+    # the detector, as the real arm would once it has moved.
+    for _ in range(300):
+        executor.step(state)
+        state_box["j1"] = executor._servo_j1_offset  # pylint: disable=protected-access
+        if executor._compensation_applied:  # pylint: disable=protected-access
+            break
+    after = float(executor._targets[0][0])  # pylint: disable=protected-access
+    assert executor._compensation_applied  # pylint: disable=protected-access
+    # Converged near the offset that centres the can (0.15 rad).
+    assert after - before == pytest.approx(0.15, abs=0.03)
+
+
+def test_confirm_stall_grasp_fires_gripper_at_current_pose():
+    """When the arm stalls just short of a gripper waypoint and
+    confirm_stall_grasp is set, the operator is prompted and, on confirm, the
+    cursor jumps to the gripper waypoint so it fires at the current pose."""
+    from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+        create_kinova_distance_fn,
+    )
+
+    prompts: list[str] = []
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=create_kinova_distance_fn(),
+        advance_radius=0.15,
+        gripper_dwell_ticks=2,
+        confirm_stall_grasp=True,
+        prompt_fn=lambda msg: prompts.append(msg) or "",
+    )
+    # A reach the arm can never finish (target far away), then a close.
+    reach = np.zeros(11)
+    reach[3] = 5.0
+    close = np.zeros(11)
+    close[10] = -1.0
+    start = _make_state(arm_conf=[0.0] * 7)
+    executor.set_trajectory([(start, reach), (start, close)])
+    stuck = _make_state(arm_conf=[0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    fired = False
+    for _ in range(400):
+        _, sim_action = executor.step(stuck)
+        if float(sim_action[10]) < -0.5:
+            fired = True
+            break
+    assert prompts, "operator was not prompted at the stall"
+    assert "CLOSE" in prompts[0]
+    assert fired, "the gripper never fired after the confirmed stall"

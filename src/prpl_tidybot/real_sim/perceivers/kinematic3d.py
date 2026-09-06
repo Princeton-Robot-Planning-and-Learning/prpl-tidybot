@@ -77,8 +77,7 @@ class KinematicRobotPerceiverBase(
     ) -> dict[Object, dict[str, float]]:
         """Return the non-robot objects in the scene with their features.
 
-        Currently returns hardcoded placeholders; replace when real
-        perception lands.
+        Currently returns hardcoded placeholders; replace when real perception lands.
         """
 
     def reset(
@@ -126,11 +125,30 @@ class KinematicRobotPerceiverBase(
         }
 
 
+class RobotOnlyPerceiver(KinematicRobotPerceiverBase):
+    """A perceiver that reports only the robot's proprioception.
+
+    For pipelines whose agent does not plan from perceived scene content —
+    e.g. `NpzPlanAgent` replaying an externally planned trajectory — the
+    executors read only the robot features, so there are no objects to
+    detect and no env-specific state subclass to satisfy.
+    """
+
+    @property
+    def _state_cls(self) -> type[ObjectCentricState]:
+        return ObjectCentricState
+
+    def _detect_objects(
+        self, obs: TidyBotObservation, info: dict[str, Any]
+    ) -> dict[Object, dict[str, float]]:
+        return {}
+
+
 class PrplLab3DPerceiver(KinematicRobotPerceiverBase):
     """Perceiver for kinder/PrplLab3D-o{1,2}-v0.
 
-    Non-robot detection currently emits placeholder cubes at the origin
-    with the env's default half-extents.
+    Non-robot detection currently emits placeholder cubes at the origin with the env's
+    default half-extents.
     """
 
     def __init__(self, robot_name: str = "robot", num_cubes: int = 1) -> None:

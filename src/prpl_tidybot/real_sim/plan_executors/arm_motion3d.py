@@ -34,9 +34,13 @@ from __future__ import annotations
 
 import abc
 import logging
-from typing import Callable
+import math
+from pathlib import Path
+from typing import Any, Callable
 
+import cv2  # type: ignore[import-untyped]
 import numpy as np
+from kinder_models.structs import SkillCall
 from numpy.typing import NDArray
 from prpl_utils.real_sim import PlanExecutor
 from relational_structs import ObjectCentricState
@@ -44,6 +48,10 @@ from spatialmath import SE2
 
 from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.structs import TidyBotAction
+from prpl_tidybot.visual_servo.cylinder_edges import (
+    detect_cylinder_edges,
+    render_edge_overlay,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -57,6 +65,13 @@ JointDistanceFn = Callable[[JointPositions, JointPositions], float]
 _BASE_MOTION_EPS = 1e-4
 # Perceived-joint motion (distance_fn metric) below which a tick counts as still.
 _STILL_EPS = 5e-3
+# When the commanded joint target sits more than this (rad, ~17 deg on any one
+# joint) ahead of the perceived joints, the compliant arm is being asked to
+# chase a far target and can trip a FOLLOWING_ERROR fault. Log it (throttled)
+# so we can see which joint and how large the lead is before a fault, rather
+# than only reading the settled pose afterward.
+_FAR_TARGET_WARN_RAD = 0.30
+_FAR_TARGET_LOG_EVERY = 25
 
 
 class ArmMotion3DPlanExecutor(
@@ -178,8 +193,25 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         stall_warning_ticks: int = 50,
         stall_advance_ticks: int = 30,
         stall_advance_min_progress: float = 0.5,
+        confirm_grasp_closes: bool = False,
+        prompt_fn: Callable[[str], str] = input,
+        confirm_stall_grasp: bool = False,
+        compensate_base_error: bool = False,
+        compensation_reach: float = 0.8,
+        visual_lateral_mode: str = "off",
+        image_source: Any = None,
+        visual_lateral_gain: float = 0.0003,
+        visual_lateral_sign: float = 1.0,
+        visual_max_lateral: float = 0.04,
+        visual_debug_dir: str | None = None,
+        edge_detector: Callable[[Any], Any] | None = None,
+        recover_segment_start: bool = False,
+        gripper_event_tolerance: float | None = None,
+        debug_kinematics: bool = False,
     ) -> None:
         super().__init__(robot_name=robot_name)
+        if visual_lateral_mode not in ("off", "log", "on", "servo"):
+            raise ValueError("visual_lateral_mode must be off, log, on or servo")
         if advance_radius <= 0:
             raise ValueError("advance_radius must be > 0")
         if arrival_tolerance <= 0:
@@ -199,6 +231,85 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._stall_warning_ticks = stall_warning_ticks
         self._stall_advance_ticks = stall_advance_ticks
         self._stall_advance_min_progress = stall_advance_min_progress
+        # A staging-calibration gate: with confirm_grasp_closes, the operator
+        # is prompted once per gripper CLOSE, with the fingers holding at the
+        # grasp pose — e.g. to mark where the object must be staged for the
+        # open-loop grasp to land on it.
+        self._confirm_grasp_closes = confirm_grasp_closes
+        self._prompt_fn = prompt_fn
+        # When the arm stalls just short of a gripper waypoint, prompt the
+        # operator to fire the gripper at the current pose rather than hang
+        # or fail (see the stall block).
+        self._confirm_stall_grasp = confirm_stall_grasp
+        self._stall_prompted = False
+        # Base-error lateral compensation: at each segment's first tick the
+        # perceived base pose is compared with the plan's, and joint 1 of
+        # every target is offset so the arm plane swings back onto the
+        # map-frame end-effector target ~compensation_reach ahead (the
+        # planned joints reproduce the end effector in the BASE frame, so a
+        # base staging error maps one-to-one into a map-frame arm error;
+        # the lateral component dominates and joint 1 corrects exactly it).
+        self._compensate_base_error = compensate_base_error
+        self._compensation_reach = compensation_reach
+        # Wrist-camera lateral correction for grasp segments (segments that
+        # contain a gripper CLOSE start at the pre-grasp pose, thanks to the
+        # kinder grasp controller's segment marker). The camera measures the
+        # can's true lateral offset, which SUPERSEDES the marker-based base
+        # compensation for that segment: when a detection succeeds the
+        # marker correction is skipped; on detection failure it is the
+        # fallback. "log" measures and logs the would-be correction without
+        # applying it — run that first on the robot to verify the sign at
+        # the 45-degree view (visual_lateral_sign).
+        self._visual_lateral_mode = visual_lateral_mode
+        self._image_source = image_source
+        self._visual_lateral_gain = visual_lateral_gain
+        self._visual_lateral_sign = visual_lateral_sign
+        self._visual_max_lateral = visual_max_lateral
+        self._visual_debug_dir = visual_debug_dir
+        self._visual_frame_count = 0
+        # The CylinderEdges producer for the correction: the SAM service
+        # detector by config, the OpenCV column detector by default.
+        self._edge_detector = edge_detector or detect_cylinder_edges
+        # Command gaps (operator pauses, settle waits) let the compliant arm
+        # sag under gravity at extension; with this flag each segment first
+        # recovers its start configuration before the walk begins.
+        self._recover_segment_start = recover_segment_start
+        # The cursor reaches a gripper pair through advance_radius — a
+        # cruising tolerance (0.15). Acting on the gripper at that slack
+        # closes on fingers that have not finished arriving and releases
+        # cans short of the commanded configuration; with this set, the
+        # command is deferred (the carrot holds the exact event target)
+        # until the arm is within the tighter tolerance.
+        self._gripper_event_tolerance = gripper_event_tolerance
+        self._gripper_wait_ticks = 0
+        # While converging on an event, the commanded target is pushed past
+        # the desired configuration by the accumulated error (an outer-loop
+        # integrator): the compliant controller rests a deadband away from
+        # whatever it is commanded, so commanding the desired pose directly
+        # leaves a steady ~0.1 residual that no amount of waiting removes.
+        self._event_integrator: list[float] | None = None
+        # Model-FK logging at gripper events (see _log_event_kinematics):
+        # the discriminator between "the arm is not where it is commanded"
+        # (joint residuals) and "the model disagrees with the metal" (a
+        # ruler vs the logged end-effector height).
+        self._debug_kinematics = debug_kinematics
+        self._fk_env: Any = None
+        self._fk_extend: Any = None
+        self._fk_se2: Any = None
+        # Walk-phase integrator for release segments: the deadband also sags
+        # the whole level insertion, not just the event at its end, so the
+        # slide enters low and only gets lifted at the release. Winds up
+        # only on lag beyond the intended carrot lead, so healthy cruising
+        # is unaffected; active only in segments that contain a gripper
+        # OPEN, and only when gripper_event_tolerance is configured.
+        self._walk_integrator: list[float] | None = None
+        self._segment_has_open: bool = False
+        # The base hands over as soon as it is within tolerance, while it is
+        # still creeping and the marker-pose stream lags, so the error must
+        # be computed from a SETTLED pose: the arm holds until the perceived
+        # base pose is stable for _SETTLE_STABLE_TICKS consecutive ticks
+        # (or the timeout passes), and the correction uses the mean of the
+        # stable window.
 
         self._targets: list[JointPositions] = []
         self._start_joints: JointPositions = []
@@ -213,6 +324,26 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._gripper_cursor: int = -1
         self._gripper_ticks_remaining: int = 0
         self._last_gripper_goal: float | None = None
+        self._confirmed_close_cursor: int = -1
+        self._compensation_applied: bool = False
+        self._settle_history: list[tuple[float, float, float]] = []
+        self._visual_attempts: int = 0
+        # Closed-loop servo state (visual_lateral_mode == 'servo'): joint 1
+        # is nudged toward the detected can and re-checked until the can is
+        # centred, converging despite the compliant joint's imperfect
+        # tracking. The sign auto-flips if a nudge makes the error worse.
+        self._servo_j1_offset: float = 0.0
+        self._servo_aligned: int = 0
+        self._servo_iters: int = 0
+        self._servo_cooldown: int = 0
+        self._servo_prev_error: float | None = None
+        self._servo_sign: float = visual_lateral_sign
+        # Per-grasp servo tolerance (px), chosen from the grasp pitch on the
+        # first servo tick of each segment (see _SERVO_TOLERANCE_PX*).
+        self._servo_tolerance_px: float = _SERVO_TOLERANCE_PX
+        self._servo_tolerance_set: bool = False
+        self._start_recovered: bool = False
+        self._recover_ticks: int = 0
 
     def _on_set_trajectory(self) -> None:
         self._targets = [
@@ -228,6 +359,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._tick_count = 0
         self._ticks_since_advance = 0
         self._stall_warned = False
+        self._stall_prompted = False
         self._last_perceived = None
         self._still_ticks = 0
         self._lead_from_segment_start = False
@@ -235,6 +367,27 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._gripper_cursor = -1
         self._gripper_ticks_remaining = 0
         self._last_gripper_goal = None
+        self._confirmed_close_cursor = -1
+        self._gripper_wait_ticks = 0
+        self._event_integrator = None
+        self._walk_integrator = None
+        self._segment_has_open = any(
+            not isinstance(action, SkillCall) and float(action[10]) > 0.5
+            for _, action in self._pairs
+        )
+        self._compensation_applied = False
+        self._settle_history = []
+        self._visual_attempts = 0
+        self._servo_j1_offset = 0.0
+        self._servo_aligned = 0
+        self._servo_iters = 0
+        self._servo_cooldown = 0
+        self._servo_prev_error = None
+        self._servo_sign = self._visual_lateral_sign
+        self._servo_tolerance_px = _SERVO_TOLERANCE_PX
+        self._servo_tolerance_set = False
+        self._start_recovered = False
+        self._recover_ticks = 0
 
     def step(
         self, sim_state: ObjectCentricState
@@ -243,19 +396,202 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             raise RuntimeError(
                 "StreamingArmMotion3DPlanExecutor.step called with no trajectory"
             )
+        if (
+            self._compensate_base_error or self._visual_applicable()
+        ) and not self._compensation_applied:
+            settled = self._settled_base_pose(sim_state)
+            if settled is None:
+                # Hold the arm AT THE SEGMENT START while the base pose
+                # settles: commanding the perceived joints instead would
+                # follow the compliant arm's gravity sag downward tick by
+                # tick.
+                hold_joints = self._servo_hold_joints(sim_state)
+                hold = np.zeros(11)
+                action = _build_tidybot_action(
+                    sim_state,
+                    hold_joints,
+                    hold,
+                    self._robot_name,
+                    self._last_gripper_goal,
+                    self._gripper_close_position,
+                )
+                self._tick_count += 1
+                return action, hold
+            if self._visual_applicable():
+                if not self._servo_tolerance_set:
+                    self._set_servo_tolerance(sim_state)
+                outcome = self._attempt_visual_correction()
+                if outcome == "retry":
+                    hold_joints = self._servo_hold_joints(sim_state)
+                    hold = np.zeros(11)
+                    action = _build_tidybot_action(
+                        sim_state,
+                        hold_joints,
+                        hold,
+                        self._robot_name,
+                        self._last_gripper_goal,
+                        self._gripper_close_position,
+                    )
+                    self._tick_count += 1
+                    return action, hold
+                self._compensation_applied = True
+                if outcome == "failed" and self._compensate_base_error:
+                    self._apply_base_error_compensation(settled)
+            else:
+                self._compensation_applied = True
+                if self._compensate_base_error:
+                    self._apply_base_error_compensation(settled)
         perceived = _perceived_joints(sim_state, self._robot_name)
+        if self._recover_segment_start and not self._start_recovered:
+            # The arm may have sagged away from the plan during a command
+            # gap (an operator confirmation pause, a settle wait): recover
+            # the segment's start configuration first, so the walk begins
+            # ON the planned path instead of blending the sag forward into
+            # it (e.g. dipping a held can into the board it rides over).
+            if (
+                self._start_joints
+                and self._recover_ticks < _RECOVER_MAX_TICKS
+                and self._distance_fn(perceived, self._start_joints) > _RECOVER_TOL
+            ):
+                if self._recover_ticks == 0:
+                    _logger.info(
+                        "Recovering the segment start configuration "
+                        "(distance %.3f) before the walk.",
+                        self._distance_fn(perceived, self._start_joints),
+                    )
+                self._recover_ticks += 1
+                hold = np.zeros(11)
+                action = _build_tidybot_action(
+                    sim_state,
+                    self._start_joints,
+                    hold,
+                    self._robot_name,
+                    self._last_gripper_goal,
+                    self._gripper_close_position,
+                )
+                self._tick_count += 1
+                return action, hold
+            self._start_recovered = True
         self._advance_cursor(perceived)
         target = self._command_target(perceived)
+        self._log_far_target(perceived, target)
         _, sim_action = self._pairs[self._cursor]
+        if (
+            self._confirm_grasp_closes
+            and _is_gripper_cmd(sim_action)
+            and float(sim_action[10]) < -0.5
+            and self._cursor != self._confirmed_close_cursor
+        ):
+            # First tick at a CLOSE waypoint: the fingers hold at the grasp
+            # pose while the operator responds; the close is commanded on
+            # this same tick afterwards.
+            self._confirmed_close_cursor = self._cursor
+            self._prompt_fn(
+                "Gripper is at the grasp pose and about to CLOSE. Mark the "
+                "object spot, then press Enter to close..."
+            )
         # Remember the most recent explicit open/close so that subsequent "hold"
         # ticks (e.g. the entire retract phase) re-issue the same gripper goal.
         # The planning sim's finger_state may not reflect the real gripper state
         # (kinder does not update finger_state after close actions), so we cannot
         # rely on the planned state; tracking the last command is authoritative.
         if _is_gripper_cmd(sim_action):
+            if (
+                self._gripper_event_tolerance is not None
+                # Releases only: a converged, integrator-held release is what
+                # fixed the placement height. Closes fire at the cruising
+                # tolerance as they always did — the side-grasp picking was
+                # calibrated against that behaviour (the deadband-high grip
+                # lengthens the real hang, which the place ride absorbs),
+                # and forcing closes onto the exact commanded pose gripped
+                # the cans low enough to whiff.
+                and float(sim_action[10]) > 0.5
+                and self._cursor != self._gripper_cursor
+                and self._gripper_wait_ticks < _GRIPPER_EVENT_MAX_WAIT
+                and self._distance_fn(perceived, self._targets[self._cursor])
+                > self._gripper_event_tolerance
+            ):
+                # Not converged on the event configuration: integrate the
+                # remaining error into the command and defer the gripper.
+                self._gripper_wait_ticks += 1
+                desired = self._targets[self._cursor]
+                if self._event_integrator is None:
+                    self._event_integrator = [0.0] * len(desired)
+                self._event_integrator = [
+                    max(
+                        -_EVENT_INTEGRATOR_CAP,
+                        min(
+                            _EVENT_INTEGRATOR_CAP,
+                            c + _EVENT_INTEGRATOR_GAIN * _wrap(d - p),
+                        ),
+                    )
+                    for c, d, p in zip(self._event_integrator, desired, perceived)
+                ]
+                pushed = [d + c for d, c in zip(desired, self._event_integrator)]
+                hold = sim_action.copy()
+                hold[10] = 0.0
+                action = _build_tidybot_action(
+                    sim_state,
+                    pushed,
+                    hold,
+                    self._robot_name,
+                    self._last_gripper_goal,
+                    self._gripper_close_position,
+                )
+                self._tick_count += 1
+                return action, hold
+            self._gripper_wait_ticks = 0
             self._last_gripper_goal = (
                 self._gripper_close_position if float(sim_action[10]) < -0.5 else 0.0
             )
+            if self._cursor != self._gripper_cursor:
+                # First tick at a gripper event: log the tracking residual.
+                # At an OPEN this is the droop measurement — how far the arm
+                # actually sits from the commanded release configuration.
+                gaps = [
+                    math.atan2(math.sin(t - p), math.cos(t - p))
+                    for t, p in zip(self._targets[self._cursor], perceived)
+                ]
+                _logger.info(
+                    "Gripper %s: joint tracking residual %s (distance %.3f).",
+                    "CLOSE" if float(sim_action[10]) < -0.5 else "OPEN",
+                    [round(g, 3) for g in gaps],
+                    self._distance_fn(perceived, self._targets[self._cursor]),
+                )
+                if self._debug_kinematics:
+                    self._log_event_kinematics(sim_state, perceived)
+        if _is_gripper_cmd(sim_action) and self._event_integrator is not None:
+            # Keep commanding the pushed target through the event and its
+            # dwell, so the arm does not relax back off the configuration
+            # while the gripper acts.
+            target = [
+                d + c
+                for d, c in zip(self._targets[self._cursor], self._event_integrator)
+            ]
+        elif self._event_integrator is not None:
+            self._event_integrator = None
+        if (
+            self._gripper_event_tolerance is not None
+            and self._segment_has_open
+            and not _is_gripper_cmd(sim_action)
+        ):
+            lead = self._distance_fn(perceived, target)
+            excess = lead - self._walk_integrator_reference()
+            if self._walk_integrator is None:
+                self._walk_integrator = [0.0] * len(target)
+            if excess > 0 and lead > 1e-9:
+                scale = _EVENT_INTEGRATOR_GAIN * excess / lead
+                self._walk_integrator = [
+                    max(
+                        -_EVENT_INTEGRATOR_CAP,
+                        min(
+                            _EVENT_INTEGRATOR_CAP,
+                            c + scale * _wrap(t - p),
+                        ),
+                    )
+                    for c, t, p in zip(self._walk_integrator, target, perceived)
+                ]
+            target = [t + c for t, c in zip(target, self._walk_integrator)]
         action = _build_tidybot_action(
             sim_state,
             target,
@@ -281,6 +617,367 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             else:
                 self._cursor += 1
         return action, sim_action
+
+    def _visual_applicable(self) -> bool:
+        """Visual lateral correction is configured and this is a grasp segment."""
+        return (
+            self._visual_lateral_mode != "off"
+            and self._image_source is not None
+            and any(
+                float(action[10]) < -0.5
+                for _, action in self._pairs
+                if not isinstance(action, SkillCall)
+            )
+        )
+
+    def _servo_hold_joints(self, sim_state: ObjectCentricState) -> JointPositions:
+        """The pre-grasp hold configuration with the accumulated servo offset.
+
+        The arm holds here while the visual servo (or the base-settle wait)
+        runs; joint 1 carries the offset the servo has commanded so far.
+        """
+        base = (
+            list(self._start_joints)
+            if self._targets
+            else list(_perceived_joints(sim_state, self._robot_name))
+        )
+        base[0] = float(base[0]) + self._servo_j1_offset
+        return base
+
+    def _attempt_visual_correction(self) -> str:
+        """One iteration of the visual lateral correction.
+
+        Returns "applied" (done — offset baked into the targets), "retry"
+        (keep holding), or "failed" (no usable detection, fall back). In
+        ``servo`` mode this is a closed loop: nudge joint 1, wait, re-detect,
+        repeat until the can is centred. In ``on``/``log`` it is one shot.
+        """
+        if self._visual_lateral_mode == "servo":
+            return self._servo_iteration()
+        self._visual_attempts += 1
+        image = self._image_source.get_image()
+        edges = None if image is None else self._edge_detector(image)
+        if self._visual_debug_dir is not None and image is not None:
+            self._dump_visual_frame(image, edges)
+        if edges is None or edges.clipped_left or edges.clipped_right:
+            if self._visual_attempts < _VISUAL_MAX_ATTEMPTS:
+                return "retry"
+            _logger.warning(
+                "Visual lateral correction: no usable detection after %d "
+                "attempts; falling back to the marker-based compensation.",
+                self._visual_attempts,
+            )
+            return "failed"
+        lateral = (
+            self._visual_lateral_sign
+            * self._visual_lateral_gain
+            * float(edges.servo_error_px)
+        )
+        clamped = max(-self._visual_max_lateral, min(self._visual_max_lateral, lateral))
+        delta = clamped / self._compensation_reach
+        _logger.info(
+            "Visual lateral correction: %.1f px -> %.1f mm lateral -> joint 1 "
+            "offset %+.4f rad%s.",
+            edges.servo_error_px,
+            1000 * clamped,
+            delta,
+            " (log only, NOT applied)" if self._visual_lateral_mode == "log" else "",
+        )
+        if self._visual_lateral_mode == "on":
+            for target in self._targets:
+                target[0] = float(target[0]) + delta
+        return "applied"
+
+    def _servo_iteration(self) -> str:
+        """Closed-loop joint-1 visual servo: nudge, settle, re-detect, repeat.
+
+        The arm holds at the pre-grasp with the accumulated joint-1 offset;
+        after each nudge it waits _SERVO_SETTLE_TICKS for the compliant joint
+        to move before trusting a new frame. Converges to within the per-grasp
+        tolerance (self._servo_tolerance_px), self-flipping the sign if a nudge
+        worsened the error, then bakes the offset into the reach targets.
+        """
+        if self._servo_cooldown > 0:
+            self._servo_cooldown -= 1
+            return "retry"
+        image = self._image_source.get_image()
+        edges = None if image is None else self._edge_detector(image)
+        if self._visual_debug_dir is not None and image is not None:
+            self._dump_visual_frame(image, edges)
+        if edges is None or edges.clipped_left or edges.clipped_right:
+            self._visual_attempts += 1
+            if self._visual_attempts < _VISUAL_MAX_ATTEMPTS:
+                return "retry"
+            _logger.warning(
+                "Visual servo: no usable detection after %d attempts; falling "
+                "back to the marker-based compensation.",
+                self._visual_attempts,
+            )
+            return "failed"
+        self._visual_attempts = 0
+        error = float(edges.servo_error_px)
+        if abs(error) <= self._servo_tolerance_px:
+            self._servo_aligned += 1
+            if self._servo_aligned >= _SERVO_CONFIRM_TICKS:
+                _logger.info(
+                    "Visual servo aligned: |error| %.1f px <= %.1f, joint 1 "
+                    "offset %+.4f rad after %d nudges.",
+                    error,
+                    self._servo_tolerance_px,
+                    self._servo_j1_offset,
+                    self._servo_iters,
+                )
+                for target in self._targets:
+                    target[0] = float(target[0]) + self._servo_j1_offset
+                return "applied"
+            return "retry"
+        self._servo_aligned = 0
+        # Auto-flip the sign if the previous nudge made the error worse.
+        if (
+            self._servo_prev_error is not None
+            and abs(error) > abs(self._servo_prev_error) + 2.0
+        ):
+            self._servo_sign = -self._servo_sign
+            _logger.info("Visual servo: error grew, flipping sign.")
+        self._servo_prev_error = error
+        step = self._servo_sign * self._visual_lateral_gain * error
+        step = max(
+            -_SERVO_MAX_STEP, min(_SERVO_MAX_STEP, step / self._compensation_reach)
+        )
+        self._servo_j1_offset = max(
+            -_SERVO_MAX_OFFSET,
+            min(_SERVO_MAX_OFFSET, self._servo_j1_offset + step),
+        )
+        self._servo_iters += 1
+        self._servo_cooldown = _SERVO_SETTLE_TICKS
+        _logger.info(
+            "Visual servo nudge %d: error %.1f px -> joint 1 offset %+.4f rad.",
+            self._servo_iters,
+            error,
+            self._servo_j1_offset,
+        )
+        if self._servo_iters >= _SERVO_MAX_ITERS:
+            _logger.warning(
+                "Visual servo hit the %d-nudge cap at error %.1f px; proceeding "
+                "with joint 1 offset %+.4f rad.",
+                _SERVO_MAX_ITERS,
+                error,
+                self._servo_j1_offset,
+            )
+            for target in self._targets:
+                target[0] = float(target[0]) + self._servo_j1_offset
+            return "applied"
+        return "retry"
+
+    def _ensure_fk_env(self) -> None:
+        """Lazily build the kinder sim robot used for model forward kinematics."""
+        # pylint: disable=import-outside-toplevel
+        if self._fk_env is None:
+            from kinder.envs.kinematic3d.cylinder_shelf3d import (
+                ObjectCentricCylinderShelf3DEnv,
+            )
+            from kinder.envs.kinematic3d.utils import extend_joints_to_include_fingers
+            from pybullet_helpers.geometry import SE2Pose
+
+            self._fk_env = ObjectCentricCylinderShelf3DEnv(
+                num_cylinders=1, allow_state_access=True
+            )
+            self._fk_extend = extend_joints_to_include_fingers
+            self._fk_se2 = SE2Pose
+
+    def _set_servo_tolerance(self, sim_state: ObjectCentricState) -> None:
+        """Pick the servo tolerance for this grasp from the gripper's pitch.
+
+        Computes the downward pitch of the grasp (gripper-close) waypoint via
+        model FK; a steep (top) grasp holds the tight tolerance, a shallow
+        (side) grasp the looser one. Falls back to the loose default if there
+        is no close waypoint or FK is unavailable.
+        """
+        self._servo_tolerance_set = True
+        self._servo_tolerance_px = _SERVO_TOLERANCE_PX
+        close_idx = next(
+            (
+                i
+                for i, (_, a) in enumerate(self._pairs)
+                if not isinstance(a, SkillCall) and float(a[10]) < -0.5
+            ),
+            None,
+        )
+        if close_idx is None:
+            return
+        try:
+            # pylint: disable=import-outside-toplevel
+            from pybullet_helpers.geometry import matrix_from_quat
+
+            self._ensure_fk_env()
+            base = _perceived_base(sim_state, self._robot_name)
+            self._fk_env.robot.set_base(self._fk_se2(*base))
+            self._fk_env.robot.arm.set_joints(
+                self._fk_extend(list(self._targets[close_idx][:7]))
+            )
+            pose = self._fk_env.robot.arm.get_end_effector_pose()
+            approach_z = float(matrix_from_quat(pose.orientation)[2, 2])
+            pitch_deg = math.degrees(math.asin(max(-1.0, min(1.0, -approach_z))))
+        except Exception:  # pylint: disable=broad-except
+            return
+        if abs(pitch_deg) >= _SERVO_STEEP_PITCH_DEG:
+            self._servo_tolerance_px = _SERVO_TOLERANCE_PX_STEEP
+        _logger.info(
+            "Visual servo tolerance %.0f px (grasp pitch %.0f deg).",
+            self._servo_tolerance_px,
+            pitch_deg,
+        )
+
+    def _dump_visual_frame(self, image: Any, edges: Any) -> None:
+        """Save the raw wrist frame (and edge overlay when detected) for offline
+        detector tuning."""
+        directory = Path(self._visual_debug_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        self._visual_frame_count += 1
+        stem = directory / f"grasp_frame_{self._visual_frame_count:04d}"
+        cv2.imwrite(str(stem) + ".png", image[:, :, ::-1])
+        overlay = render_edge_overlay(image, edges)
+        cv2.imwrite(str(stem) + "_overlay.png", overlay[:, :, ::-1])
+
+    def _log_event_kinematics(
+        self, sim_state: ObjectCentricState, perceived: JointPositions
+    ) -> None:
+        """Model-FK end-effector positions at a gripper event.
+
+        Three poses through the model's forward kinematics: the perceived
+        joints (where the model thinks the gripper IS — compare its z
+        against the physical gripper height with a ruler to expose any
+        model-vs-metal kinematic bias), the planned event configuration,
+        and the currently commanded (integrator-pushed) target. Also dumps
+        both integrator states.
+        """
+        try:
+            self._ensure_fk_env()
+            base = _perceived_base(sim_state, self._robot_name)
+
+            def fk(joints: JointPositions) -> list[float]:
+                self._fk_env.robot.set_base(self._fk_se2(*base))
+                self._fk_env.robot.arm.set_joints(self._fk_extend(list(joints[:7])))
+                pose = self._fk_env.robot.arm.get_end_effector_pose()
+                return [round(float(v), 4) for v in pose.position]
+
+            planned = self._targets[self._cursor]
+            pushed = (
+                [d + c for d, c in zip(planned, self._event_integrator)]
+                if self._event_integrator is not None
+                else planned
+            )
+            _logger.info(
+                "EE model-FK at event: perceived %s | planned %s | commanded %s "
+                "| event integrator %s | walk integrator %s. Check the REAL "
+                "gripper height against the perceived z to expose a "
+                "model-vs-metal kinematic bias.",
+                fk(perceived),
+                fk(planned),
+                fk(pushed),
+                (
+                    None
+                    if self._event_integrator is None
+                    else [round(c, 3) for c in self._event_integrator]
+                ),
+                (
+                    None
+                    if self._walk_integrator is None
+                    else [round(c, 3) for c in self._walk_integrator]
+                ),
+            )
+        except Exception:  # pylint: disable=broad-except
+            _logger.exception("EE model-FK debug failed")
+
+    def _walk_integrator_reference(self) -> float:
+        """The lead the walk integrator treats as healthy (no wind-up)."""
+        return getattr(self, "_lookahead", self._advance_radius)
+
+    def _settled_base_pose(
+        self, sim_state: ObjectCentricState
+    ) -> tuple[float, float, float] | None:
+        """The mean perceived base pose once it is stable, else None (keep waiting).
+
+        Stable means _SETTLE_STABLE_TICKS consecutive readings within
+        _SETTLE_POS_TOL / _SETTLE_ROT_TOL of the newest one. After
+        _SETTLE_TIMEOUT_TICKS the newest reading is used anyway (with a
+        warning) so a drifting marker stream cannot stall the rollout.
+        """
+        pose = _perceived_base(sim_state, self._robot_name)
+        self._settle_history.append(pose)
+        recent = self._settle_history[-_SETTLE_STABLE_TICKS:]
+        stable = len(recent) == _SETTLE_STABLE_TICKS and all(
+            math.hypot(b[0] - pose[0], b[1] - pose[1]) < _SETTLE_POS_TOL
+            and abs(_wrap(b[2] - pose[2])) < _SETTLE_ROT_TOL
+            for b in recent
+        )
+        if not stable:
+            if len(self._settle_history) < _SETTLE_TIMEOUT_TICKS:
+                return None
+            _logger.warning(
+                "Base pose did not settle within %d ticks; compensating from "
+                "the latest reading.",
+                _SETTLE_TIMEOUT_TICKS,
+            )
+            recent = [pose]
+        return (
+            sum(b[0] for b in recent) / len(recent),
+            sum(b[1] for b in recent) / len(recent),
+            math.atan2(
+                sum(math.sin(b[2]) for b in recent),
+                sum(math.cos(b[2]) for b in recent),
+            ),
+        )
+
+    def _apply_base_error_compensation(
+        self, actual: tuple[float, float, float]
+    ) -> None:
+        """Offset joint 1 of every target for the perceived base staging error.
+
+        The map-frame end-effector target is reconstructed from the PLANNED
+        base pose and the last target's joint 1 (arm plane heading = base
+        heading + joint 1, target ~compensation_reach along it); the offset
+        is whatever joint 1 must become for the ACTUAL base to point the arm
+        plane at that same map point. First order and lateral-only: the
+        forward error component (a few millimetres for centimetre-scale base
+        errors) is absorbed by the grasp/place standoffs.
+        """
+        if not self._pairs or not self._targets:
+            return
+        planned = _perceived_base(self._pairs[0][0], self._robot_name)
+        last_j1 = float(self._targets[-1][0])
+        # Joint 1 positive rotates the arm plane CLOCKWISE in the map frame
+        # (verified against the kinder robot model in
+        # test_base_error_compensation_recovers_ee_position), hence the
+        # negations: plane bearing = base heading - joint 1.
+        heading = planned[2] - last_j1
+        target_x = planned[0] + self._compensation_reach * math.cos(heading)
+        target_y = planned[1] + self._compensation_reach * math.sin(heading)
+        needed_j1 = -_wrap(
+            math.atan2(target_y - actual[1], target_x - actual[0]) - actual[2]
+        )
+        delta = _wrap(needed_j1 - last_j1)
+        if abs(delta) > 0.15:
+            # A correction this large means the base is nowhere near its
+            # staging pose (or perception glitched); trust the plan instead.
+            _logger.warning(
+                "Base-error compensation of %.3f rad exceeds the 0.15 cap; "
+                "skipping (planned base %s, perceived %s).",
+                delta,
+                np.round(planned, 3),
+                np.round(actual, 3),
+            )
+            return
+        if abs(delta) > 1e-4:
+            _logger.info(
+                "Base-error compensation: joint 1 offset %.4f rad "
+                "(~%.1f cm lateral at %.2f m).",
+                delta,
+                100 * delta * self._compensation_reach,
+                self._compensation_reach,
+            )
+        for target in self._targets:
+            target[0] = float(target[0]) + delta
 
     def done(self, sim_state: ObjectCentricState) -> bool:
         if self._done_latched:
@@ -351,6 +1048,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         if advanced:
             self._ticks_since_advance = 0
             self._stall_warned = False
+            self._stall_prompted = False
         else:
             self._ticks_since_advance += 1
             if (
@@ -370,6 +1068,75 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                     self._advance_radius,
                     self._progress(perceived),
                 )
+            if (
+                self._confirm_stall_grasp
+                and not self._stall_prompted
+                and self._ticks_since_advance >= _STALL_GRASP_PROMPT_TICKS
+            ):
+                # The compliant arm has settled short of its target and the
+                # cursor cannot advance (deadband residual over advance_radius,
+                # sometimes compounded by an un-recovered visual-servo joint-1
+                # offset carried into the next segment). Rather than guess when
+                # it is safe to skip ahead, ask the operator. If a gripper
+                # waypoint is just ahead, jumping to it fires the gripper at the
+                # settled pose; otherwise (a pure motion segment, e.g. the
+                # carry) jump to the end of the segment so the next segment,
+                # which recovers from the perceived pose, takes over.
+                self._stall_prompted = True
+                gripper_ahead = self._gripper_waypoint_ahead()
+                if gripper_ahead is not None:
+                    is_close = float(self._pairs[gripper_ahead][1][10]) < -0.5
+                    target_cursor = gripper_ahead
+                    what = (
+                        f"fire the gripper {'CLOSE' if is_close else 'OPEN'} at "
+                        f"waypoint {gripper_ahead + 1}/{len(self._targets)}"
+                    )
+                else:
+                    target_cursor = len(self._targets) - 1
+                    what = (
+                        f"skip to the end of this segment (waypoint "
+                        f"{len(self._targets)}/{len(self._targets)})"
+                    )
+                gap = self._distance_fn(perceived, self._targets[target_cursor])
+                self._prompt_fn(
+                    f"Arm stalled at waypoint {self._cursor + 1}/"
+                    f"{len(self._targets)} ({gap:.3f} from the target). Press "
+                    f"Enter to {what}, or Ctrl-C to abort..."
+                )
+                self._cursor = target_cursor
+                self._ticks_since_advance = 0
+                self._stall_warned = False
+                return
+            if (
+                self._ticks_since_advance >= _STUCK_FAIL_TICKS
+                and self._progress(perceived) < self._stall_advance_min_progress
+            ):
+                # Stuck with too little forward progress for the stall-advance
+                # to fire (e.g. the arm wedged against a box wall after a large
+                # lateral correction). Fail fast instead of hanging to
+                # max_iter_total, which would be minutes of no motion.
+                raise ExecutionFailure(
+                    f"{type(self).__name__} wedged at waypoint "
+                    f"{self._cursor + 1}/{len(self._targets)} for "
+                    f"{self._ticks_since_advance} ticks (distance "
+                    f"{self._distance_fn(perceived, self._targets[self._cursor]):.3f}, "
+                    f"progress {self._progress(perceived):.2f}); giving up. A large "
+                    "grasp correction can stretch the arm into a wall or joint "
+                    "limit — re-stage the object closer to its spot."
+                )
+
+    def _gripper_waypoint_ahead(self) -> int | None:
+        """Index of a gripper waypoint at or just ahead of the cursor.
+
+        Only within _STALL_GRASP_WINDOW waypoints, so the prompt fires when
+        the stall is genuinely right before a grasp/release, not mid-reach.
+        """
+        for i in range(
+            self._cursor, min(len(self._pairs), self._cursor + _STALL_GRASP_WINDOW)
+        ):
+            if _is_gripper_cmd(self._pairs[i][1]):
+                return i
+        return None
 
     def _track_stillness(self, perceived: JointPositions) -> None:
         """Count consecutive ticks on which the perceived joints did not move."""
@@ -426,6 +1193,39 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         del perceived
         return self._targets[self._cursor]
 
+    def _log_far_target(
+        self, perceived: JointPositions, target: JointPositions
+    ) -> None:
+        """Warn when the commanded target leads the arm by a large per-joint gap.
+
+        This is the surge condition that trips a FOLLOWING_ERROR fault: the
+        compliant arm is asked to chase a target far from where it is. Logging
+        it here, before the command goes out, names the joint and the lead so a
+        fault can be attributed rather than inferred from the settled pose.
+        """
+        # Wrap each per-joint difference into [-pi, pi]: continuous joints (1,
+        # 3, 5, 7) can differ from the plan by an irrelevant 2*pi, which would
+        # otherwise read as a spurious ~360 deg lead.
+        diffs = [abs(_wrap(t - p)) for t, p in zip(target, perceived)]
+        max_gap = max(diffs)
+        ticks = getattr(self, "_far_target_ticks", 0)
+        if max_gap <= _FAR_TARGET_WARN_RAD:
+            self._far_target_ticks = 0
+            return
+        if ticks % _FAR_TARGET_LOG_EVERY == 0:
+            worst = diffs.index(max_gap)
+            _logger.warning(
+                "Commanded target leads the arm: joint %d by %.1f deg "
+                "(cursor %d/%d, progress %.2f); per-joint lead %s deg",
+                worst + 1,
+                math.degrees(max_gap),
+                self._cursor,
+                len(self._targets),
+                self._progress(perceived),
+                [round(math.degrees(d), 1) for d in diffs],
+            )
+        self._far_target_ticks = ticks + 1
+
 
 class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
     """Streaming executor that commands a constant-lookahead carrot target.
@@ -462,6 +1262,21 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
         stall_warning_ticks: int = 50,
         stall_advance_ticks: int = 30,
         stall_advance_min_progress: float = 0.5,
+        confirm_grasp_closes: bool = False,
+        prompt_fn: Callable[[str], str] = input,
+        confirm_stall_grasp: bool = False,
+        compensate_base_error: bool = False,
+        compensation_reach: float = 0.8,
+        visual_lateral_mode: str = "off",
+        image_source: Any = None,
+        visual_lateral_gain: float = 0.0003,
+        visual_lateral_sign: float = 1.0,
+        visual_max_lateral: float = 0.04,
+        visual_debug_dir: str | None = None,
+        edge_detector: Callable[[Any], Any] | None = None,
+        recover_segment_start: bool = False,
+        gripper_event_tolerance: float | None = None,
+        debug_kinematics: bool = False,
     ) -> None:
         super().__init__(
             distance_fn=distance_fn,
@@ -474,6 +1289,21 @@ class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):
             stall_warning_ticks=stall_warning_ticks,
             stall_advance_ticks=stall_advance_ticks,
             stall_advance_min_progress=stall_advance_min_progress,
+            confirm_grasp_closes=confirm_grasp_closes,
+            prompt_fn=prompt_fn,
+            confirm_stall_grasp=confirm_stall_grasp,
+            compensate_base_error=compensate_base_error,
+            compensation_reach=compensation_reach,
+            visual_lateral_mode=visual_lateral_mode,
+            image_source=image_source,
+            visual_lateral_gain=visual_lateral_gain,
+            visual_lateral_sign=visual_lateral_sign,
+            visual_max_lateral=visual_max_lateral,
+            visual_debug_dir=visual_debug_dir,
+            edge_detector=edge_detector,
+            recover_segment_start=recover_segment_start,
+            gripper_event_tolerance=gripper_event_tolerance,
+            debug_kinematics=debug_kinematics,
         )
         if lookahead <= 0:
             raise ValueError("lookahead must be > 0")
@@ -550,6 +1380,75 @@ def _path_progress(
 def _perceived_joints(sim_state: ObjectCentricState, robot_name: str) -> JointPositions:
     robot = sim_state.get_object_from_name(robot_name)
     return [sim_state.get(robot, f"joint_{j + 1}") for j in range(7)]
+
+
+def _perceived_base(
+    sim_state: ObjectCentricState, robot_name: str
+) -> tuple[float, float, float]:
+    robot = sim_state.get_object_from_name(robot_name)
+    return (
+        float(sim_state.get(robot, "pos_base_x")),
+        float(sim_state.get(robot, "pos_base_y")),
+        float(sim_state.get(robot, "pos_base_rot")),
+    )
+
+
+def _wrap(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+# Base-pose settle detection for the compensation (see compensate_base_error):
+# consecutive readings required, their agreement tolerances, and the give-up
+# horizon (ticks are ~0.1 s in real mode).
+_SETTLE_STABLE_TICKS = 4
+_SETTLE_POS_TOL = 0.004
+_SETTLE_ROT_TOL = 0.006
+_SETTLE_TIMEOUT_TICKS = 50
+# Wrist-camera detection attempts (one per tick) before the visual lateral
+# correction gives up and falls back to the marker-based compensation.
+_VISUAL_MAX_ATTEMPTS = 10
+# Closed-loop visual servo (visual_lateral_mode == 'servo'): converge the
+# can to within the per-grasp tolerance for _SERVO_CONFIRM_TICKS frames, one
+# joint-1 nudge (capped at _SERVO_MAX_STEP, total _SERVO_MAX_OFFSET) every
+# _SERVO_SETTLE_TICKS ticks so the compliant joint settles between frames,
+# up to _SERVO_MAX_ITERS nudges.
+#
+# The tolerance is chosen per grasp from the gripper's downward pitch: the
+# tall-can 45-degree top grasp (deep box) holds the tight _SERVO_TOLERANCE_PX
+# _STEEP because a residual lateral offset there catches the fingertips on the
+# can's top rim; the short-can 15-degree side grasp (floor) keeps the looser
+# _SERVO_TOLERANCE_PX, where a tight tolerance made the frozen-camera servo
+# accumulate and jump into the neighbouring can.
+_SERVO_TOLERANCE_PX = 20.0
+_SERVO_TOLERANCE_PX_STEEP = 12.0
+_SERVO_STEEP_PITCH_DEG = 30.0
+_SERVO_CONFIRM_TICKS = 2
+_SERVO_SETTLE_TICKS = 8
+_SERVO_MAX_STEP = 0.06
+_SERVO_MAX_OFFSET = 0.30
+# Ticks a cursor may stall with sub-threshold progress before the walk
+# fails fast (rather than hanging to max_iter_total): ~15 s at 0.1 s/tick.
+# Ticks a cursor may stall just short of a gripper waypoint before
+# prompting the operator to fire the gripper at the current pose
+# (confirm_stall_grasp). Fires before _STUCK_FAIL_TICKS.
+_STALL_GRASP_PROMPT_TICKS = 60
+# How many waypoints ahead of a stalled cursor a gripper command may be
+# for the confirm_stall_grasp prompt to consider it 'right before' it.
+_STALL_GRASP_WINDOW = 4
+_STUCK_FAIL_TICKS = 150
+_SERVO_MAX_ITERS = 25
+# Segment-start recovery (see step): how close (distance_fn metric) the arm
+# must be to the segment's first configuration before the walk starts, and
+# the tick budget for getting there.
+_RECOVER_TOL = 0.1
+_RECOVER_MAX_TICKS = 60
+# Tick budget for converging on a gripper event configuration before the
+# command issues anyway (with the residual logged either way).
+_GRIPPER_EVENT_MAX_WAIT = 50
+# Event-convergence integrator: per-tick gain on the remaining joint error
+# and the per-joint cap on the accumulated push (rad).
+_EVENT_INTEGRATOR_GAIN = 0.4
+_EVENT_INTEGRATOR_CAP = 0.15
 
 
 def _absolute_target(
