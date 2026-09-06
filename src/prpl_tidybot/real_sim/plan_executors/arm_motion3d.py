@@ -65,6 +65,13 @@ JointDistanceFn = Callable[[JointPositions, JointPositions], float]
 _BASE_MOTION_EPS = 1e-4
 # Perceived-joint motion (distance_fn metric) below which a tick counts as still.
 _STILL_EPS = 5e-3
+# When the commanded joint target sits more than this (rad, ~17 deg on any one
+# joint) ahead of the perceived joints, the compliant arm is being asked to
+# chase a far target and can trip a FOLLOWING_ERROR fault. Log it (throttled)
+# so we can see which joint and how large the lead is before a fault, rather
+# than only reading the settled pose afterward.
+_FAR_TARGET_WARN_RAD = 0.30
+_FAR_TARGET_LOG_EVERY = 25
 
 
 class ArmMotion3DPlanExecutor(
@@ -459,6 +466,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             self._start_recovered = True
         self._advance_cursor(perceived)
         target = self._command_target(perceived)
+        self._log_far_target(perceived, target)
         _, sim_action = self._pairs[self._cursor]
         if (
             self._confirm_grasp_closes
@@ -1122,6 +1130,36 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         """The joint target to command this tick; subclasses may override."""
         del perceived
         return self._targets[self._cursor]
+
+    def _log_far_target(
+        self, perceived: JointPositions, target: JointPositions
+    ) -> None:
+        """Warn when the commanded target leads the arm by a large per-joint gap.
+
+        This is the surge condition that trips a FOLLOWING_ERROR fault: the
+        compliant arm is asked to chase a target far from where it is. Logging
+        it here, before the command goes out, names the joint and the lead so a
+        fault can be attributed rather than inferred from the settled pose.
+        """
+        diffs = [abs(t - p) for t, p in zip(target, perceived)]
+        max_gap = max(diffs)
+        ticks = getattr(self, "_far_target_ticks", 0)
+        if max_gap <= _FAR_TARGET_WARN_RAD:
+            self._far_target_ticks = 0
+            return
+        if ticks % _FAR_TARGET_LOG_EVERY == 0:
+            worst = diffs.index(max_gap)
+            _logger.warning(
+                "Commanded target leads the arm: joint %d by %.1f deg "
+                "(cursor %d/%d, progress %.2f); per-joint lead %s deg",
+                worst + 1,
+                math.degrees(max_gap),
+                self._cursor,
+                len(self._targets),
+                self._progress(perceived),
+                [round(math.degrees(d), 1) for d in diffs],
+            )
+        self._far_target_ticks = ticks + 1
 
 
 class CarrotArmMotion3DPlanExecutor(StreamingArmMotion3DPlanExecutor):

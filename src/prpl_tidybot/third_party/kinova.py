@@ -31,6 +31,12 @@ from prpl_tidybot.third_party.utils import create_pid_file
 _FAULT_LOG_TICKS = 500
 _FAULT_LOG_ENABLED = os.environ.get("PRPL_ARM_FAULT_LOG", "1") != "0"
 _FAULT_LOG_DIR = os.environ.get("PRPL_ARM_FAULT_LOG_DIR", "/tmp")
+# When the arm faults, the tight-timeout cyclic Refresh usually starts throwing
+# before a fault-flagged feedback frame is ever delivered, so the ring buffer is
+# also dumped after this many consecutive Refresh failures (fault onset). At
+# 1 kHz with a 3 ms Refresh timeout this is a few tens of ms of no response,
+# well past any single dropped frame.
+_FAULT_REFRESH_FAIL_TRIGGER = 5
 
 
 def _import_kortex():
@@ -348,6 +354,7 @@ class TorqueControlledArm:
         controller = getattr(control_callback, "__self__", None)
         fault_log = collections.deque(maxlen=_FAULT_LOG_TICKS)
         fault_dumped = False
+        consecutive_refresh_fail = 0
 
         # Update state before entering loop
         self.update_state()
@@ -403,6 +410,7 @@ class TorqueControlledArm:
                 )
 
                 # Send command frame
+                refresh_ok = True
                 try:
                     # Note: This call takes up most of the 1000 us cyclic step time
                     self.base_feedback = self.base_cyclic.Refresh(
@@ -410,62 +418,93 @@ class TorqueControlledArm:
                     )
                 except:
                     failed_cyclic_count += 1
+                    refresh_ok = False
 
                 # Update robot state
-                self.update_state()
+                if refresh_ok:
+                    self.update_state()
+                    consecutive_refresh_fail = 0
+                else:
+                    consecutive_refresh_fail += 1
 
                 if _FAULT_LOG_ENABLED and not fault_dumped:
                     fault_dumped = self._record_and_check_fault(
-                        fault_log, controller, current_command, t_now
+                        fault_log,
+                        controller,
+                        current_command,
+                        t_now,
+                        refresh_ok,
+                        consecutive_refresh_fail,
                     )
 
         self.cyclic_running = False
 
-    def _record_and_check_fault(self, fault_log, controller, current_command, t_now):
+    def _record_and_check_fault(
+        self,
+        fault_log,
+        controller,
+        current_command,
+        t_now,
+        refresh_ok,
+        consecutive_refresh_fail,
+    ):
         """Append this tick to the ring buffer; dump it if the arm has faulted.
 
         This runs inside the 1 kHz cyclic loop, so the per-tick path only reads
         cheap integer fault flags and appends array copies; the expensive
-        serialization happens once, on the tick a fault is first seen. Returns
-        True once a dump has been written so the caller stops checking.
+        serialization happens once, on the tick a fault is first seen. A fault
+        is recognized either from a fault-flagged feedback frame or, because the
+        tight-timeout Refresh usually starts throwing before such a frame
+        arrives, from a burst of consecutive Refresh failures. Returns True once
+        a dump has been written so the caller stops checking.
         """
         actuators = self.base_feedback.actuators
         faulted = False
-        for i in range(self.actuator_count):
-            if actuators[i].fault_bank_a or actuators[i].fault_bank_b:
-                faulted = True
-                break
+        if refresh_ok:
+            for i in range(self.actuator_count):
+                if actuators[i].fault_bank_a or actuators[i].fault_bank_b:
+                    faulted = True
+                    break
 
-        # Desired joint position the controller is steering toward this tick
-        # (OTG output), and its final target; the gap to the measured position
-        # is the tracking lag that a FOLLOWING_ERROR fault trips on.
-        if controller is not None and getattr(controller, "q_d", None) is not None:
-            q_des = controller.q_d.copy()
-            q_target = controller.otg_inp.target_position.copy()
-        else:
-            q_des = None
-            q_target = None
-        fault_log.append(
-            (
-                t_now,
-                self.q.copy(),
-                self.dq.copy(),
-                self.tau.copy(),
-                current_command.copy(),
-                q_des,
-                q_target,
-                tuple(int(a.fault_bank_a) for a in actuators),
-                tuple(int(a.fault_bank_b) for a in actuators),
+            # Desired joint position the controller is steering toward this tick
+            # (OTG output), and its final target; the gap to the measured
+            # position is the tracking lag a FOLLOWING_ERROR fault trips on.
+            if controller is not None and getattr(controller, "q_d", None) is not None:
+                q_des = controller.q_d.copy()
+                q_target = controller.otg_inp.target_position.copy()
+            else:
+                q_des = None
+                q_target = None
+            fault_log.append(
+                (
+                    t_now,
+                    self.q.copy(),
+                    self.dq.copy(),
+                    self.tau.copy(),
+                    current_command.copy(),
+                    q_des,
+                    q_target,
+                    tuple(int(a.fault_bank_a) for a in actuators),
+                    tuple(int(a.fault_bank_b) for a in actuators),
+                )
             )
-        )
-        if not faulted:
+
+        by_failures = consecutive_refresh_fail >= _FAULT_REFRESH_FAIL_TRIGGER
+        if not faulted and not by_failures:
+            return False
+        if not fault_log:
             return False
 
-        which = [
-            i + 1
-            for i in range(self.actuator_count)
-            if actuators[i].fault_bank_a or actuators[i].fault_bank_b
-        ]
+        if faulted:
+            which = [
+                i + 1
+                for i in range(self.actuator_count)
+                if actuators[i].fault_bank_a or actuators[i].fault_bank_b
+            ]
+        else:
+            which = (
+                f"unknown (dumped after {consecutive_refresh_fail} Refresh failures)"
+            )
         path = os.path.join(
             _FAULT_LOG_DIR, f"arm_fault_{time.strftime('%Y%m%d_%H%M%S')}.json"
         )
