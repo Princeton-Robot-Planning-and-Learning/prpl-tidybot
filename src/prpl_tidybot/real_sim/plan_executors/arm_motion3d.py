@@ -338,6 +338,10 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._servo_cooldown: int = 0
         self._servo_prev_error: float | None = None
         self._servo_sign: float = visual_lateral_sign
+        # Per-grasp servo tolerance (px), chosen from the grasp pitch on the
+        # first servo tick of each segment (see _SERVO_TOLERANCE_PX*).
+        self._servo_tolerance_px: float = _SERVO_TOLERANCE_PX
+        self._servo_tolerance_set: bool = False
         self._start_recovered: bool = False
         self._recover_ticks: int = 0
 
@@ -380,6 +384,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         self._servo_cooldown = 0
         self._servo_prev_error = None
         self._servo_sign = self._visual_lateral_sign
+        self._servo_tolerance_px = _SERVO_TOLERANCE_PX
+        self._servo_tolerance_set = False
         self._start_recovered = False
         self._recover_ticks = 0
 
@@ -412,6 +418,8 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                 self._tick_count += 1
                 return action, hold
             if self._visual_applicable():
+                if not self._servo_tolerance_set:
+                    self._set_servo_tolerance(sim_state)
                 outcome = self._attempt_visual_correction()
                 if outcome == "retry":
                     hold_joints = self._servo_hold_joints(sim_state)
@@ -685,9 +693,9 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
 
         The arm holds at the pre-grasp with the accumulated joint-1 offset;
         after each nudge it waits _SERVO_SETTLE_TICKS for the compliant joint
-        to move before trusting a new frame. Converges to within
-        _SERVO_TOLERANCE_PX, self-flipping the sign if a nudge worsened the
-        error, then bakes the offset into the reach targets.
+        to move before trusting a new frame. Converges to within the per-grasp
+        tolerance (self._servo_tolerance_px), self-flipping the sign if a nudge
+        worsened the error, then bakes the offset into the reach targets.
         """
         if self._servo_cooldown > 0:
             self._servo_cooldown -= 1
@@ -708,14 +716,14 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             return "failed"
         self._visual_attempts = 0
         error = float(edges.servo_error_px)
-        if abs(error) <= _SERVO_TOLERANCE_PX:
+        if abs(error) <= self._servo_tolerance_px:
             self._servo_aligned += 1
             if self._servo_aligned >= _SERVO_CONFIRM_TICKS:
                 _logger.info(
                     "Visual servo aligned: |error| %.1f px <= %.1f, joint 1 "
                     "offset %+.4f rad after %d nudges.",
                     error,
-                    _SERVO_TOLERANCE_PX,
+                    self._servo_tolerance_px,
                     self._servo_j1_offset,
                     self._servo_iters,
                 )
@@ -761,6 +769,65 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             return "applied"
         return "retry"
 
+    def _ensure_fk_env(self) -> None:
+        """Lazily build the kinder sim robot used for model forward kinematics."""
+        # pylint: disable=import-outside-toplevel
+        if self._fk_env is None:
+            from kinder.envs.kinematic3d.cylinder_shelf3d import (
+                ObjectCentricCylinderShelf3DEnv,
+            )
+            from kinder.envs.kinematic3d.utils import extend_joints_to_include_fingers
+            from pybullet_helpers.geometry import SE2Pose
+
+            self._fk_env = ObjectCentricCylinderShelf3DEnv(
+                num_cylinders=1, allow_state_access=True
+            )
+            self._fk_extend = extend_joints_to_include_fingers
+            self._fk_se2 = SE2Pose
+
+    def _set_servo_tolerance(self, sim_state: ObjectCentricState) -> None:
+        """Pick the servo tolerance for this grasp from the gripper's pitch.
+
+        Computes the downward pitch of the grasp (gripper-close) waypoint via
+        model FK; a steep (top) grasp holds the tight tolerance, a shallow
+        (side) grasp the looser one. Falls back to the loose default if there
+        is no close waypoint or FK is unavailable.
+        """
+        self._servo_tolerance_set = True
+        self._servo_tolerance_px = _SERVO_TOLERANCE_PX
+        close_idx = next(
+            (
+                i
+                for i, (_, a) in enumerate(self._pairs)
+                if not isinstance(a, SkillCall) and float(a[10]) < -0.5
+            ),
+            None,
+        )
+        if close_idx is None:
+            return
+        try:
+            # pylint: disable=import-outside-toplevel
+            from pybullet_helpers.geometry import matrix_from_quat
+
+            self._ensure_fk_env()
+            base = _perceived_base(sim_state, self._robot_name)
+            self._fk_env.robot.set_base(self._fk_se2(*base))
+            self._fk_env.robot.arm.set_joints(
+                self._fk_extend(list(self._targets[close_idx][:7]))
+            )
+            pose = self._fk_env.robot.arm.get_end_effector_pose()
+            approach_z = float(matrix_from_quat(pose.orientation)[2, 2])
+            pitch_deg = math.degrees(math.asin(max(-1.0, min(1.0, -approach_z))))
+        except Exception:  # pylint: disable=broad-except
+            return
+        if abs(pitch_deg) >= _SERVO_STEEP_PITCH_DEG:
+            self._servo_tolerance_px = _SERVO_TOLERANCE_PX_STEEP
+        _logger.info(
+            "Visual servo tolerance %.0f px (grasp pitch %.0f deg).",
+            self._servo_tolerance_px,
+            pitch_deg,
+        )
+
     def _dump_visual_frame(self, image: Any, edges: Any) -> None:
         """Save the raw wrist frame (and edge overlay when detected) for offline
         detector tuning."""
@@ -785,23 +852,7 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         both integrator states.
         """
         try:
-            # Lazy construction: FK needs a kinder sim robot, only worth
-            # building when this debugging is enabled.
-            # pylint: disable=import-outside-toplevel
-            if self._fk_env is None:
-                from kinder.envs.kinematic3d.cylinder_shelf3d import (
-                    ObjectCentricCylinderShelf3DEnv,
-                )
-                from kinder.envs.kinematic3d.utils import (
-                    extend_joints_to_include_fingers,
-                )
-                from pybullet_helpers.geometry import SE2Pose
-
-                self._fk_env = ObjectCentricCylinderShelf3DEnv(
-                    num_cylinders=1, allow_state_access=True
-                )
-                self._fk_extend = extend_joints_to_include_fingers
-                self._fk_se2 = SE2Pose
+            self._ensure_fk_env()
             base = _perceived_base(sim_state, self._robot_name)
 
             def fk(joints: JointPositions) -> list[float]:
@@ -1346,11 +1397,20 @@ _SETTLE_TIMEOUT_TICKS = 50
 # correction gives up and falls back to the marker-based compensation.
 _VISUAL_MAX_ATTEMPTS = 10
 # Closed-loop visual servo (visual_lateral_mode == 'servo'): converge the
-# can to within _SERVO_TOLERANCE_PX for _SERVO_CONFIRM_TICKS frames, one
+# can to within the per-grasp tolerance for _SERVO_CONFIRM_TICKS frames, one
 # joint-1 nudge (capped at _SERVO_MAX_STEP, total _SERVO_MAX_OFFSET) every
 # _SERVO_SETTLE_TICKS ticks so the compliant joint settles between frames,
 # up to _SERVO_MAX_ITERS nudges.
+#
+# The tolerance is chosen per grasp from the gripper's downward pitch: the
+# tall-can 45-degree top grasp (deep box) holds the tight _SERVO_TOLERANCE_PX
+# _STEEP because a residual lateral offset there catches the fingertips on the
+# can's top rim; the short-can 15-degree side grasp (floor) keeps the looser
+# _SERVO_TOLERANCE_PX, where a tight tolerance made the frozen-camera servo
+# accumulate and jump into the neighbouring can.
 _SERVO_TOLERANCE_PX = 20.0
+_SERVO_TOLERANCE_PX_STEEP = 12.0
+_SERVO_STEEP_PITCH_DEG = 30.0
 _SERVO_CONFIRM_TICKS = 2
 _SERVO_SETTLE_TICKS = 8
 _SERVO_MAX_STEP = 0.06

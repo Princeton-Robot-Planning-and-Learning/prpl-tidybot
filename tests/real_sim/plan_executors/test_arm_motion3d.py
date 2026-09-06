@@ -9,6 +9,7 @@ Production wires in pybullet-helpers' weighted joint distance.
 """
 
 import logging
+import math
 from pathlib import Path
 from typing import Sequence
 
@@ -919,6 +920,42 @@ def _grasp_segment_executor(mode: str, image: np.ndarray):
     close[10] = -1.0
     executor.set_trajectory([(state, reach), (state, close)])
     return executor, state
+
+
+def test_servo_tolerance_tight_for_steep_grasp():
+    """The servo holds the tight tolerance for a steep (top) grasp and the loose
+    one for a shallow (side) grasp, chosen from the grasp's gripper pitch."""
+    import types
+
+    from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
+        _SERVO_TOLERANCE_PX,
+        _SERVO_TOLERANCE_PX_STEEP,
+    )
+
+    def _tolerance_for_pitch(quat):
+        executor, state = _grasp_segment_executor("servo", np.zeros((1, 1, 3)))
+        # Install a fake FK env so _ensure_fk_env is a no-op and the grasp pose
+        # returns the chosen orientation.
+        pose = types.SimpleNamespace(
+            orientation=np.array(quat), position=[0.0, 0.0, 0.0]
+        )
+        arm = types.SimpleNamespace(
+            set_joints=lambda j: None, get_end_effector_pose=lambda: pose
+        )
+        executor._fk_env = types.SimpleNamespace(
+            robot=types.SimpleNamespace(set_base=lambda p: None, arm=arm)
+        )
+        executor._fk_se2 = lambda *a: None
+        executor._fk_extend = lambda j: j
+        executor._set_servo_tolerance(state)
+        return executor._servo_tolerance_px
+
+    # Rotation about Y by 135 deg -> gripper z-axis pitched 45 deg down (steep).
+    steep = [0.0, math.sin(math.radians(67.5)), 0.0, math.cos(math.radians(67.5))]
+    # Rotation about Y by 105 deg -> 15 deg down (shallow side grasp).
+    shallow = [0.0, math.sin(math.radians(52.5)), 0.0, math.cos(math.radians(52.5))]
+    assert _tolerance_for_pitch(steep) == _SERVO_TOLERANCE_PX_STEEP
+    assert _tolerance_for_pitch(shallow) == _SERVO_TOLERANCE_PX
 
 
 def test_visual_lateral_correction_shifts_joint_one():
