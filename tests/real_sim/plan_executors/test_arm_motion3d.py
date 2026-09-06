@@ -787,10 +787,10 @@ def test_stall_needs_progress_and_stillness():
     assert real_action.gripper_goal == pytest.approx(0.4)
 
 
-def test_release_stall_auto_advances_without_prompt(caplog):
-    """Stalled short of a release with the arm within reach of it, the cursor
-    advances to the release automatically (no operator prompt) so the gripper
-    opens -- the deadband case that wedged the placement one short of release."""
+def test_stall_prompts_then_fires_gripper_ahead():
+    """Stalled short of a gripper (open) waypoint, the executor prompts the
+    operator; on the (mocked) Enter it jumps the cursor to the gripper waypoint
+    and fires it."""
     from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
         _STALL_GRASP_PROMPT_TICKS,
     )
@@ -806,19 +806,44 @@ def test_release_stall_auto_advances_without_prompt(caplog):
     )
     # Targets 0.1..0.4, then a gripper OPEN at 0.4, then a retract to 0.3.
     executor.set_trajectory(_approach_then_open(4))
-    # Stuck at 0.31: progress 0.1 on the 0.3->0.4 segment (below 0.5, so the
-    # ordinary stall-arrival never fires) but only 0.09 from the release pose.
     stuck = _make_state(arm_conf=[0.31, 0, 0, 0, 0, 0, 0])
     fired = None
-    with caplog.at_level(logging.WARNING):
-        for _ in range(_STALL_GRASP_PROMPT_TICKS + 2):
-            action, _ = executor.step(stuck)
-            fired = action.gripper_goal
-    assert fired == 0.0, "release was never issued"
-    assert prompts == [], "a release must not prompt the operator"
-    assert any(
-        "advancing so the event convergence" in r.getMessage() for r in caplog.records
+    for _ in range(_STALL_GRASP_PROMPT_TICKS + 2):
+        action, _ = executor.step(stuck)
+        fired = action.gripper_goal
+    assert len(prompts) == 1
+    assert "fire the gripper OPEN" in prompts[0]
+    assert fired == 0.0, "release was never issued after the prompt"
+
+
+def test_stall_with_no_gripper_prompts_to_skip_segment():
+    """Stalled in a pure motion segment (no gripper ahead, e.g. the carry), the
+    executor prompts to skip to the segment end and, on the mocked Enter, jumps
+    the cursor there so the segment can complete instead of wedging."""
+    from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
+        _STALL_GRASP_PROMPT_TICKS,
     )
+
+    prompts: list[str] = []
+    executor = StreamingArmMotion3DPlanExecutor(
+        distance_fn=_l1_distance,
+        advance_radius=0.05,
+        arrival_tolerance=0.4,
+        stall_advance_ticks=5,
+        stall_advance_min_progress=0.5,
+        confirm_stall_grasp=True,
+        prompt_fn=lambda msg: prompts.append(msg) or "",
+    )
+    executor.set_trajectory(_joint1_chain(6))  # 0.1 .. 0.6, no gripper event
+    # Stuck at 0.35: past waypoint 0.3, short of 0.4, progress 0.5-ish but the
+    # remaining waypoints keep the cursor from advancing to the end.
+    stuck = _make_state(arm_conf=[0.35, 0, 0, 0, 0.3, 0, 0])
+    for _ in range(_STALL_GRASP_PROMPT_TICKS + 2):
+        executor.step(stuck)
+    assert len(prompts) == 1
+    assert "skip to the end of this segment" in prompts[0]
+    # The cursor is now at the last waypoint.
+    assert executor._cursor == len(executor._targets) - 1
 
 
 def test_confirm_grasp_closes_prompts_once_per_close():

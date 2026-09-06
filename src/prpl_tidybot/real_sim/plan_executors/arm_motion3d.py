@@ -1069,55 +1069,44 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
                     self._progress(perceived),
                 )
             if (
-                not self._stall_prompted
+                self._confirm_stall_grasp
+                and not self._stall_prompted
                 and self._ticks_since_advance >= _STALL_GRASP_PROMPT_TICKS
             ):
-                # Stalled short of a gripper waypoint: the compliant arm settled
-                # near the grasp/release pose but cannot close the last bit of
-                # the commanded push (the carrot stops leading at the gripper
-                # waypoint), so the cursor never reaches the gripper command.
-                release_ahead = self._release_waypoint_ahead()
-                if (
-                    release_ahead is not None
-                    and self._distance_fn(perceived, self._targets[release_ahead])
-                    <= _RELEASE_STALL_ADVANCE_DIST
-                ):
-                    # Settled within reach of a release: advance to it
-                    # automatically. Dropping the can from the settled pose is
-                    # safe, and the event-convergence integrator then pushes the
-                    # command onto the exact release pose. No operator needed.
-                    _logger.warning(
-                        "%s settled %.3f from the release (waypoint %d/%d); "
-                        "advancing so the event convergence can place it.",
-                        type(self).__name__,
-                        self._distance_fn(perceived, self._targets[release_ahead]),
-                        release_ahead + 1,
-                        len(self._targets),
-                    )
-                    self._cursor = release_ahead
-                    self._ticks_since_advance = 0
-                    self._stall_warned = False
-                    return
+                # The compliant arm has settled short of its target and the
+                # cursor cannot advance (deadband residual over advance_radius,
+                # sometimes compounded by an un-recovered visual-servo joint-1
+                # offset carried into the next segment). Rather than guess when
+                # it is safe to skip ahead, ask the operator. If a gripper
+                # waypoint is just ahead, jumping to it fires the gripper at the
+                # settled pose; otherwise (a pure motion segment, e.g. the
+                # carry) jump to the end of the segment so the next segment,
+                # which recovers from the perceived pose, takes over.
+                self._stall_prompted = True
                 gripper_ahead = self._gripper_waypoint_ahead()
-                if self._confirm_stall_grasp and gripper_ahead is not None:
-                    # A grasp cannot fire blindly where the arm settled (it may
-                    # miss the can), so ask the operator to judge: on Enter jump
-                    # the cursor to the gripper waypoint so it fires at the
-                    # current pose; to abort, Ctrl-C.
-                    self._stall_prompted = True
+                if gripper_ahead is not None:
                     is_close = float(self._pairs[gripper_ahead][1][10]) < -0.5
-                    gap = self._distance_fn(perceived, self._targets[gripper_ahead])
-                    self._prompt_fn(
-                        f"Arm stalled {gap:.3f} short of the gripper "
-                        f"{'CLOSE' if is_close else 'OPEN'} (waypoint "
-                        f"{gripper_ahead + 1}/{len(self._targets)}). Press Enter "
-                        "to fire the gripper at the current pose, or Ctrl-C to "
-                        "abort..."
+                    target_cursor = gripper_ahead
+                    what = (
+                        f"fire the gripper {'CLOSE' if is_close else 'OPEN'} at "
+                        f"waypoint {gripper_ahead + 1}/{len(self._targets)}"
                     )
-                    self._cursor = gripper_ahead
-                    self._ticks_since_advance = 0
-                    self._stall_warned = False
-                    return
+                else:
+                    target_cursor = len(self._targets) - 1
+                    what = (
+                        f"skip to the end of this segment (waypoint "
+                        f"{len(self._targets)}/{len(self._targets)})"
+                    )
+                gap = self._distance_fn(perceived, self._targets[target_cursor])
+                self._prompt_fn(
+                    f"Arm stalled at waypoint {self._cursor + 1}/"
+                    f"{len(self._targets)} ({gap:.3f} from the target). Press "
+                    f"Enter to {what}, or Ctrl-C to abort..."
+                )
+                self._cursor = target_cursor
+                self._ticks_since_advance = 0
+                self._stall_warned = False
+                return
             if (
                 self._ticks_since_advance >= _STUCK_FAIL_TICKS
                 and self._progress(perceived) < self._stall_advance_min_progress
@@ -1146,23 +1135,6 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
             self._cursor, min(len(self._pairs), self._cursor + _STALL_GRASP_WINDOW)
         ):
             if _is_gripper_cmd(self._pairs[i][1]):
-                return i
-        return None
-
-    def _release_waypoint_ahead(self) -> int | None:
-        """Index of the next release (gripper-open) waypoint at or ahead of the
-        cursor, searched over the whole remaining segment.
-
-        Unbounded by waypoint count on purpose: the deadband gap short of a
-        release can span several densified waypoints, and the caller gates the
-        auto-advance on the distance to the release pose, not the waypoint
-        count, so a stall genuinely far from the release does not trip it.
-        """
-        for i in range(self._cursor, len(self._pairs)):
-            if (
-                _is_gripper_cmd(self._pairs[i][1])
-                and float(self._pairs[i][1][10]) > 0.5
-            ):
                 return i
         return None
 
@@ -1463,13 +1435,6 @@ _STALL_GRASP_PROMPT_TICKS = 60
 # How many waypoints ahead of a stalled cursor a gripper command may be
 # for the confirm_stall_grasp prompt to consider it 'right before' it.
 _STALL_GRASP_WINDOW = 4
-# Distance (weighted joint metric) within which a cursor stalled short of a
-# release waypoint auto-advances to it, letting the event-convergence
-# integrator finish the placement. Sized above the compliant arm's deadband
-# residual at a gripper event (~0.15) so the marginal case that wedges the
-# cursor one short of the release clears, but a stall genuinely far from the
-# release (a wall/limit) does not.
-_RELEASE_STALL_ADVANCE_DIST = 0.25
 _STUCK_FAIL_TICKS = 150
 _SERVO_MAX_ITERS = 25
 # Segment-start recovery (see step): how close (distance_fn metric) the arm
