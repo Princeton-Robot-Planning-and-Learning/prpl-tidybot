@@ -1141,7 +1141,10 @@ class StreamingArmMotion3DPlanExecutor(ArmMotion3DPlanExecutor):
         it here, before the command goes out, names the joint and the lead so a
         fault can be attributed rather than inferred from the settled pose.
         """
-        diffs = [abs(t - p) for t, p in zip(target, perceived)]
+        # Wrap each per-joint difference into [-pi, pi]: continuous joints (1,
+        # 3, 5, 7) can differ from the plan by an irrelevant 2*pi, which would
+        # otherwise read as a spurious ~360 deg lead.
+        diffs = [abs(_wrap(t - p)) for t, p in zip(target, perceived)]
         max_gap = max(diffs)
         ticks = getattr(self, "_far_target_ticks", 0)
         if max_gap <= _FAR_TARGET_WARN_RAD:

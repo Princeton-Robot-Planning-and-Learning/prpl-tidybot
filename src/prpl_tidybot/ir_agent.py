@@ -37,10 +37,6 @@ from kinder.envs.kinematic3d.cylinder_shelf3d import (
     ObjectCentricCylinderShelf3DEnv,
 )
 from kinder.envs.kinematic3d.utils import extend_joints_to_include_fingers
-from kinder_models.kinematic3d.cylinder_shelf3d.parameterized_skills import (
-    _approach_pitch,
-    _solve_planar_joints,
-)
 from kinder_bilevel_planning import restock_scene
 from kinder_bilevel_planning.agent import AgentFailure
 from kinder_bilevel_planning.env_models import create_bilevel_planning_models
@@ -48,6 +44,10 @@ from kinder_bilevel_planning.injection import (
     place_params_from_ir,
     run_injected_sesame,
     skeleton_from_ir,
+)
+from kinder_models.kinematic3d.cylinder_shelf3d.parameterized_skills import (
+    _approach_pitch,
+    _solve_planar_joints,
 )
 from numpy.typing import NDArray
 from prpl_utils.planning_agent import PlanningAgent
@@ -300,7 +300,21 @@ class InjectedPlanAgent(
         def hang(idx: int) -> float:
             return float(heights[idx]) - float(depths[idx])
 
-        ref = int(demo.get("ref_cylinder", self._place_demo_bottom_ref))
+        if "ref_cylinder" in demo:
+            ref = int(demo["ref_cylinder"])
+        else:
+            # Default the reference to a can on this board, not the bottom-board
+            # ref: a demo records one can's placement, and the height offset for
+            # another can must be measured against a can on the same board. Using
+            # the bottom ref for the top demo compared the shorts' hang against a
+            # tall can's, producing a ~16 cm spurious shift that drove joint 4
+            # past its limit (a FOLLOWING_ERROR fault).
+            same_board = [
+                int(cyl.removeprefix("cylinder"))
+                for cyl in place_cylinders
+                if self._ir["placements"][cyl]["layer"] == layer
+            ]
+            ref = same_board[0] if same_board else self._place_demo_bottom_ref
         ref_hang = hang(ref)
         deltas: list[float] = []
         for cyl in place_cylinders:
