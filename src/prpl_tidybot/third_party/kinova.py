@@ -508,18 +508,23 @@ class TorqueControlledArm:
         path = os.path.join(
             _FAULT_LOG_DIR, f"arm_fault_{time.strftime('%Y%m%d_%H%M%S')}.json"
         )
+        # Ruckig's target_position is a plain Python list, not a numpy array, so
+        # convert every vector through np.asarray to native floats uniformly.
+        def _as_list(x):
+            return None if x is None else np.asarray(x, dtype=float).tolist()
+
         try:
             records = []
             for t, q, dq, tau, cur, qd, qt, fa, fb in fault_log:
                 records.append(
                     {
                         "t": t,
-                        "q_meas": q.tolist(),
-                        "dq_meas": dq.tolist(),
-                        "tau_meas": tau.tolist(),
-                        "current_cmd": cur.tolist(),
-                        "q_des": None if qd is None else qd.tolist(),
-                        "q_target": None if qt is None else qt.tolist(),
+                        "q_meas": _as_list(q),
+                        "dq_meas": _as_list(dq),
+                        "tau_meas": _as_list(tau),
+                        "current_cmd": _as_list(cur),
+                        "q_des": _as_list(qd),
+                        "q_target": _as_list(qt),
                         "fault_bank_a": list(fa),
                         "fault_bank_b": list(fb),
                     }
