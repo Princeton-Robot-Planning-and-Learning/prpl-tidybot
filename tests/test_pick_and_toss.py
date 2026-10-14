@@ -8,11 +8,32 @@ from pathlib import Path
 import pytest
 from hydra import compose, initialize_config_dir
 
+from prpl_tidybot import pick_and_toss
 from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
 from prpl_tidybot.pick_and_toss import run_pick_and_toss
 from prpl_tidybot.real_sim.perceivers import kinematic3d
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
+
+
+_ENV_MODELS_CACHE: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _reuse_env_models(monkeypatch):
+    """Build the planner's env models once per module rather than per run: each build
+    holds a pybullet sim that is never torn down, and the suite's peak memory adds up.
+    """
+    original = pick_and_toss.build_planner_env_models
+
+    def cached(env_name, make_kwargs, env_model_kwargs=None):
+        if env_name not in _ENV_MODELS_CACHE:
+            _ENV_MODELS_CACHE[env_name] = original(
+                env_name, make_kwargs, env_model_kwargs
+            )
+        return _ENV_MODELS_CACHE[env_name]
+
+    monkeypatch.setattr(pick_and_toss, "build_planner_env_models", cached)
 
 
 def _compose(mode: str = "fake", **extra):

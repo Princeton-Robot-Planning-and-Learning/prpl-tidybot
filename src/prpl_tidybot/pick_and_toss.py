@@ -23,10 +23,12 @@ interface is built), and ``skip_toss`` stops after the pick.
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -50,9 +52,15 @@ from relational_structs import ObjectCentricState
 import prpl_tidybot.config_resolvers  # noqa: F401  # pylint: disable=unused-import
 from prpl_tidybot.interfaces.arm_interface import ArmInterface
 from prpl_tidybot.pipeline import _resolve_log_dir
-from prpl_tidybot.preview import planned_trajectory_from_agent, preview_or_abort
+from prpl_tidybot.preview import (
+    find_floor_violation,
+    planned_trajectory_from_agent,
+    preview_or_abort,
+)
+from prpl_tidybot.real_env import RealTidyBotEnv
 from prpl_tidybot.real_sim import build_planner_env_models
 from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
+from prpl_tidybot.sim_env import KinderSimEnv
 from prpl_tidybot.toss import describe_toss
 from prpl_tidybot.toss_outcome import TossCapture
 
@@ -61,6 +69,7 @@ _logger = logging.getLogger(__name__)
 PromptFn = Callable[[str], str]
 
 PICK_SKILL_NAME = "Pick"
+_CUBE_NAME = "cube0"
 
 
 @dataclass(frozen=True)
@@ -78,6 +87,8 @@ class PickAndTossSummary:
     toss: dict[str, Any] | None = None
     toss_outcome: dict[str, Any] | None = None
     final_state: ObjectCentricState | None = None
+    # One record per cycle (also written to cycles.json in the log dir).
+    cycles: list[dict[str, Any]] = field(default_factory=list)
 
 
 class PickSkillAgent(BilevelPlanningAgent):
@@ -102,6 +113,9 @@ class PickSkillAgent(BilevelPlanningAgent):
         super().__init__(env_models, seed, max_skill_horizon=max_skill_horizon)
         self._max_attempts = max_attempts
         self.attempts_used = 0
+        # One stream across resets, so each cycle of a loop samples fresh
+        # parameters rather than replaying the first cycle's.
+        self._rng = np.random.default_rng(seed)
 
     def _run_planning(self) -> tuple[list, list]:
         models = self._env_models
@@ -135,12 +149,16 @@ class PickSkillAgent(BilevelPlanningAgent):
             state_abstractor=models.state_abstractor,
             max_trajectory_steps=self._max_skill_horizon,
         )
-        rng = np.random.default_rng(self._seed)
         for attempt in range(1, self._max_attempts + 1):
             self.attempts_used = attempt
             try:
                 states, actions = sampler(
-                    state, abstract, operator, successor, BilevelPlanningGraph(), rng
+                    state,
+                    abstract,
+                    operator,
+                    successor,
+                    BilevelPlanningGraph(),
+                    self._rng,
                 )
             except TrajectorySamplingFailure as e:
                 _logger.info("Pick attempt %d failed: %s", attempt, e or "no effect")
@@ -166,6 +184,8 @@ def run_pick_and_toss(
     """
     if cfg.skip_pick and cfg.skip_toss:
         raise ValueError("skip_pick and skip_toss together leave nothing to do.")
+    if cfg.skip_pick and int(cfg.get("cycles", 1)) > 1:
+        raise ValueError("cycles > 1 needs the pick; drop skip_pick.")
     interactive = (
         cfg.mode == "real" if cfg.get("interactive") is None else bool(cfg.interactive)
     )
@@ -181,6 +201,19 @@ def _run_pick(
     interactive: bool,
     prompt_fn: PromptFn,
 ) -> PickAndTossSummary:
+    cycles = int(cfg.get("cycles", 1))
+    if cycles < 1:
+        raise ValueError(f"cycles must be at least 1, got {cycles}.")
+    if cycles > 1:
+        if cfg.skip_toss:
+            raise ValueError("cycles > 1 needs the toss; drop skip_toss.")
+        if cfg.mode == "sim":
+            raise ValueError("cycles > 1 needs a toss, which the sim does not have.")
+        if not cfg.capture.enabled or log_dir is None:
+            raise ValueError(
+                "cycles > 1 needs the landing capture (capture.enabled and a log "
+                "dir): the landing decides whether the next pick is attempted."
+            )
     kinder.register_all_environments()
     pipeline = cfg.env.pipelines[cfg.mode]
     real_env = hydra.utils.instantiate(pipeline.real_env, _convert_="all")
@@ -202,42 +235,234 @@ def _run_pick(
     runner: Runner = Runner(
         real_env=real_env, perceiver=perceiver, agent=agent, plan_executor=plan_executor
     )
-
-    def summary(**kwargs: Any) -> PickAndTossSummary:
-        return PickAndTossSummary(mode=cfg.mode, **kwargs)
+    shadow_sim = None
+    records: list[dict[str, Any]] = []
+    last: _CycleResult | None = None
+    stop_reason: str | None = None
 
     # As in run_planner: always close the env, so the arm's torque loop and
     # the base session do not outlive the process.
     try:
-        _logger.info("Perceiving and rolling out the PickController...")
-        start = time.monotonic()
-        try:
-            state = runner.reset(seed=cfg.seed)
-        except AgentFailure as e:
-            return summary(
-                picked=False,
-                pick_steps=0,
-                tossed=False,
-                finish_reason=f"pick_failure: {e}",
+        for cycle in range(1, cycles + 1):
+            if last is not None:
+                stop_reason = _landing_problem(cfg, last.toss_outcome)
+                if stop_reason is not None:
+                    break
+            if (
+                shadow_sim is None
+                and cfg.mode == "real"
+                and log_dir is not None
+                and bool(cfg.preview.get("enabled"))
+            ):
+                shadow_sim = hydra.utils.instantiate(
+                    cfg.env.pipelines.sim.real_env, _convert_="all"
+                )
+            cycle_dir = log_dir
+            if log_dir is not None and cycles > 1:
+                cycle_dir = log_dir / f"cycle_{cycle:02d}"
+                cycle_dir.mkdir(parents=True, exist_ok=True)
+            _logger.info("Cycle %d/%d.", cycle, cycles)
+            result = _run_cycle(
+                cfg,
+                cycle,
+                runner,
+                real_env,
+                agent,
+                shadow_sim,
+                cycle_dir,
+                interactive,
+                prompt_fn,
+                previous_landing=(
+                    None
+                    if last is None or last.toss_outcome is None
+                    else last.toss_outcome["landing"]
+                ),
             )
-        _logger.info(
-            "Pick trajectory found in %.1fs (%d attempt(s)).",
-            time.monotonic() - start,
-            agent.attempts_used,
+            records.append(result.record)
+            last = result
+            if result.stop_reason is not None:
+                stop_reason = result.stop_reason
+                break
+    finally:
+        if shadow_sim is not None:
+            shadow_sim.close()
+        real_env.close()
+
+    assert last is not None
+    if stop_reason is not None:
+        _logger.warning("Stopping after cycle %d: %s", len(records), stop_reason)
+    if log_dir is not None:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "cycles.json").write_text(
+            json.dumps(
+                {
+                    "cycles_requested": cycles,
+                    "stop_reason": stop_reason,
+                    "cycles": records,
+                },
+                indent=2,
+            )
+        )
+    if cycles == 1:
+        finish_reason = last.finish_reason
+    elif stop_reason is None:
+        finish_reason = f"completed {len(records)}/{cycles} cycles"
+    else:
+        finish_reason = f"stopped after {len(records)}/{cycles} cycles: {stop_reason}"
+    return PickAndTossSummary(
+        mode=cfg.mode,
+        picked=last.picked,
+        pick_steps=last.pick_steps,
+        tossed=last.tossed,
+        finish_reason=finish_reason,
+        toss=last.toss,
+        toss_outcome=last.toss_outcome,
+        final_state=last.final_state,
+        cycles=records,
+    )
+
+
+@dataclass
+class _CycleResult:
+    """One pick (and toss) of the loop."""
+
+    record: dict[str, Any]
+    picked: bool
+    pick_steps: int
+    tossed: bool
+    finish_reason: str
+    # Why the loop must stop after this cycle, or None to go on.
+    stop_reason: str | None = None
+    toss: dict[str, Any] | None = None
+    toss_outcome: dict[str, Any] | None = None
+    final_state: ObjectCentricState | None = None
+
+
+def preview_prompts(cfg: DictConfig, cycle: int) -> bool:
+    """Whether cycle ``cycle``'s plan preview asks the operator (real mode only)."""
+    if cfg.mode != "real" or not bool(cfg.preview.get("enabled")):
+        return False
+    return cycle == 1 or not bool(cfg.loop.confirm_first_cycle_only)
+
+
+def cube_pose_from_state(state: ObjectCentricState) -> dict[str, float]:
+    """The perceived cube's map-frame position and yaw (from its quaternion)."""
+    cube = state.get_object_from_name(_CUBE_NAME)
+    qz = float(state.get(cube, "pose_qz"))
+    qw = float(state.get(cube, "pose_qw"))
+    qx = float(state.get(cube, "pose_qx"))
+    qy = float(state.get(cube, "pose_qy"))
+    yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+    return {
+        "x": float(state.get(cube, "pose_x")),
+        "y": float(state.get(cube, "pose_y")),
+        "z": float(state.get(cube, "pose_z")),
+        "yaw": yaw,
+    }
+
+
+def _inside(x: float, y: float, box: Any) -> bool:
+    x_min, x_max, y_min, y_max = (float(v) for v in box)
+    return x_min <= x <= x_max and y_min <= y <= y_max
+
+
+def _landing_problem(cfg: DictConfig, outcome: dict[str, Any] | None) -> str | None:
+    """Why the cube's landing rules out another pick, or None."""
+    if outcome is None or outcome["landing"] is None:
+        return "cube not visible after the toss"
+    x, y = outcome["landing"]["x"], outcome["landing"]["y"]
+    floor_bounds = cfg.preview.get("floor_bounds")
+    if floor_bounds is not None and not _inside(x, y, floor_bounds):
+        return (
+            f"cube at ({x:.2f}, {y:.2f}) is outside the base pose bounds "
+            f"{list(floor_bounds)}"
+        )
+    region = cfg.loop.get("pickable_region")
+    if region is not None and not _inside(x, y, region):
+        return (
+            f"cube at ({x:.2f}, {y:.2f}) is outside the pickable region {list(region)}"
+        )
+    return None
+
+
+def _run_cycle(
+    cfg: DictConfig,
+    cycle: int,
+    runner: Runner,
+    real_env: RealTidyBotEnv | KinderSimEnv,
+    agent: PickSkillAgent,
+    shadow_sim: Any,
+    log_dir: Path | None,
+    interactive: bool,
+    prompt_fn: PromptFn,
+    previous_landing: dict[str, Any] | None,
+) -> _CycleResult:
+    record: dict[str, Any] = {
+        "cycle": cycle,
+        "cube_perceived": None,
+        "picked": False,
+        "pick_attempts": None,
+        "pick_steps": 0,
+        "tossed": False,
+        "landing": None,
+        "outcome": None,
+    }
+
+    def done(reason: str, stop: str | None = None, **kwargs: Any) -> _CycleResult:
+        record["outcome"] = reason
+        return _CycleResult(
+            record=record,
+            picked=record["picked"],
+            pick_steps=record["pick_steps"],
+            tossed=record["tossed"],
+            finish_reason=reason,
+            stop_reason=stop,
+            **kwargs,
         )
 
-        preview_cfg = cfg.get("preview")
-        if (
-            preview_cfg is not None
-            and bool(preview_cfg.get("enabled"))
-            and cfg.mode == "real"
-            and log_dir is not None
-        ):
-            shadow_sim = hydra.utils.instantiate(
-                cfg.env.pipelines.sim.real_env, _convert_="all"
+    _logger.info("Perceiving and rolling out the PickController...")
+    start = time.monotonic()
+    try:
+        state = runner.reset(seed=cfg.seed)
+    except AgentFailure as e:
+        return done(f"pick_failure: {e}", stop=f"pick failed: {e}")
+    cube = cube_pose_from_state(state)
+    record["cube_perceived"] = cube
+    record["pick_attempts"] = agent.attempts_used
+    _logger.info(
+        "Cube perceived at (%.3f, %.3f), yaw %.1f deg; pick trajectory found in "
+        "%.1fs (%d attempt(s)).",
+        cube["x"],
+        cube["y"],
+        math.degrees(cube["yaw"]),
+        time.monotonic() - start,
+        agent.attempts_used,
+    )
+    if previous_landing is not None:
+        gap = math.dist(
+            (cube["x"], cube["y"]), (previous_landing["x"], previous_landing["y"])
+        )
+        if gap > float(cfg.loop.max_landing_disagreement_m):
+            reason = (
+                f"cube perceived at ({cube['x']:.2f}, {cube['y']:.2f}), {gap:.2f} m "
+                f"from where it landed ({previous_landing['x']:.2f}, "
+                f"{previous_landing['y']:.2f})"
             )
-            planned_states, planned_actions = planned_trajectory_from_agent(agent)
-            try:
+            return done(f"pick_failure: {reason}", stop=reason, final_state=state)
+
+    planned_states, planned_actions = planned_trajectory_from_agent(agent)
+    steps = len(planned_actions)
+    record["pick_steps"] = steps
+    if shadow_sim is not None and log_dir is not None:
+        preview_cfg = cfg.preview
+        floor_bounds = (
+            tuple(preview_cfg["floor_bounds"])
+            if preview_cfg.get("floor_bounds") is not None
+            else None
+        )
+        base_margin = float(preview_cfg.get("base_margin", 0.0))
+        try:
+            if preview_prompts(cfg, cycle):
                 preview_or_abort(
                     planned_states=planned_states,
                     planned_actions=planned_actions,
@@ -247,70 +472,72 @@ def _run_pick(
                     fps=int(preview_cfg.get("fps", 10)),
                     max_frames=preview_cfg.get("max_frames", 50),
                     prompt_fn=prompt_fn,
-                    floor_bounds=(
-                        tuple(preview_cfg["floor_bounds"])
-                        if preview_cfg.get("floor_bounds") is not None
-                        else None
-                    ),
-                    base_margin=float(preview_cfg.get("base_margin", 0.0)),
+                    floor_bounds=floor_bounds,
+                    base_margin=base_margin,
                 )
-            except AgentFailure as e:
-                return summary(
-                    picked=False,
-                    pick_steps=0,
-                    tossed=False,
-                    finish_reason=f"pick_failure: {e}",
-                    final_state=state,
+            elif floor_bounds is not None:
+                violation = find_floor_violation(
+                    planned_states, floor_bounds, base_margin
                 )
-            finally:
-                shadow_sim.close()
+                if violation is not None:
+                    index, x, y = violation
+                    raise AgentFailure(
+                        f"Plan leaves the floor: planned state {index} puts the "
+                        f"base at ({x:.2f}, {y:.2f})"
+                    )
+        except AgentFailure as e:
+            return done(
+                f"pick_failure: {e}", stop=f"pick refused: {e}", final_state=state
+            )
 
-        steps = len(planned_trajectory_from_agent(agent)[1])
-        try:
-            state, _, _, _, _ = runner.step()
-        except ExecutionFailure as e:
-            _logger.warning("Pick stopped: %s", e)
-            return summary(
-                picked=False,
-                pick_steps=steps,
-                tossed=False,
-                finish_reason=f"executor_failure: {e}",
-                final_state=state,
-            )
-        _logger.info("Pick executed (%d planned steps).", steps)
+    try:
+        state, _, _, _, _ = runner.step()
+    except ExecutionFailure as e:
+        _logger.warning("Pick stopped: %s", e)
+        return done(
+            f"executor_failure: {e}", stop=f"pick failed: {e}", final_state=state
+        )
+    except Exception as e:  # pylint: disable=broad-except
+        # An RPC error out of the arm or base server mid-pick.
+        return done(
+            f"fault: {e}", stop=f"arm fault during the pick: {e}", final_state=state
+        )
+    record["picked"] = True
+    _logger.info("Pick executed (%d planned steps).", steps)
 
-        if cfg.skip_toss:
-            return summary(
-                picked=True,
-                pick_steps=steps,
-                tossed=False,
-                finish_reason="picked (toss skipped)",
-                final_state=state,
-            )
-        if cfg.mode == "sim":
-            _logger.info("The kinematic sim has no toss; stopping after the pick.")
-            return summary(
-                picked=True,
-                pick_steps=steps,
-                tossed=False,
-                finish_reason="picked (toss not simulated in sim mode)",
-                final_state=state,
-            )
-        arm = real_env.interface.arm_interface
+    if cfg.skip_toss:
+        return done("picked (toss skipped)", final_state=state)
+    if cfg.mode == "sim":
+        _logger.info("The kinematic sim has no toss; stopping after the pick.")
+        return done("picked (toss not simulated in sim mode)", final_state=state)
+
+    assert isinstance(real_env, RealTidyBotEnv)
+    arm = real_env.interface.arm_interface
+    confirm = interactive and (
+        cycle == 1 or not bool(cfg.loop.confirm_first_cycle_only)
+    )
+    try:
         tossed, reason, toss_info, outcome = _toss(
-            cfg, arm, log_dir, interactive, prompt_fn
+            cfg, arm, log_dir, confirm, prompt_fn
         )
-        return summary(
-            picked=True,
-            pick_steps=steps,
-            tossed=tossed,
-            finish_reason=reason,
-            toss=toss_info,
-            toss_outcome=outcome,
-            final_state=state,
+    except Exception as e:  # pylint: disable=broad-except
+        # Includes the arm server's refusal to swing from a missed wind-up pose.
+        return done(
+            f"fault: {e}", stop=f"arm fault during the toss: {e}", final_state=state
         )
-    finally:
-        real_env.close()
+    record["tossed"] = tossed
+    record["toss"] = toss_info
+    if outcome is not None:
+        record["landing"] = outcome["landing"]
+        record["landing_status"] = outcome["status"]
+        record["robot_map_pose_at_throw"] = outcome["robot_map_pose_at_throw"]
+    return done(
+        reason,
+        stop=None if tossed else reason,
+        toss=toss_info,
+        toss_outcome=outcome,
+        final_state=state,
+    )
 
 
 def _run_toss_only(

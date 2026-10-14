@@ -1,12 +1,14 @@
 """Arm interface."""
 
 import abc
+import math
 from typing import Any
 
 from prpl_tidybot.toss import (
     TOSS_GRIPPER_RELEASE_MS,
     TOSS_MAX_VEL,
     plan_toss_swing,
+    toss_release_pose,
     toss_windup_pose,
 )
 
@@ -90,10 +92,12 @@ class FakeArmInterface(ArmInterface):
         max_vel: float = TOSS_MAX_VEL,
         gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
     ) -> None:
-        """Record the call and open the gripper; the arm conf is left unchanged.
+        """Record the call, open the gripper, and end at the release pose.
 
-        The swing is planned (and discarded) so that parameters the arm server would
-        reject fail here too.
+        The real arm holds the release pose afterwards; the fake reports it the way
+        ``Arm.get_joint_angles`` does (radians wrapped to [-pi, pi)). The swing is
+        planned (and discarded) so that parameters the arm server would reject fail here
+        too.
         """
         plan_toss_swing(
             toss_windup_pose(heading),
@@ -108,4 +112,8 @@ class FakeArmInterface(ArmInterface):
                 "gripper_release_ms": int(gripper_release_ms),
             }
         )
+        self.arm_state = [
+            (math.radians(q) + math.pi) % (2 * math.pi) - math.pi
+            for q in toss_release_pose(heading)
+        ]
         self.gripper_state = 0.0

@@ -5,6 +5,7 @@
 #   python scripts/pick_and_toss.py mode=real toss.max_vel=80
 #   python scripts/pick_and_toss.py mode=real skip_pick=true   # hand the object in
 #   python scripts/pick_and_toss.py mode=real skip_toss=true   # pick and hold
+#   python scripts/pick_and_toss.py mode=real cycles=5         # pick, toss, repeat
 #
 # Everything in config.yaml (seed, agent.max_skill_horizon, preview, lab) still
 # applies; the env is the kinematic shelf3d env and its fake/sim/real pipelines.
@@ -20,6 +21,27 @@ defaults:
 skip_pick: false
 # Pick and stop, holding the cube.
 skip_toss: false
+
+# Pick -> toss -> wait for the cube to settle -> re-perceive it -> repeat, for
+# this many cycles. More than one needs the pick, the toss and the capture (the
+# landing readout is what decides whether the next pick is attempted). The
+# loop stops early, logging why, when the cube is not visible, lies outside
+# the base pose bounds (preview.floor_bounds) or loop.pickable_region, is not
+# perceived where it landed, a pick fails, the arm faults, or a confirmation
+# is declined. Per-cycle results go to cycles.json in the log dir, and with
+# cycles > 1 each cycle's toss video and outcome to cycle_NN/.
+cycles: 1
+
+loop:
+  # Ask for the plan preview and the toss confirmation on the first cycle
+  # only (real mode). The preview's floor check still runs every cycle.
+  confirm_first_cycle_only: false
+  # Map-frame [x_min, x_max, y_min, y_max] the cube must lie in for the next
+  # pick to be attempted.
+  pickable_region: ${preview.floor_bounds}
+  # How far (m) the re-perceived cube may be from where the ceiling saw it
+  # land before the loop refuses to pick.
+  max_landing_disagreement_m: 0.1
 
 # Stdin prompts (toss confirmation, hand-in). null = only in mode=real, like
 # the plan preview.
@@ -78,7 +100,8 @@ capture:
       marker_client:
         _target_: prpl_tidybot.marker_detector.client.FakeMarkerDetectorClient
         robot_pose: [0.0, 0.0, 0.0]
-        targets: [[23, 1.2, 0.3]]
+        # The fake cube "lands" where fake mode perceives it.
+        targets: [[23, "${env.cube_pose.0}", "${env.cube_pose.1}"]]
     real:
       renderer:
         _target_: prpl_tidybot.rendering.CeilingCameraRenderer

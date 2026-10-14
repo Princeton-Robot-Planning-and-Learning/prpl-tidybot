@@ -12,6 +12,7 @@ Examples:
     python scripts/pick_and_toss.py mode=real toss.max_vel=80 toss.heading=10
     python scripts/pick_and_toss.py mode=real skip_pick=true  # hand-in, then toss
     python scripts/pick_and_toss.py mode=real skip_toss=true  # pick and hold
+    python scripts/pick_and_toss.py mode=real cycles=5        # pick, toss, repeat
 """
 
 from pathlib import Path
