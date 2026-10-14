@@ -34,3 +34,30 @@ arm_home:
   # Joint-space tolerance (rad, wrapped) and the most policy ticks to wait for it.
   tolerance: 0.05
   max_ticks: 100
+
+pick:
+  # top_down: Jimmy Wu's TidyBot pick_object, ported (prpl_tidybot.top_down_pick).
+  # kinder: the kinder shelf3d PickController through the planner pipeline.
+  method: top_down
+  top_down:
+    # Gripper reach from the arm mount at the grasp; the base parks reach +
+    # mounting_offset (0.67 m) from the cube, facing it.
+    reach: 0.55
+    # Fingertip pinch point above the floor at the grasp, and the hover above that.
+    grasp_height: 0.02
+    hover_height: 0.10
+    # Added to the cube's yaw to square the fingers to its faces (tune on the robot).
+    wrist_yaw_offset_deg: 0.0
+    # Closed on nothing reads ~1.0; on the 5 cm cube it read 0.49.
+    grasp_min: 0.2
+    grasp_max: 0.9
+    close_position: 1.0
+    gripper_timeout_s: 4.0
+    max_attempts: 3
+    # Record the wrist camera during each pick attempt (real mode).
+    record_wrist: true
+    # Fake mode only: the gripper reading to pretend after closing.
+    fake_grasp_reading: 0.49
+
+# Stop after the pick, holding the cube (then the reset prompt).
+skip_toss: false
