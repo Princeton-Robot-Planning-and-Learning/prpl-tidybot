@@ -43,6 +43,11 @@ CHARUCO_BOARD_PARAMS = {
 # board's 0-34 so the board can stay in the room.
 TARGET_MARKER_IDS = (23,) + tuple(range(35, 47))
 
+# Default face markers of the shelf3d cube, one per face, so whichever face is
+# up gives its position and yaw. 23 keeps a cube labelled with the original
+# single target marker working; 35-37 are left to the cylinders.
+CUBE_MARKER_IDS = (23, 38, 39, 40, 41, 42)
+
 # Flat ordered list of every ID the detector should be configured to recognise.
 # Robot stickers occupy slots 0..len(MARKER_IDS)-1; targets follow.
 DETECTED_MARKER_IDS = MARKER_IDS + TARGET_MARKER_IDS

@@ -9,6 +9,11 @@ world frame. Two implementations:
   marker-detector publisher and reads the latest position of a specific ArUco
   marker (the `(x, y)` part) at a configured `z`.
 
+A `YawTargetSource` additionally answers `get_target_and_yaw()` with the
+target's rotation about z. `ConstantTargetSource` is one (yaw defaults to 0);
+`MarkerDetectorCubeTargetSource` reads a cube that carries a different marker
+on each face, taking position and yaw from whichever face the detector sees.
+
 Splitting this out lets `BaseMotion3DPerceiver` stay frame-agnostic about where
 the target came from — Hydra wires the right source per pipeline.
 
@@ -22,11 +27,13 @@ reads each cylinder's marker from the detector, sharing one client.
 from __future__ import annotations
 
 import abc
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from prpl_tidybot.marker_detector.client import MarkerDetectorClient
+from prpl_tidybot.marker_detector.constants import CUBE_MARKER_IDS, TARGET_MARKER_IDS
 
 
 @dataclass(frozen=True)
@@ -82,13 +89,28 @@ class TargetSource(abc.ABC):
         """Release any resources held by the source (e.g. detector sockets)."""
 
 
-class ConstantTargetSource(TargetSource):
-    """Returns a fixed `(x, y, z)` every call. Used by fake / sim pipelines."""
+class YawTargetSource(TargetSource):
+    """A `TargetSource` that also knows the target's rotation about z."""
 
-    def __init__(self, x: float, y: float, z: float) -> None:
-        self._target = (float(x), float(y), float(z))
+    @abc.abstractmethod
+    def get_target_and_yaw(self) -> tuple[float, float, float, float]:
+        """Return the latest `(x, y, z, yaw)`, yaw in radians in the world frame."""
 
     def get_target(self) -> tuple[float, float, float]:
+        x, y, z, _ = self.get_target_and_yaw()
+        return (x, y, z)
+
+
+class ConstantTargetSource(YawTargetSource):
+    """Returns a fixed `(x, y, z)` (and `yaw`, default 0) every call.
+
+    Used by fake / sim pipelines.
+    """
+
+    def __init__(self, x: float, y: float, z: float, yaw: float = 0.0) -> None:
+        self._target = (float(x), float(y), float(z), float(yaw))
+
+    def get_target_and_yaw(self) -> tuple[float, float, float, float]:
         return self._target
 
 
@@ -124,6 +146,70 @@ class MarkerDetectorTargetSource(TargetSource):
             raise RuntimeError(
                 f"MarkerDetectorTargetSource: marker id {self._marker_id} has "
                 "never been reported by the detector"
+            )
+        return self._last
+
+    def close(self) -> None:
+        self._client.close()
+
+
+class MarkerDetectorCubeTargetSource(YawTargetSource):
+    """Reads a cube that carries a different ArUco marker on each face.
+
+    Whichever configured face id the detector reports gives the cube's `(x, y)` (from
+    `targets`) and yaw (from `target_yaws`); when several are reported, the first in
+    `marker_ids` order wins. `yaw_offsets[id]` is the angle of that face's marker +x
+    axis from the cube's x axis, subtracted from the measured yaw (a marker printed
+    square to its face needs no offset for a cube, whose yaw only matters modulo 90
+    degrees). As in `MarkerDetectorTargetSource`, a cube missing from the latest payload
+    keeps its last detection and one never seen raises.
+    """
+
+    def __init__(
+        self,
+        target_z: float,
+        marker_ids: Sequence[int] = CUBE_MARKER_IDS,
+        yaw_offsets: Mapping[int, float] | None = None,
+        client: MarkerDetectorClient | None = None,
+    ) -> None:
+        self._marker_ids = [int(marker_id) for marker_id in marker_ids]
+        if not self._marker_ids:
+            raise ValueError("A cube needs at least one face marker id.")
+        unknown = sorted(set(self._marker_ids) - set(TARGET_MARKER_IDS))
+        if unknown:
+            raise ValueError(
+                f"Cube marker id(s) {unknown} are not in TARGET_MARKER_IDS, so the "
+                "detector would never report them."
+            )
+        self._target_z = float(target_z)
+        self._yaw_offsets = {
+            int(marker_id): float(offset)
+            for marker_id, offset in (yaw_offsets or {}).items()
+        }
+        self._client = client if client is not None else MarkerDetectorClient()
+        self._last: tuple[float, float, float, float] | None = None
+
+    def get_target_and_yaw(self) -> tuple[float, float, float, float]:
+        payload = self._client.get_latest()
+        targets = payload.get("targets") or {}
+        visible = [marker_id for marker_id in self._marker_ids if marker_id in targets]
+        if visible:
+            if "target_yaws" not in payload:
+                raise RuntimeError(
+                    "MarkerDetectorCubeTargetSource: the marker detector does not "
+                    "publish target_yaws; update the detector on the perception host."
+                )
+            marker_id = visible[0]
+            x, y = targets[marker_id]
+            yaw = payload["target_yaws"][marker_id] - self._yaw_offsets.get(
+                marker_id, 0.0
+            )
+            yaw = math.atan2(math.sin(yaw), math.cos(yaw))
+            self._last = (float(x), float(y), self._target_z, float(yaw))
+        if self._last is None:
+            raise RuntimeError(
+                f"MarkerDetectorCubeTargetSource: the cube's marker ids "
+                f"{self._marker_ids} have never been reported by the detector"
             )
         return self._last
 

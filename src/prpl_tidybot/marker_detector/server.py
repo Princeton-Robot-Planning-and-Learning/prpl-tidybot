@@ -3,10 +3,13 @@
 Spawns one camera-server process per ceiling camera, then runs an in-process
 detector that fuses ArUco detections from each into a payload of the shape
 `{"poses": {robot_idx: (x, y, theta)}, "targets": {aruco_id: (x, y)},
-"target_residuals": {aruco_id: float}}`.
+"target_yaws": {aruco_id: yaw}, "target_residuals": {aruco_id: float}}`.
 Robot stickers (`MARKER_IDS`) fuse into a single robot pose; standalone scene
 markers (`TARGET_MARKER_IDS`) are averaged across the cameras that saw them,
 with the cross-camera residual published as a calibration health signal.
+A target's yaw is the map-frame direction of the marker's top edge (corner 0
+to corner 1), in (-pi, pi]; it is a separate field so that `targets` keeps its
+`(x, y)` shape for existing consumers.
 Clients consume the payload over the publisher socket on
 `MARKER_DETECTOR_PORT` — see `MarkerDetectorClient`.
 """
@@ -87,6 +90,45 @@ def _merge_target_estimates(
     return targets, residuals
 
 
+# Angle of each ArUco corner (top-left, top-right, bottom-right, bottom-left)
+# from the marker's +x axis, as seen from above after floor projection. The
+# robot-sticker heading fusion in `Detector.get_poses_from_markers` uses the
+# same convention.
+_CORNER_ANGLES = np.radians([135.0, 45.0, -45.0, -135.0])
+
+
+def _circular_mean(angles: Any) -> float:
+    """Mean direction of `angles` (radians), in (-pi, pi]."""
+    angles = np.asarray(angles, dtype=np.float64)
+    mean = math.atan2(float(np.sin(angles).sum()), float(np.cos(angles).sum()))
+    return math.pi if mean == -math.pi else mean
+
+
+def _target_marker_yaw(corners: Any) -> float:
+    """Map-frame yaw of a marker from its four floor-projected corners.
+
+    Each corner's direction from the marker centre, less that corner's nominal angle, is
+    one estimate of the marker's +x direction; the four are combined with a circular
+    mean so the result is continuous across the +-pi cut.
+    """
+    corners = np.asarray(corners, dtype=np.float64).reshape(4, 2)
+    diffs = corners - corners.mean(axis=0)
+    return _circular_mean(np.arctan2(diffs[:, 1], diffs[:, 0]) - _CORNER_ANGLES)
+
+
+def _merge_target_yaws(
+    per_camera_yaws: list[dict[int, float]],
+) -> dict[int, float]:
+    """Fuse per-camera target yaws into one circular mean per marker id."""
+    all_ids = sorted(set().union(*per_camera_yaws)) if per_camera_yaws else []
+    return {
+        aruco_id: _circular_mean(
+            [yaws[aruco_id] for yaws in per_camera_yaws if aruco_id in yaws]
+        )
+        for aruco_id in all_ids
+    }
+
+
 class Detector:
     """Per-camera ArUco detector that emits map-frame robot poses."""
 
@@ -133,6 +175,7 @@ class Detector:
         data: dict[str, Any] = {
             "poses": {},
             "targets": {},
+            "target_yaws": {},
             "single_marker_robots": set(),
         }
         if indices is None:
@@ -158,10 +201,13 @@ class Detector:
         # Split detections into robot-sticker slots and scene-target slots.
         robot_mask = indices < self._num_robot_slots
 
-        # Standalone targets: report each detected target marker's centre as-is.
-        for slot_idx, center in zip(indices[~robot_mask], centers[~robot_mask]):
+        # Standalone targets: report each detected target marker's centre and yaw.
+        for slot_idx, center, target_corners in zip(
+            indices[~robot_mask], centers[~robot_mask], corners[~robot_mask]
+        ):
             aruco_id = int(self._slot_to_aruco_id[slot_idx])
             data["targets"][aruco_id] = (float(center[0]), float(center[1]))
+            data["target_yaws"][aruco_id] = _target_marker_yaw(target_corners)
 
         if robot_mask.any():
             robot_corners = corners[robot_mask]
@@ -255,12 +301,14 @@ class Detector:
 class MarkerDetectorServer(Publisher):
     """Fuses per-camera detectors and publishes
     `{"poses": {robot_idx: (x, y, theta)}, "targets": {aruco_id: (x, y)},
-    "target_residuals": {aruco_id: float}}`.
+    "target_yaws": {aruco_id: yaw}, "target_residuals": {aruco_id: float}}`.
 
-    Targets seen by both cameras are averaged; the cross-camera residual is
-    published per marker and a warning is printed (throttled per marker) when
-    it exceeds `TARGET_RESIDUAL_WARN_THRESHOLD`, since a large residual
-    indicates a camera calibration or height-projection error.
+    Targets seen by both cameras are averaged (yaws with a circular mean,
+    never rotated by `inverse_heading`, which is a robot-heading convention);
+    the cross-camera residual is published per marker and a warning is
+    printed (throttled per marker) when it exceeds
+    `TARGET_RESIDUAL_WARN_THRESHOLD`, since a large residual indicates a
+    camera calibration or height-projection error.
     """
 
     # Seconds between repeated large-residual warnings for the same marker.
@@ -291,6 +339,7 @@ class MarkerDetectorServer(Publisher):
         if self.debug:
             data["debug_data"] = []
         per_camera_targets: list[dict[int, tuple[float, float]]] = []
+        per_camera_yaws: list[dict[int, float]] = []
         for detector in self.detectors:
             new_data = detector.get_poses(debug=self.debug)
             for robot_idx, pose in new_data["poses"].items():
@@ -304,10 +353,12 @@ class MarkerDetectorServer(Publisher):
                 # Bottom detector takes precedence by virtue of being second.
                 data["poses"][robot_idx] = pose
             per_camera_targets.append(new_data["targets"])
+            per_camera_yaws.append(new_data["target_yaws"])
             if "debug_data" in new_data:
                 data["debug_data"].extend(new_data["debug_data"])
         targets, residuals = _merge_target_estimates(per_camera_targets)
         data["targets"] = targets
+        data["target_yaws"] = _merge_target_yaws(per_camera_yaws)
         data["target_residuals"] = residuals
         self._warn_on_large_residuals(residuals)
         if self.debug:

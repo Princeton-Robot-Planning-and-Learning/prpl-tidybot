@@ -8,10 +8,14 @@ expected robot object; the actual reward / number of steps depends on the env's 
 
 from pathlib import Path
 
+import hydra
 import pytest
 from hydra import compose, initialize_config_dir
 
 from prpl_tidybot.pipeline import run_planner
+from prpl_tidybot.real_sim.perceivers.target_source import (
+    MarkerDetectorCubeTargetSource,
+)
 from prpl_tidybot.real_sim.plan_executors import base_motion3d
 from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 
@@ -143,3 +147,29 @@ def test_run_planner_reports_executor_failure(monkeypatch) -> None:
     result = run_planner(cfg)
     assert result.finish_reason == "executor_failure: base gave up"
     assert result.steps == 0
+
+
+class _FakeCubeDetectorClient:
+    """Serves one payload in which only the cube's last default face is visible."""
+
+    def get_latest(self) -> dict:
+        """Return a payload with face marker 42 at a known pose."""
+        return {"targets": {42: (0.4, -0.1)}, "target_yaws": {42: 0.7}}
+
+    def close(self) -> None:
+        """Nothing to release."""
+
+
+def test_shelf3d_real_perceiver_reads_the_cube_faces_with_yaw() -> None:
+    """The real shelf3d pipeline builds its cube from the multi-face, yaw-aware
+    source, with every configured face id one the detector publishes."""
+    cfg = _compose("kinematic-shelf3d-o1", "real")
+    source = hydra.utils.instantiate(
+        cfg.env.pipelines.real.perceiver.target_source,
+        client=_FakeCubeDetectorClient(),
+        _convert_="all",
+    )
+    assert isinstance(source, MarkerDetectorCubeTargetSource)
+    assert source.get_target_and_yaw() == pytest.approx(
+        (0.4, -0.1, cfg.env.cube_marker_z, 0.7)
+    )

@@ -23,15 +23,20 @@ env_model_kwargs:
 # from the marker detector and ignores this constant.)
 cube_pose: [0.5, 0.0, 0.025]
 
-# ArUco marker (and its z value in the env frame) that the real-mode perceiver
-# reads as the cube position. The marker detector must be configured to publish
-# this ID — see `prpl_tidybot.marker_detector.constants.TARGET_MARKER_IDS`.
+# ArUco markers on the cube's faces (and the cube's z in the env frame) that
+# the real-mode perceiver reads as the cube's position and yaw: whichever face
+# is visible wins. Every ID must be one the marker detector publishes — see
+# `prpl_tidybot.marker_detector.constants.TARGET_MARKER_IDS`; the default,
+# `CUBE_MARKER_IDS`, leaves 35-37 to the cylinders. A face whose marker is
+# printed rotated against the cube's x axis takes an entry in
+# `cube_marker_yaw_offsets` ({id: radians}).
 #
 # `cube_marker_z` is the cube's *center* height above the floor — i.e. the
 # cube's half-extent_z, NOT the height of the physical marker. The planner's
 # grasp controller assumes the cube is sitting fully on the floor; with z=0
 # (cube half-buried) it rejects every candidate grasp trajectory.
-cube_marker_id: 23
+cube_marker_ids: [23, 38, 39, 40, 41, 42]
+cube_marker_yaw_offsets: {}
 cube_marker_z: 0.025
 
 # Static shelf pose threaded into the perceiver. Matches the default in
@@ -138,8 +143,9 @@ pipelines:
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.Shelf3DPerceiver
       target_source:
-        _target_: prpl_tidybot.real_sim.perceivers.target_source.MarkerDetectorTargetSource
-        marker_id: ${env.cube_marker_id}
+        _target_: prpl_tidybot.real_sim.perceivers.target_source.MarkerDetectorCubeTargetSource
+        marker_ids: ${env.cube_marker_ids}
+        yaw_offsets: ${env.cube_marker_yaw_offsets}
         target_z: ${env.cube_marker_z}
       shelf_pose: ${env.shelf_pose}
     plan_executor: ${env.pipelines.fake.plan_executor}

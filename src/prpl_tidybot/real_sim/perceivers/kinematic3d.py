@@ -8,6 +8,7 @@ the non-robot object detection differs per env.
 """
 
 import abc
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -39,12 +40,18 @@ from prpl_tidybot.real_sim.perceivers.target_source import (
     CylinderSpec,
     CylinderTargets,
     TargetSource,
+    YawTargetSource,
     parse_cylinder_specs,
 )
 from prpl_tidybot.structs import TidyBotObservation
 
 _DEFAULT_CUBE_HALF_EXTENTS = PrplLab3DEnvConfig().block_half_extents
 _DEFAULT_SHELF_CUBE_HALF_EXTENTS = Shelf3DEnvConfig().block_half_extents
+# The shelf3d pick faces the base along `cube yaw + rot` for a sampled
+# rot in [-pi/4, pi/4] and builds an SE2Pose from that angle without
+# wrapping it, which asserts it lies in [-pi, pi]; a cube yaw outside
+# this bound crashes planning instead of failing a sample.
+_MAX_PICKABLE_CUBE_YAW = 3 * math.pi / 4
 
 
 class KinematicRobotPerceiverBase(
@@ -228,13 +235,21 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
     The cube target follows the same pattern as
     :class:`BaseMotion3DPerceiver`: in fake / sim modes the source is a
     `ConstantTargetSource`; in real mode it's a
-    `MarkerDetectorTargetSource` for the ArUco that marks the cube. The
-    marker detector only provides `(x, y, z)` so the cube's orientation
-    defaults to identity (z-up, lying flat); the shelf orientation does
-    the same. The cube target is cached once per :meth:`reset` for the
-    same control-loop-latency reason as in
-    :class:`BaseMotion3DPerceiver` — the cube is stationary during a
-    rollout by design.
+    `MarkerDetectorCubeTargetSource` for the ArUco markers on the cube's
+    faces. The cube lies flat; when the source is a `YawTargetSource` its
+    yaw becomes the cube's rotation about z, otherwise the orientation is
+    identity. The shelf orientation is always identity.
+
+    The yaw is reduced by the cube's symmetry about z (90 degrees when its
+    x and y half-extents match, else 180) to the equivalent closest to the
+    bearing from the robot to the cube, among those within +-135 degrees.
+    The shelf3d pick places the base at `cube yaw + [-45, 45]` degrees facing
+    the cube and grasps relative to the cube's pose, so this choice
+    approaches from the robot's own side without changing the grasp, and the
+    bound keeps that heading inside the [-180, 180] its `SE2Pose` asserts.
+    The cube pose is cached once per :meth:`reset` for the same
+    control-loop-latency reason as in :class:`BaseMotion3DPerceiver` — the
+    cube is stationary during a rollout by design.
     """
 
     def __init__(
@@ -250,7 +265,7 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
         self._target_source = target_source
         self._shelf_pose = tuple(shelf_pose)
         self._cube_half_extents = tuple(cube_half_extents)
-        self._cached_cube_target: tuple[float, float, float] | None = None
+        self._cached_cube_target: tuple[float, float, float, float] | None = None
 
     @property
     def _state_cls(self) -> type[ObjectCentricState]:
@@ -259,18 +274,39 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
     def reset(
         self, obs: TidyBotObservation, info: dict[str, Any]
     ) -> ObjectCentricState:
-        self._cached_cube_target = self._target_source.get_target()
+        self._cached_cube_target = self._read_cube_pose(obs)
         return super().reset(obs, info)
+
+    def _read_cube_pose(
+        self, obs: TidyBotObservation
+    ) -> tuple[float, float, float, float]:
+        if not isinstance(self._target_source, YawTargetSource):
+            return (*self._target_source.get_target(), 0.0)
+        x, y, z, yaw = self._target_source.get_target_and_yaw()
+        hx, hy, _ = self._cube_half_extents
+        period = math.pi / 2 if math.isclose(hx, hy) else math.pi
+        bearing = math.atan2(y - obs.map_base_pose.y, x - obs.map_base_pose.x)
+        base = math.remainder(yaw, period)
+        candidates = [
+            base + k * period
+            for k in range(-4, 5)
+            if abs(base + k * period) <= _MAX_PICKABLE_CUBE_YAW
+        ]
+        yaw = min(
+            candidates,
+            key=lambda c: abs(math.remainder(c - bearing, 2 * math.pi)),
+        )
+        return (x, y, z, yaw)
 
     def _detect_objects(
         self, obs: TidyBotObservation, info: dict[str, Any]
     ) -> dict[Object, dict[str, float]]:
-        del obs, info
+        del info
         if self._cached_cube_target is None:
             # Defensive — reset() should have run first; populate lazily
             # so callers that call step() before reset() still get a cube.
-            self._cached_cube_target = self._target_source.get_target()
-        cube_x, cube_y, cube_z = self._cached_cube_target
+            self._cached_cube_target = self._read_cube_pose(obs)
+        cube_x, cube_y, cube_z, cube_yaw = self._cached_cube_target
         shelf_x, shelf_y, shelf_z = self._shelf_pose
         hx, hy, hz = self._cube_half_extents
         return {
@@ -289,8 +325,8 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
                 "pose_z": cube_z,
                 "pose_qx": 0.0,
                 "pose_qy": 0.0,
-                "pose_qz": 0.0,
-                "pose_qw": 1.0,
+                "pose_qz": math.sin(cube_yaw / 2),
+                "pose_qw": math.cos(cube_yaw / 2),
                 "grasp_active": 0.0,
                 "object_type": 0.0,
                 "half_extent_x": hx,
