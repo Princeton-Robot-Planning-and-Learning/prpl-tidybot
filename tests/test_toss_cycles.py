@@ -1,0 +1,136 @@
+"""Tests for `prpl_tidybot.toss_cycles.run_toss_cycles` (scripts/toss_cycles.py) in fake
+mode: pick -> arm home -> drive to the toss pose -> toss, repeated, with a confirmation
+before every action and a reset (retract, back to the toss pose) whenever the run
+stops."""
+
+import json
+import math
+from pathlib import Path
+
+import pytest
+from hydra import compose, initialize_config_dir
+
+from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
+from prpl_tidybot.real_sim.perceivers.target_source import ConstantTargetSource
+from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
+from prpl_tidybot.toss_cycles import run_toss_cycles
+
+_CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
+TOSS_POSE = (0.489, -0.493, -3.132)
+
+
+def _compose(**extra):
+    overrides = ["mode=fake", "seed=0", "interactive=true"]
+    overrides.extend(f"{k}={v}" for k, v in extra.items())
+    with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
+        return compose(config_name="toss_cycles", overrides=overrides)
+
+
+class _Operator:
+    """Answers every prompt 'y' except those containing a word in `decline`."""
+
+    def __init__(self, decline=()):
+        self.prompts: list[str] = []
+        self._decline = decline
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return "n" if any(word in prompt for word in self._decline) else "y"
+
+    def asked(self, word):
+        """How many prompts mentioned `word`."""
+        return sum(word in p for p in self.prompts)
+
+
+@pytest.fixture(name="arm_log")
+def _arm_log(monkeypatch):
+    """Every FakeArmInterface toss and arm goal, in order."""
+    log: list[tuple] = []
+    original_toss = FakeArmInterface.toss
+    original_execute = FakeArmInterface.execute_action
+
+    def toss(self, **kwargs):
+        log.append(("toss", kwargs))
+        original_toss(self, **kwargs)
+
+    def execute_action(self, arm_goal, gripper_goal):
+        log.append(("arm", list(arm_goal), gripper_goal))
+        original_execute(self, arm_goal, gripper_goal)
+
+    monkeypatch.setattr(FakeArmInterface, "toss", toss)
+    monkeypatch.setattr(FakeArmInterface, "execute_action", execute_action)
+    return log
+
+
+def test_two_cycles_pick_home_drive_toss_then_reset(tmp_path, arm_log):
+    """Two full cycles, each confirmed step by step, two tosses at 140/600, then the
+    arm retracts and the base ends at the toss pose; cycles.json records both."""
+    operator = _Operator()
+    result = run_toss_cycles(_compose(), log_dir=tmp_path, prompt_fn=operator)
+    assert result.completed == 2
+    assert result.finish_reason == "completed 2/2 cycles"
+    tosses = [e[1] for e in arm_log if e[0] == "toss"]
+    assert tosses == [{"heading": 0.0, "max_vel": 140.0, "gripper_release_ms": 600}] * 2
+    for word in ("pick", "home", "Drive to the toss pose", "Toss?"):
+        assert operator.asked(word) >= 2, word
+    assert operator.asked("Reset") == 1
+    last_arm = [e for e in arm_log if e[0] == "arm"][-1]
+    assert last_arm[1] == pytest.approx(list(RETRACT_ARM_CONF))
+    x, y, theta = result.final_base_pose
+    assert (x, y) == pytest.approx(TOSS_POSE[:2], abs=0.02)
+    assert math.cos(theta - TOSS_POSE[2]) > math.cos(0.05)
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    assert [c["cycle"] for c in log["cycles"]] == [1, 2]
+    assert all(c["tossed"] for c in log["cycles"])
+    assert log["toss_pose"] == pytest.approx(list(TOSS_POSE))
+
+
+def test_arm_goes_home_holding_the_cube_before_the_drive(tmp_path, arm_log):
+    """After the pick the arm is sent to its home joints with the gripper still closed,
+    and the toss comes after."""
+    run_toss_cycles(_compose(cycles=1), log_dir=tmp_path, prompt_fn=_Operator())
+    toss_at = next(i for i, e in enumerate(arm_log) if e[0] == "toss")
+    holding = [e for e in arm_log[:toss_at] if e[0] == "arm" and e[2] > 0.5]
+    assert holding, "the arm should move with the gripper closed before the toss"
+
+
+def test_declining_the_drive_stops_without_tossing_and_resets(tmp_path, arm_log):
+    """A declined step ends the run; nothing is thrown; the reset still happens."""
+    operator = _Operator(decline=("Drive to the toss pose",))
+    result = run_toss_cycles(_compose(), log_dir=tmp_path, prompt_fn=operator)
+    assert result.completed == 0
+    assert "declined" in result.finish_reason
+    assert not [e for e in arm_log if e[0] == "toss"]
+    assert operator.asked("Reset") == 1
+    last_arm = [e for e in arm_log if e[0] == "arm"][-1]
+    assert last_arm[1] == pytest.approx(list(RETRACT_ARM_CONF))
+
+
+def test_declining_the_reset_leaves_the_robot_where_it_is(tmp_path, arm_log):
+    """Saying no to the reset prompt means no further motion."""
+    operator = _Operator(decline=("Toss?", "Reset"))
+    run_toss_cycles(_compose(cycles=1), log_dir=tmp_path, prompt_fn=operator)
+    retracts = [
+        e
+        for e in arm_log
+        if e[0] == "arm" and e[1] == pytest.approx(list(RETRACT_ARM_CONF))
+    ]
+    assert not retracts
+
+
+def test_no_cube_stops_and_asks_for_it_to_be_moved(tmp_path, arm_log, monkeypatch):
+    """When the localizer finds no cube the run stops, says so, and resets."""
+
+    def no_cube(self):
+        raise RuntimeError(
+            "CeilingCubeTargetSource: no cube found in the drivable area"
+        )
+
+    monkeypatch.setattr(ConstantTargetSource, "get_target", no_cube)
+    operator = _Operator()
+    result = run_toss_cycles(_compose(), log_dir=tmp_path, prompt_fn=operator)
+    assert result.completed == 0
+    assert "no cube found" in result.finish_reason
+    assert "move the cube" in result.finish_reason
+    assert not [e for e in arm_log if e[0] == "toss"]
+    assert operator.asked("Reset") == 1
