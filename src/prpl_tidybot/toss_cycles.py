@@ -30,7 +30,7 @@ from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
 import prpl_tidybot.config_resolvers  # noqa: F401  # pylint: disable=unused-import
-from prpl_tidybot.interfaces.arm_interface import ArmInterface
+from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.pick_and_toss import PickSkillAgent, PromptFn, _toss
 from prpl_tidybot.pipeline import _resolve_log_dir
 from prpl_tidybot.preview import planned_trajectory_from_agent, preview_or_abort
@@ -156,6 +156,7 @@ def run_toss_cycles(
     completed = 0
     finish_reason = f"completed {requested}/{requested} cycles"
     final_pose: tuple[float, float, float] | None = None
+    aborted = False
     try:
         for cycle in range(1, requested + 1):
             record: dict[str, Any] = {"cycle": cycle, "tossed": False}
@@ -219,10 +220,23 @@ def run_toss_cycles(
             finish_reason = f"completed {completed}/{requested} cycles"
     except _Declined as e:
         finish_reason = f"declined: {e}"
+    except ArmMotionAborted as e:
+        # The arm was stopped mid-move; command nothing more (the arm-server RPC is
+        # mid-call and the operator wants motion to end). Rerun to reset.
+        finish_reason = f"aborted: {e}"
+        aborted = True
     finally:
-        final_pose = _reset(
-            cfg, real_env, perceiver, arm, toss_pose, records, interactive, prompt_fn
-        )
+        if not aborted:
+            final_pose = _reset(
+                cfg,
+                real_env,
+                perceiver,
+                arm,
+                toss_pose,
+                records,
+                interactive,
+                prompt_fn,
+            )
         if resolved_log_dir is not None:
             resolved_log_dir.mkdir(parents=True, exist_ok=True)
             (resolved_log_dir / "cycles.json").write_text(
@@ -240,7 +254,8 @@ def run_toss_cycles(
             )
         wrist.close()
         cube_source.close()
-        real_env.close()
+        if not aborted:
+            real_env.close()
     _logger.info("Toss cycles: %s.", finish_reason)
     return TossCyclesSummary(
         mode=cfg.mode,
@@ -340,6 +355,7 @@ def _logged_move(  # pylint: disable=too-many-arguments,too-many-positional-argu
     measured = list(arm.get_arm_state())
     move = {
         "name": name,
+        "controller": "compliant",
         "reached": reached,
         "planned_deg": np.round(np.degrees(goal), 2).tolist(),
         "measured_deg": np.round(np.degrees(measured), 2).tolist(),
@@ -544,30 +560,30 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
             f"above the cube (arm frame {ax:+.3f}, {ay:+.3f}), descend, close?"
         )
         wrist.start(f"cycle_{cycle:02d}_pick_{attempt}")
-        _set_gripper(arm, 0.0, td)
-        _logged_move(arm, "hover", hover, 0.0, cfg.arm_home, geom, moves)
-        _logged_move(arm, "grasp", grasp, 0.0, cfg.arm_home, geom, moves)
-        _set_gripper(arm, float(td.get("close_position", 1.0)), td)
-        reading = arm.get_gripper_state()
-        if cfg.mode == "fake":  # the fake gripper closes on nothing; pretend it holds
-            reading = float(td.get("fake_grasp_reading", 0.49))
-        held = grasp_succeeded(reading, geom)
+        # The fake gripper closes on nothing; pretend it read fake_grasp_reading.
+        fake = float(td.get("fake_grasp_reading", 0.49))
+        read = (lambda _: fake) if cfg.mode == "fake" else (lambda r: r)
+        if td.get("arm_controller", "angular") == "angular":
+            held, reading, note = _grasp_angular(
+                arm, td, geom, hover, grasp, moves, read
+            )
+        else:
+            held, reading, note = _grasp_compliant(
+                cfg, arm, td, geom, hover, grasp, moves, read
+            )
         record["pick_attempts"][-1].update({"gripper": reading, "held": held})
+        if note is not None:
+            record["pick_attempts"][-1]["note"] = note
         _logger.info(
-            "Pick attempt %d: gripper %.3f -> %s.",
+            "Pick attempt %d: gripper %.3f -> %s%s.",
             attempt,
             reading,
             "held" if held else "missed",
+            f" ({note})" if note else "",
         )
         if held:
-            grip = arm.get_gripper_state()
-            _logged_move(arm, "lift", hover, grip, cfg.arm_home, geom, moves)
-            carry = list(CARRY_ARM_CONF)
-            _logged_move(arm, "carry", carry, grip, cfg.arm_home, geom, moves)
             wrist.stop()
             return None
-        _set_gripper(arm, 0.0, td)
-        _logged_move(arm, "retreat", hover, 0.0, cfg.arm_home, geom, moves)
         wrist.stop()
         if attempt < attempts:
             confirm(
@@ -580,6 +596,132 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         f"pick failed after {attempts} attempts (gripper never closed on the cube); "
         "move the cube and rerun"
     )
+
+
+# An onboard-controller move that ends further than this from its goal has hit
+# something (the floor, the cube) or faulted; the toss uses the same check.
+_ANGULAR_ARRIVAL_DEG = 1.0
+
+
+def _angular_move(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    arm: ArmInterface,
+    name: str,
+    goal: list[float],
+    geom: TopDownPickGeometry,
+    moves: list[dict[str, Any]],
+) -> bool:
+    """One ``move_angular``, recorded like `_logged_move`; returns whether it
+    arrived within `_ANGULAR_ARRIVAL_DEG` on every joint."""
+    measured = arm.move_angular(goal)
+    err = np.degrees(
+        np.abs((np.array(measured) - np.array(goal) + np.pi) % (2 * np.pi) - np.pi)
+    )
+    move = {
+        "name": name,
+        "controller": "angular",
+        "reached": bool(np.all(err < _ANGULAR_ARRIVAL_DEG)),
+        "planned_deg": np.round(np.degrees(goal), 2).tolist(),
+        "measured_deg": np.round(np.degrees(measured), 2).tolist(),
+        "planned_pinch_z": float(forward_kinematics(goal, geom)[0][2]),
+        "measured_pinch_z": float(forward_kinematics(measured, geom)[0][2]),
+    }
+    moves.append(move)
+    _logger.info(
+        "Move %s (angular): pinch z planned %+.4f measured %+.4f (floor %+.3f); max "
+        "joint error %.2f deg.",
+        name,
+        move["planned_pinch_z"],
+        move["measured_pinch_z"],
+        geom.floor_z,
+        float(err.max()),
+    )
+    return bool(move["reached"])
+
+
+def _grasp_angular(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    arm: ArmInterface,
+    td: Any,
+    geom: TopDownPickGeometry,
+    hover: list[float],
+    grasp: list[float],
+    moves: list[dict[str, Any]],
+    read: Any,
+) -> tuple[bool, float, str | None]:
+    """Jimmy Wu's pick_object sequence under the arm's onboard position controller
+    (the compliant torque loop settled 24 mm short of the cube): open, hover,
+    descend, close, read; then lift and carry, or open and back off. The torque loop
+    is released for the whole sequence and resumed holding the final pose.
+
+    Returns (held, gripper reading, note); the note says why the gripper was not
+    closed, if it was not.
+    """
+    timeout = float(td.get("gripper_timeout_s", 4.0))
+    arm.release()
+    aborted = False
+    try:
+        arm.set_gripper_angular(0.0, timeout)
+        for name, goal in (("hover", hover), ("grasp", grasp)):
+            if not _angular_move(arm, name, goal, geom, moves):
+                _angular_move(arm, "retreat", hover, geom, moves)
+                return False, arm.get_gripper_state(), f"{name} did not arrive"
+        reading = read(
+            arm.set_gripper_angular(float(td.get("close_position", 1.0)), timeout)
+        )
+        held = grasp_succeeded(reading, geom)
+        if held:
+            _angular_move(arm, "lift", hover, geom, moves)
+            _angular_move(arm, "carry", list(CARRY_ARM_CONF), geom, moves)
+        else:
+            arm.set_gripper_angular(0.0, timeout)
+            _angular_move(arm, "retreat", hover, geom, moves)
+        return held, reading, None
+    except ArmMotionAborted:
+        aborted = True
+        raise
+    finally:
+        if not aborted:
+            arm.resume()
+
+
+def _grasp_compliant(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    arm: ArmInterface,
+    td: Any,
+    geom: TopDownPickGeometry,
+    hover: list[float],
+    grasp: list[float],
+    moves: list[dict[str, Any]],
+    read: Any,
+) -> tuple[bool, float, str | None]:
+    """The same sequence streamed through the compliant torque loop."""
+    _set_gripper(arm, 0.0, td)
+    _logged_move(arm, "hover", hover, 0.0, cfg.arm_home, geom, moves)
+    _logged_move(arm, "grasp", grasp, 0.0, cfg.arm_home, geom, moves)
+    _set_gripper(arm, float(td.get("close_position", 1.0)), td)
+    reading = read(arm.get_gripper_state())
+    held = grasp_succeeded(reading, geom)
+    _finish_grasp(cfg, arm, td, geom, hover, moves, held=held)
+    return held, reading, None
+
+
+def _finish_grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    arm: ArmInterface,
+    td: Any,
+    geom: TopDownPickGeometry,
+    hover: list[float],
+    moves: list[dict[str, Any]],
+    held: bool,
+) -> None:
+    """Compliant lift and carry after a grasp, or open and back off after a miss."""
+    if held:
+        grip = arm.get_gripper_state()
+        _logged_move(arm, "lift", hover, grip, cfg.arm_home, geom, moves)
+        carry = list(CARRY_ARM_CONF)
+        _logged_move(arm, "carry", carry, grip, cfg.arm_home, geom, moves)
+    else:
+        _set_gripper(arm, 0.0, td)
+        _logged_move(arm, "retreat", hover, 0.0, cfg.arm_home, geom, moves)
 
 
 def _set_gripper(arm: ArmInterface, position: float, td: Any) -> None:

@@ -5,7 +5,7 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
+from prpl_tidybot.interfaces.arm_interface import ArmMotionAborted, FakeArmInterface
 from prpl_tidybot.interfaces.real_arm_interface import RealArmInterface
 
 
@@ -70,3 +70,40 @@ def test_real_arm_interface_toss_forwards_to_the_server():
     arm.arm.toss.assert_called_once_with(
         heading=-10.0, max_vel=80.0, gripper_release_ms=700
     )
+
+
+def test_fake_arm_interface_angular_moves_only_while_released():
+    """Like the real arm, the onboard-controller moves need the torque loop released;
+    they land on the goal (plus any configured offset) and move the gripper."""
+    arm = FakeArmInterface()
+    with pytest.raises(RuntimeError, match="release"):
+        arm.move_angular([0.1] * 7)
+    arm.release()
+    assert np.allclose(arm.move_angular([0.1] * 7), [0.1] * 7)
+    assert arm.set_gripper_angular(1.0) == 1.0
+    arm.angular_offset = 0.02
+    assert np.allclose(arm.move_angular([0.2] * 7), [0.22] * 7)
+    arm.resume()
+    with pytest.raises(RuntimeError, match="release"):
+        arm.set_gripper_angular(0.0)
+
+
+@pytest.mark.parametrize("call", ["move_angular", "set_gripper_angular"])
+def test_ctrl_c_during_an_onboard_move_stops_the_arm(monkeypatch, call):
+    """The onboard controller keeps moving after the client dies, so Ctrl-C sends a
+    Stop to the arm over a fresh Kortex session, then raises ArmMotionAborted."""
+    stops = []
+    monkeypatch.setattr(
+        "prpl_tidybot.interfaces.real_arm_interface.stop_arm_motion",
+        lambda: stops.append(1),
+    )
+    arm = RealArmInterface.__new__(RealArmInterface)
+    arm.arm = mock.Mock()
+    arm.arm.move_joints_angular.side_effect = KeyboardInterrupt
+    arm.arm.gripper_angular.side_effect = KeyboardInterrupt
+    with pytest.raises(ArmMotionAborted):
+        if call == "move_angular":
+            arm.move_angular([0.0] * 7)
+        else:
+            arm.set_gripper_angular(1.0)
+    assert stops == [1]
