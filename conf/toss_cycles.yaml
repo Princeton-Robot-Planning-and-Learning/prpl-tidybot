@@ -1,0 +1,36 @@
+# Config for scripts/toss_cycles.py: repeat, `cycles` times,
+#   pick the cube -> arm to home -> drive to toss_pose -> toss,
+# confirming each action on stdin in mode=real, and whenever the run stops (done,
+# declined, cube not found, failure) retract the arm and drive back to toss_pose.
+#
+#   python scripts/toss_cycles.py mode=fake
+#   python scripts/toss_cycles.py mode=real
+#
+# Everything in pick_and_toss.yaml (pick, toss, env floor-cube-o1, preview) applies.
+
+defaults:
+  - pick_and_toss
+  - _self_
+
+cycles: 2
+
+# Where every throw starts: map-frame (x, y, heading rad). The PRPL lab's start pose,
+# facing -x down the open half of the room.
+toss_pose: [0.489, -0.493, -3.132]
+
+toss:
+  max_vel: 140.0
+  gripper_release_ms: 600
+
+# The cube carries no markers, so the marker-based landing capture is off; the next
+# localization (or the final one) records where each throw landed.
+capture:
+  enabled: false
+
+arm_home:
+  # The hardware tests' home pose: gripper ~46 cm in front of the base, facing forward.
+  position: [0.456, 0.0, 0.434]
+  quat_xyzw: [0.5, 0.5, 0.5, 0.5]
+  # Joint-space tolerance (rad, wrapped) and the most policy ticks to wait for it.
+  tolerance: 0.05
+  max_ticks: 100
