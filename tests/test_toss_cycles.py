@@ -192,6 +192,37 @@ def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
     assert [a["held"] for a in log["cycles"][0]["pick_attempts"]] == [False, False]
 
 
+def test_a_missed_grasp_drives_back_to_the_toss_pose_to_relocalize(
+    tmp_path, monkeypatch
+):
+    """Between attempts the arm retracts and the base returns to the toss pose, where
+    the ceiling cameras see the cube unoccluded, before driving to a fresh standoff."""
+    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+
+    drives: list[tuple[float, ...]] = []
+    original = tc._drive_to  # pylint: disable=protected-access
+
+    def drive_to(real_env, pose):
+        drives.append(tuple(round(v, 3) for v in pose))
+        return original(real_env, pose)
+
+    monkeypatch.setattr(tc, "_drive_to", drive_to)
+    operator = _Operator()
+    cfg = _compose(
+        **{"pick.top_down.fake_grasp_reading": 0.996, "pick.top_down.max_attempts": 2}
+    )
+    run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=operator)
+    order = [
+        p
+        for p in operator.prompts
+        if "standoff" in p or "Pick attempt" in p or "re-localize" in p
+    ]
+    assert ["standoff" in p for p in order] == [True, False, False, True, False]
+    assert "re-localize" in order[2]
+    toss = tuple(round(v, 3) for v in TOSS_POSE)
+    assert drives[0] != toss and drives[1] == toss and drives[2] != toss
+
+
 def test_skip_toss_stops_holding_the_cube(tmp_path, arm_log):
     """skip_toss ends after a successful pick, with no throw."""
     result = run_toss_cycles(
