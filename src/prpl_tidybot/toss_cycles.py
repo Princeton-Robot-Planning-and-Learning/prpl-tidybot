@@ -44,6 +44,7 @@ from prpl_tidybot.top_down_pick import (
     CARRY_ARM_CONF,
     TopDownPickGeometry,
     arm_frame_target,
+    forward_kinematics,
     geometry_from_config,
     grasp_succeeded,
     standoff_pose,
@@ -297,19 +298,61 @@ def _confirm_pick(  # pylint: disable=too-many-arguments,too-many-positional-arg
 
 def _move_arm(
     arm: ArmInterface, goal: list[float], gripper: float, arm_cfg: DictConfig
-) -> None:
+) -> bool:
     """Stream ``goal`` until every joint is within tolerance (wrapped) or time runs
-    out."""
+    out; returns whether it got there."""
     for _ in range(int(arm_cfg.max_ticks)):
         arm.execute_action(goal, gripper)
         err = np.array(arm.get_arm_state()) - np.array(goal)
         if np.all(
             np.abs((err + np.pi) % (2 * np.pi) - np.pi) < float(arm_cfg.tolerance)
         ):
-            return
+            return True
         time.sleep(POLICY_CONTROL_PERIOD)
     _logger.warning(
         "Arm did not reach its goal within %d ticks.", int(arm_cfg.max_ticks)
+    )
+    return False
+
+
+def _logged_move(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    arm: ArmInterface,
+    name: str,
+    goal: list[float],
+    gripper: float,
+    arm_cfg: DictConfig,
+    geom: TopDownPickGeometry,
+    moves: list[dict[str, Any]],
+) -> None:
+    """`_move_arm`, then record planned vs measured joints and pinch-point heights:
+    the arm's torque loop is compliant, so where it settles (sag, or stopped by the
+    floor) can differ from the target."""
+    reached = _move_arm(arm, goal, gripper, arm_cfg)
+    measured = list(arm.get_arm_state())
+    move = {
+        "name": name,
+        "reached": reached,
+        "planned_deg": np.round(np.degrees(goal), 2).tolist(),
+        "measured_deg": np.round(np.degrees(measured), 2).tolist(),
+        "planned_pinch_z": float(forward_kinematics(goal, geom)[0][2]),
+        "measured_pinch_z": float(forward_kinematics(measured, geom)[0][2]),
+    }
+    moves.append(move)
+    _logger.info(
+        "Move %s: pinch z planned %+.4f measured %+.4f (floor %+.3f); max joint error "
+        "%.2f deg.",
+        name,
+        move["planned_pinch_z"],
+        move["measured_pinch_z"],
+        geom.floor_z,
+        float(
+            np.max(
+                np.abs(
+                    (np.array(move["measured_deg"]) - move["planned_deg"] + 180) % 360
+                    - 180
+                )
+            )
+        ),
     )
 
 
@@ -474,8 +517,14 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
             )
         except ValueError as e:
             return f"pick_failure: {e}"
+        moves: list[dict[str, Any]] = []
         record.setdefault("pick_attempts", []).append(
-            {"attempt": attempt, "cube": cube, "arm_target_xy": [ax, ay]}
+            {
+                "attempt": attempt,
+                "cube": cube,
+                "arm_target_xy": [ax, ay],
+                "moves": moves,
+            }
         )
         confirm(
             f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: open, arm to 10 cm "
@@ -483,8 +532,8 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         )
         wrist.start(f"cycle_{cycle:02d}_pick_{attempt}")
         _set_gripper(arm, 0.0, td)
-        _move_arm(arm, hover, 0.0, cfg.arm_home)
-        _move_arm(arm, grasp, 0.0, cfg.arm_home)
+        _logged_move(arm, "hover", hover, 0.0, cfg.arm_home, geom, moves)
+        _logged_move(arm, "grasp", grasp, 0.0, cfg.arm_home, geom, moves)
         _set_gripper(arm, float(td.get("close_position", 1.0)), td)
         reading = arm.get_gripper_state()
         if cfg.mode == "fake":  # the fake gripper closes on nothing; pretend it holds
@@ -498,12 +547,14 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
             "held" if held else "missed",
         )
         if held:
-            _move_arm(arm, hover, arm.get_gripper_state(), cfg.arm_home)
-            _move_arm(arm, list(CARRY_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
+            grip = arm.get_gripper_state()
+            _logged_move(arm, "lift", hover, grip, cfg.arm_home, geom, moves)
+            carry = list(CARRY_ARM_CONF)
+            _logged_move(arm, "carry", carry, grip, cfg.arm_home, geom, moves)
             wrist.stop()
             return None
         _set_gripper(arm, 0.0, td)
-        _move_arm(arm, hover, 0.0, cfg.arm_home)
+        _logged_move(arm, "retreat", hover, 0.0, cfg.arm_home, geom, moves)
         wrist.stop()
     return (
         f"pick failed after {attempts} attempts (gripper never closed on the cube); "

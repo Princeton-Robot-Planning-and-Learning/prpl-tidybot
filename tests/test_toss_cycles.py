@@ -158,6 +158,25 @@ def test_top_down_pick_hovers_then_descends_pointing_down(tmp_path, arm_log):
     assert any(g == 0.0 for _, g in downward) and any(g == 1.0 for _, g in downward)
 
 
+def test_each_pick_move_logs_planned_and_measured_joints(tmp_path):
+    """cycles.json records, for every arm move of a pick attempt, the planned and the
+    measured joints and pinch-point heights, so sag and floor contact can be read off.
+    """
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    moves = log["cycles"][0]["pick_attempts"][0]["moves"]
+    assert [m["name"] for m in moves] == ["hover", "grasp", "lift", "carry"]
+    for move in moves:
+        assert len(move["planned_deg"]) == len(move["measured_deg"]) == 7
+        assert {"planned_pinch_z", "measured_pinch_z", "reached"} <= move.keys()
+    hover, grasp = moves[0], moves[1]
+    assert hover["planned_pinch_z"] - grasp["planned_pinch_z"] == pytest.approx(
+        0.10, abs=0.005
+    )
+
+
 def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
     """Readings that look like an empty gripper retry up to max_attempts, then stop."""
     operator = _Operator()
