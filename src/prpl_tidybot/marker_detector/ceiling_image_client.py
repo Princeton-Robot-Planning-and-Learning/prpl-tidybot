@@ -6,6 +6,7 @@ publisher stalls (or a recorder calling `get_image` between two
 publisher refreshes) return the most recent value instead of `None`.
 """
 
+import time
 from multiprocessing.connection import Client, Connection
 
 import cv2 as cv
@@ -43,3 +44,27 @@ class CeilingImageClient:
     def close(self) -> None:
         """Close the underlying connection."""
         self._conn.close()
+
+
+class FakeCeilingImageClient:
+    """Stand-in for `CeilingImageClient` in fake mode: a constant grey BGR frame.
+
+    Each call waits ``frame_period_s`` to mimic the publisher's cadence, so a
+    `CeilingCameraRenderer` poll thread on top of it does not busy-spin.
+    """
+
+    def __init__(
+        self, height: int = 120, width: int = 160, frame_period_s: float = 0.02
+    ) -> None:
+        self._frame = np.full((height, width, 3), 128, dtype=np.uint8)
+        self._frame_period_s = frame_period_s
+        self.closed = False
+
+    def get_image(self) -> np.ndarray | None:
+        """Return the constant frame (None once closed)."""
+        time.sleep(self._frame_period_s)
+        return None if self.closed else self._frame
+
+    def close(self) -> None:
+        """Record the close."""
+        self.closed = True
