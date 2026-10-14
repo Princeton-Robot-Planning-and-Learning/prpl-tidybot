@@ -52,6 +52,11 @@ class _RecordingArm:
         """Record the swing."""
         self.calls.append(("run_position_trajectory", trajectory, gripper_release_step))
 
+    def gripper_to(self, value, timeout):
+        """High-level gripper move; reports where it stopped."""
+        self.calls.append(("gripper_to", value, timeout))
+        return 0.5
+
 
 def _arm(recording: _RecordingArm) -> Arm:
     arm = Arm.__new__(Arm)
@@ -101,3 +106,31 @@ def test_toss_rejects_bad_parameters_before_moving(monkeypatch):
     with pytest.raises(ValueError):
         _arm(recording).toss(max_vel=500.0)
     assert not recording.calls
+
+
+def test_move_joints_angular_takes_radians_and_reports_the_measured_pose():
+    """Radians in, Kortex degrees (0-360) to the onboard controller, wrapped radians
+    of the measured pose back."""
+    recording = _RecordingArm(reached_offset_deg=0.5)
+    recording.cyclic_running = False
+    goal = [0.0, 1.0, -3.0, -1.5, 0.2, -0.4, 1.6]
+    measured = _arm(recording).move_joints_angular(goal)
+    sent = recording.calls[0][1]
+    assert all(0.0 <= v < 360.0 for v in sent)
+    assert np.allclose(np.radians(sent) % (2 * np.pi), np.array(goal) % (2 * np.pi))
+    err = (np.array(measured) - goal + np.pi) % (2 * np.pi) - np.pi
+    assert np.allclose(err, np.radians(0.5))
+
+
+def test_move_joints_angular_refuses_while_the_torque_loop_runs():
+    """The onboard controller cannot move the arm under low-level servoing."""
+    with pytest.raises(RuntimeError, match="release"):
+        _arm(_RecordingArm()).move_joints_angular([0.0] * 7)
+
+
+def test_gripper_angular_moves_the_gripper_under_the_onboard_controller():
+    """Returns where the gripper stopped (closing on a cube never reaches 1.0)."""
+    recording = _RecordingArm()
+    recording.cyclic_running = False
+    assert _arm(recording).gripper_angular(1.0, timeout=3.0) == 0.5
+    assert recording.calls == [("gripper_to", 1.0, 3.0)]

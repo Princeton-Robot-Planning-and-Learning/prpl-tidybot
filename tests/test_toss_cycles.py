@@ -58,8 +58,15 @@ def _arm_log(monkeypatch):
         log.append(("arm", list(arm_goal), gripper_goal))
         original_execute(self, arm_goal, gripper_goal)
 
+    original_angular = FakeArmInterface.move_angular
+
+    def move_angular(self, goal):
+        log.append(("angular", list(goal), self.gripper_state))
+        return original_angular(self, goal)
+
     monkeypatch.setattr(FakeArmInterface, "toss", toss)
     monkeypatch.setattr(FakeArmInterface, "execute_action", execute_action)
+    monkeypatch.setattr(FakeArmInterface, "move_angular", move_angular)
     return log
 
 
@@ -147,7 +154,7 @@ def test_top_down_pick_hovers_then_descends_pointing_down(tmp_path, arm_log):
     geom = TopDownPickGeometry()
     downward = []
     for entry in arm_log:
-        if entry[0] != "arm":
+        if entry[0] not in ("arm", "angular"):
             continue
         pos, approach, _ = forward_kinematics(entry[1], geom)
         if approach[2] < -0.99 and pos[2] < geom.floor_z + 0.2:
@@ -175,6 +182,80 @@ def test_each_pick_move_logs_planned_and_measured_joints(tmp_path):
     assert hover["planned_pinch_z"] - grasp["planned_pinch_z"] == pytest.approx(
         0.10, abs=0.005
     )
+
+
+def test_the_pick_runs_under_the_onboard_controller_by_default(tmp_path, arm_log):
+    """Hover, grasp, lift and carry are onboard-controller moves (the compliant loop
+    settled 24 mm short on the robot), with the torque loop released around them."""
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    angular = [e for e in arm_log if e[0] == "angular"]
+    assert len(angular) == 4
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    moves = log["cycles"][0]["pick_attempts"][0]["moves"]
+    assert all(m["controller"] == "angular" for m in moves)
+
+
+def test_the_compliant_pick_is_still_selectable(tmp_path, arm_log):
+    """pick.top_down.arm_controller=compliant streams the moves as before."""
+    run_toss_cycles(
+        _compose(
+            cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "compliant"}
+        ),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    assert not [e for e in arm_log if e[0] == "angular"]
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    moves = log["cycles"][0]["pick_attempts"][0]["moves"]
+    assert all(m["controller"] == "compliant" for m in moves)
+
+
+def test_an_angular_move_that_does_not_arrive_is_not_closed_on(
+    tmp_path, arm_log, monkeypatch
+):
+    """If the arm stops more than a degree off the hover or grasp pose the gripper is
+    not closed; the attempt counts as a miss and the arm backs off to the hover."""
+    logged = FakeArmInterface.move_angular
+
+    def short(self, goal):
+        self.angular_offset = 0.05  # about 3 degrees short on every joint
+        return logged(self, goal)
+
+    monkeypatch.setattr(FakeArmInterface, "move_angular", short)
+    cfg = _compose(cycles=1, skip_toss="true", **{"pick.top_down.max_attempts": 1})
+    result = run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=_Operator())
+    assert "pick failed" in result.finish_reason
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    attempt = log["cycles"][0]["pick_attempts"][0]
+    assert attempt["held"] is False
+    assert "did not arrive" in attempt["note"]
+    assert not any(e[0] == "angular" and e[2] == 1.0 for e in arm_log)
+
+
+def test_ctrl_c_during_a_pick_move_stops_without_further_motion(
+    tmp_path, arm_log, monkeypatch
+):
+    """After an aborted onboard move nothing else is commanded: no reset prompt, no
+    torque-loop restart; the arm is left halted where it stopped."""
+    from prpl_tidybot.interfaces.arm_interface import (  # pylint: disable=import-outside-toplevel
+        ArmMotionAborted,
+    )
+
+    def aborted(self, goal):
+        raise ArmMotionAborted("Ctrl-C")
+
+    resumes = []
+    monkeypatch.setattr(FakeArmInterface, "move_angular", aborted)
+    monkeypatch.setattr(FakeArmInterface, "resume", lambda self: resumes.append(1))
+    operator = _Operator()
+    result = run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=operator
+    )
+    assert "aborted" in result.finish_reason
+    assert operator.asked("Reset") == 0
+    assert not resumes
 
 
 def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):

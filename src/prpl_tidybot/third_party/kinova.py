@@ -209,6 +209,29 @@ class TorqueControlledArm:
                 break
             time.sleep(0.01)
 
+    def gripper_to(self, value, timeout=4.0):
+        # High-level gripper move that returns where the fingers stopped: closing on
+        # an object never reaches the commanded value, so wait for them to stop
+        # moving (or the timeout) instead of for the value.
+        assert not self.cyclic_running, "Arm must be in high-level servoing mode"
+        gripper_command = Base_pb2.GripperCommand()
+        gripper_command.mode = Base_pb2.GRIPPER_POSITION
+        finger = gripper_command.gripper.finger.add()
+        finger.value = value
+        self.base.SendGripperCommand(gripper_command)
+        gripper_request = Base_pb2.GripperRequest()
+        gripper_request.mode = Base_pb2.GRIPPER_POSITION
+        deadline = time.time() + timeout
+        time.sleep(0.3)
+        last = self.base.GetMeasuredGripperMovement(gripper_request).finger[0].value
+        while time.time() < deadline:
+            time.sleep(0.15)
+            now = self.base.GetMeasuredGripperMovement(gripper_request).finger[0].value
+            if abs(now - last) < 0.003:
+                return now
+            last = now
+        return last
+
     def open_gripper(self):
         self._gripper_position_command(0)
 
@@ -624,6 +647,19 @@ class DeviceConnection:
             router_options.timeout_ms = 1000
             self.session_manager.CloseSession(router_options)
         self.transport.disconnect()
+
+
+def stop_arm_motion() -> None:
+    # Halt any high-level action (e.g. a move_angular running in the arm server) from
+    # a fresh Kortex session, so it works from any process even if the session that
+    # started the action is blocked or gone.
+    _import_kortex()
+    connection = DeviceConnection.createTcpConnection()
+    router = connection.__enter__()
+    try:
+        BaseClient(router).Stop()
+    finally:
+        connection.__exit__()
 
 
 def grav_comp_control_callback(arm):

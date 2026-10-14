@@ -59,6 +59,10 @@ pick:
     grasp_min: 0.2
     grasp_max: 0.9
     close_position: 1.0
+    # angular: hover/grasp/lift/carry under the arm's onboard position controller
+    # (Jimmy Wu's pick_object; lands on target). compliant: streamed through the
+    # torque loop, which settled 24 mm short of the cube on the robot (2026-10-14).
+    arm_controller: angular
     gripper_timeout_s: 4.0
     max_attempts: 3
     # Record the wrist camera during each pick attempt (real mode).
