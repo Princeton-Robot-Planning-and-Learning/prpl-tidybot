@@ -270,6 +270,121 @@ class TorqueControlledArm:
         )
         self.home()
 
+    def move_angular(self, joint_angles, timeout=20):
+        # Blocking high-level REACH_JOINT_ANGLES move (degrees), as in Jimmy
+        # Wu's KinovaArm.move_angular. Speed is capped by the ANGULAR_TRAJECTORY
+        # soft limits set in set_joint_limits.
+        assert not self.cyclic_running, "Arm must be in high-level servoing mode"
+        base_servo_mode = Base_pb2.ServoingModeInformation()
+        base_servo_mode.servoing_mode = Base_pb2.SINGLE_LEVEL_SERVOING
+        self.base.SetServoingMode(base_servo_mode)
+
+        action = Base_pb2.Action()
+        for i, value in enumerate(joint_angles):
+            joint_angle = action.reach_joint_angles.joint_angles.joint_angles.add()
+            joint_angle.joint_identifier = i
+            joint_angle.value = value
+
+        end_or_abort_event = threading.Event()
+
+        def check(notification):
+            if notification.action_event in [
+                Base_pb2.ACTION_END,
+                Base_pb2.ACTION_ABORT,
+            ]:
+                end_or_abort_event.set()
+
+        notification_handle = self.base.OnNotificationActionTopic(
+            check, Base_pb2.NotificationOptions()
+        )
+        try:
+            self.base.ExecuteAction(action)
+            end_or_abort_event.wait(timeout)
+        finally:
+            self.base.Unsubscribe(notification_handle)
+
+    def get_measured_joint_angles(self):
+        # High-level joint angles in degrees (valid outside the cyclic loop).
+        joint_angles = self.base.GetMeasuredJointAngles()
+        return [joint_angle.value for joint_angle in joint_angles.joint_angles]
+
+    def get_feedback_joint_positions(self):
+        # Actuator positions in degrees from one cyclic feedback frame; the
+        # start of Jimmy's MoveJ trajectory.
+        feedback = self.base_cyclic.RefreshFeedback()
+        return [feedback.actuators[i].position for i in range(self.actuator_count)]
+
+    def run_position_trajectory(self, trajectory, gripper_release_step):
+        # Jimmy Wu's MoveJController: stream `trajectory` (cycles x joints,
+        # degrees) as position commands at 1 kHz in low-level servoing, and
+        # open the gripper from cycle `gripper_release_step` on. The actuators
+        # stay in POSITION control mode throughout (they are only switched to
+        # CURRENT by init_cyclic), and a fresh command frame is used so no
+        # current_motor value from the torque loop is carried over.
+        assert not self.cyclic_running, "Torque loop must be stopped"
+        assert len(trajectory[0]) == self.actuator_count
+
+        try:
+            os.sched_setscheduler(
+                0,
+                os.SCHED_FIFO,
+                os.sched_param(os.sched_get_priority_max(os.SCHED_FIFO)),
+            )
+        except PermissionError:
+            print(
+                "Failed to set real-time scheduling policy, please edit /etc/security/limits.d/99-realtime.conf"
+            )
+
+        command = BaseCyclic_pb2.Command()
+        for _ in range(self.actuator_count):
+            command.actuators.add()
+        motor_cmd = command.interconnect.gripper_command.motor_cmd.add()
+
+        feedback = self.base_cyclic.RefreshFeedback()
+        base_servo_mode = Base_pb2.ServoingModeInformation()
+        base_servo_mode.servoing_mode = Base_pb2.LOW_LEVEL_SERVOING
+        self.base.SetServoingMode(base_servo_mode)
+        try:
+            for i in range(self.actuator_count):
+                command.actuators[i].flags = ActuatorCyclic_pb2.SERVO_ENABLE
+                command.actuators[i].position = feedback.actuators[i].position
+            feedback = self.base_cyclic.Refresh(command, 0, self.send_options)
+            motor_cmd.position = feedback.interconnect.gripper_feedback.motor[
+                0
+            ].position
+            motor_cmd.velocity = 0
+            motor_cmd.force = 100
+
+            cyclic_count = 0
+            failed_cyclic_count = 0
+            t_cyclic = time.time()
+            while cyclic_count < len(trajectory):
+                t_now = time.time()
+                if t_now - t_cyclic < 0.001:  # 1 kHz
+                    continue
+                t_cyclic = t_now
+                for i in range(self.actuator_count):
+                    command.actuators[i].position = trajectory[cyclic_count][i]
+                command.frame_id = (command.frame_id + 1) % 65536
+                for i in range(self.actuator_count):
+                    command.actuators[i].command_id = command.frame_id
+                if cyclic_count >= gripper_release_step:
+                    motor_cmd.position = 0
+                    motor_cmd.velocity = 100
+                try:
+                    feedback = self.base_cyclic.Refresh(command, 0, self.send_options)
+                except:
+                    failed_cyclic_count += 1
+                cyclic_count += 1
+            print(
+                f"Position trajectory: {cyclic_count} cycles, "
+                f"{failed_cyclic_count} failed"
+            )
+        finally:
+            base_servo_mode = Base_pb2.ServoingModeInformation()
+            base_servo_mode.servoing_mode = Base_pb2.SINGLE_LEVEL_SERVOING
+            self.base.SetServoingMode(base_servo_mode)
+
     def init_cyclic(self, control_callback):
         assert not self.cyclic_running, "Cyclic thread is already running"
 
