@@ -15,8 +15,8 @@ faces the cube from the standoff, so the cube lies straight ahead of the arm mou
 
 Frames: the IK solver works in the arm's base frame (+x along the robot's heading when
 joint 1 is at 0, +z up). The arm mount sits ``mounting_offset`` ahead of the base
-centre and the floor is at ``floor_z`` in the arm frame (``MOUNTING_OFFSET`` and
-``HEIGHT_OFFSET`` in ``third_party/constants.py``, carried over from the original).
+centre (``MOUNTING_OFFSET`` in ``third_party/constants.py``) and the floor is at
+``floor_z`` in the arm frame.
 """
 
 # mujoco is a compiled extension; pylint cannot see its members.
@@ -33,11 +33,7 @@ import mujoco  # type: ignore[import-untyped]
 import numpy as np
 from numpy.typing import NDArray
 
-from prpl_tidybot.third_party.constants import (
-    HEIGHT_OFFSET,
-    MOUNTING_OFFSET,
-    RETRACT_ARM_CONF,
-)
+from prpl_tidybot.third_party.constants import MOUNTING_OFFSET, RETRACT_ARM_CONF
 from prpl_tidybot.third_party.ik_solver import IKSolver
 
 # The original's carry pose after a grasp, [h, 340, 180, 214, 0, 320, 90] in Kortex
@@ -53,9 +49,12 @@ class TopDownPickGeometry:
     # Gripper reach from the arm mount at the grasp (the original's open-gripper 0.55).
     reach: float = 0.55
     mounting_offset: float = MOUNTING_OFFSET
-    floor_z: float = HEIGHT_OFFSET
-    # Height of the IK target (fingertip pinch point) above the floor at the grasp.
-    grasp_height: float = 0.02
+    # KINDER's TidyBot mounts the arm 0.3948 m above the floor.
+    floor_z: float = -0.395
+    # The open 2F-85's finger pads reach this far below the pinch point (KINDER's
+    # gen3_2f85 model), so the pinch point must stay this high plus a clearance.
+    pad_drop: float = 0.0295
+    pad_clearance: float = 0.012
     # The original hovers 10 cm above the grasp before descending.
     hover_height: float = 0.10
     # Added to the cube's yaw to align the fingers' closing axis with a pair of faces.
@@ -65,6 +64,11 @@ class TopDownPickGeometry:
     # Gripper readings: closing on nothing reaches ~1.0; on the 5 cm cube it read 0.49.
     grasp_min: float = 0.2
     grasp_max: float = 0.9
+
+    @property
+    def grasp_height(self) -> float:
+        """Pinch point above the floor at the grasp: the pads just clear the floor."""
+        return self.pad_drop + self.pad_clearance
 
     @property
     def standoff(self) -> float:

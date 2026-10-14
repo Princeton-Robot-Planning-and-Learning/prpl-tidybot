@@ -48,9 +48,10 @@ pick:
     # model, reached the cube's height on the robot. third_party HEIGHT_OFFSET (-0.348)
     # is the old stack's Kortex tool-frame pick height, a different convention.
     floor_z: -0.395
-    # Fingertip pinch point above the floor at the grasp (the 5 cm cube's middle), and
-    # the hover above that.
-    grasp_height: 0.025
+    # The finger pads reach 2.95 cm below the IK's pinch point; at the grasp they stop
+    # pad_clearance above the floor (aiming the pinch point at the cube's middle put
+    # them 4 mm into it). Hover is above the grasp.
+    pad_clearance: 0.012
     hover_height: 0.10
     # Added to the cube's yaw to square the fingers to its faces (tune on the robot).
     wrist_yaw_offset_deg: 0.0

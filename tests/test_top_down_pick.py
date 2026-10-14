@@ -1,14 +1,19 @@
 """Tests for the top-down cube pick ported from Jimmy Wu's TidyBot ``pick_object``."""
 
 import math
+from importlib import resources
+from pathlib import Path
 
+import mujoco
 import numpy as np
 import pytest
+from omegaconf import OmegaConf
 
 from prpl_tidybot.top_down_pick import (
     TopDownPickGeometry,
     arm_frame_target,
     forward_kinematics,
+    geometry_from_config,
     grasp_succeeded,
     standoff_pose,
     top_down_joint_targets,
@@ -16,6 +21,28 @@ from prpl_tidybot.top_down_pick import (
 
 FLOOR_BOUNDS = (-1.5, 1.7, -1.5, 1.5)
 GEOM = TopDownPickGeometry()
+_CONF = Path(__file__).resolve().parent.parent / "conf" / "toss_cycles.yaml"
+
+
+def _pad_bottom_z(joints):
+    """Lowest point of the open Robotiq 2F-85's finger pads, in the arm frame, from
+    KINDER's Kinova Gen3 + 2F-85 model."""
+    xml = resources.files("kinder") / "envs/dynamic3d/models/kinova_gen3/gen3_2f85.xml"
+    model = mujoco.MjModel.from_xml_path(str(xml))  # pylint: disable=no-member
+    data = mujoco.MjData(model)  # pylint: disable=no-member
+    data.qpos[:7] = joints
+    mujoco.mj_forward(model, data)  # pylint: disable=no-member
+    lowest = math.inf
+    for g in range(model.ngeom):
+        if not model.body(model.geom_bodyid[g]).name.endswith("_pad"):
+            continue
+        signs = np.array([[i, j, k] for i in (-1, 1) for j in (-1, 1) for k in (-1, 1)])
+        corners = (
+            data.geom_xpos[g]
+            + (signs * model.geom_size[g]) @ data.geom_xmat[g].reshape(3, 3).T
+        )
+        lowest = min(lowest, corners[:, 2].min())
+    return lowest
 
 
 def _wrap(a):
@@ -88,3 +115,16 @@ def test_grasp_check_matches_the_measured_gripper_readings():
     assert grasp_succeeded(0.49, GEOM)
     assert not grasp_succeeded(0.996, GEOM)
     assert not grasp_succeeded(0.05, GEOM)  # did not close at all
+
+
+def test_the_configured_grasp_stops_the_finger_pads_just_above_the_floor():
+    """The pads reach 3.5 cm below the IK's pinch point; aiming the pinch point at the
+    cube's middle drove them 1 cm into the floor on the robot (2026-10-14). The
+    configured grasp leaves them a centimetre or so clear, low enough to grip the cube.
+    """
+    geom = geometry_from_config(OmegaConf.load(_CONF).pick.top_down)
+    _, grasp = top_down_joint_targets(
+        geom.standoff - geom.mounting_offset, 0.0, 0.3, geom
+    )
+    clearance = _pad_bottom_z(grasp) - geom.floor_z
+    assert 0.005 < clearance < 0.02
