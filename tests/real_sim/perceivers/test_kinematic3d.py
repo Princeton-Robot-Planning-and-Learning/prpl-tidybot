@@ -1,5 +1,7 @@
 """Tests for real_sim/perceivers/kinematic3d.py."""
 
+import math
+
 import numpy as np
 import pytest
 from kinder.envs.kinematic3d.object_types import Kinematic3DCuboidType
@@ -10,6 +12,7 @@ from prpl_tidybot.real_sim.perceivers.kinematic3d import (
     BaseMotion3DPerceiver,
     CylinderShelf3DPerceiver,
     PrplLab3DPerceiver,
+    Shelf3DPerceiver,
 )
 from prpl_tidybot.real_sim.perceivers.target_source import (
     ConstantCylinderTargets,
@@ -143,3 +146,63 @@ def test_cylinder_shelf3d_perceiver_rejects_target_count_mismatch():
     )
     with pytest.raises(RuntimeError, match="2 cylinder spec"):
         perceiver.reset(_make_obs(), {})
+
+
+def _cube_yaw(state):
+    cube = state.get_object_from_name("cube0")
+    assert state.get(cube, "pose_qx") == pytest.approx(0.0)
+    assert state.get(cube, "pose_qy") == pytest.approx(0.0)
+    return 2 * math.atan2(state.get(cube, "pose_qz"), state.get(cube, "pose_qw"))
+
+
+def _angle_diff(a, b):
+    return (a - b + math.pi) % (2 * math.pi) - math.pi
+
+
+@pytest.mark.parametrize(
+    "cube_xy,source_yaw",
+    [((3.0, 1.0), 0.0), ((0.5, 0.0), 0.0), ((2.0, 3.0), 0.3), ((0.4, 2.2), -0.6)],
+)
+def test_shelf3d_perceiver_turns_the_cube_yaw_to_face_the_robot(cube_xy, source_yaw):
+    """A 90-degree-symmetric cube reports the equivalent yaw (source + k * 90 degrees)
+    nearest the robot-to-cube bearing, inside [-3pi/4, 3pi/4] (the shelf3d pick asserts
+    on angles outside that once its own offset is added)."""
+    half = 0.025
+    perceiver = Shelf3DPerceiver(
+        target_source=ConstantTargetSource(*cube_xy, half, yaw=source_yaw),
+        shelf_pose=(1.5, 1.5, 0.02),
+        cube_half_extents=(half, half, half),
+    )
+    yaw = _cube_yaw(perceiver.reset(_make_obs(), {}))  # robot at (2.0, 1.0)
+    period = math.pi / 2
+    k = (yaw - source_yaw) / period
+    assert k == pytest.approx(round(k), abs=1e-6)
+    assert -3 * math.pi / 4 - 1e-9 <= yaw <= 3 * math.pi / 4 + 1e-9
+    bearing = math.atan2(cube_xy[1] - 1.0, cube_xy[0] - 2.0)
+    for j in range(-4, 5):
+        other = source_yaw + j * period
+        if -3 * math.pi / 4 <= other <= 3 * math.pi / 4:
+            assert (
+                abs(_angle_diff(yaw, bearing))
+                <= abs(_angle_diff(other, bearing)) + 1e-9
+            )
+
+
+def test_shelf3d_perceiver_keeps_a_block_symmetric_only_every_180_degrees():
+    """The default 10 x 5 x 5 cm block only looks the same every 180 degrees."""
+    perceiver = Shelf3DPerceiver(
+        target_source=ConstantTargetSource(0.5, 0.0, 0.025, yaw=0.2),
+        shelf_pose=(1.5, 1.5, 0.02),
+    )
+    yaw = _cube_yaw(perceiver.reset(_make_obs(), {}))
+    k = (yaw - 0.2) / math.pi
+    assert k == pytest.approx(round(k), abs=1e-6)
+
+
+def test_shelf3d_perceiver_without_yaw_is_unchanged():
+    """A position-only source still gives a cube lying square (identity orientation)
+    when the robot is on its -x side."""
+    perceiver = Shelf3DPerceiver(
+        target_source=ConstantTargetSource(3.0, 1.0, 0.025), shelf_pose=(1.5, 1.5, 0.02)
+    )
+    assert _cube_yaw(perceiver.reset(_make_obs(), {})) == pytest.approx(0.0)

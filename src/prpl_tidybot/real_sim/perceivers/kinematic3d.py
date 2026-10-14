@@ -1,13 +1,13 @@
 """Perceivers for kinematic3d kinder envs.
 
-Each subclass turns a `TidyBotObservation` into an `ObjectCentricState`
-that matches a particular kinder env's type schema. The robot
-proprioception is identical across kinematic3d envs (same
-`Kinematic3DRobotType` features), so it lives on the base class; only
-the non-robot object detection differs per env.
+Each subclass turns a `TidyBotObservation` into an `ObjectCentricState` that matches a
+particular kinder env's type schema. The robot proprioception is identical across
+kinematic3d envs (same `Kinematic3DRobotType` features), so it lives on the base class;
+only the non-robot object detection differs per env.
 """
 
 import abc
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -52,9 +52,9 @@ class KinematicRobotPerceiverBase(
 ):
     """Build a kinematic3d ObjectCentricState from a TidyBotObservation.
 
-    Subclasses implement `_detect_objects` to add non-robot scene content
-    (placeholder cubes, target points, etc.) on top of the shared robot
-    proprioception this class writes.
+    Subclasses implement `_detect_objects` to add non-robot scene content (placeholder
+    cubes, target points, etc.) on top of the shared robot proprioception this class
+    writes.
     """
 
     def __init__(self, robot_name: str = "robot") -> None:
@@ -65,10 +65,10 @@ class KinematicRobotPerceiverBase(
     def _state_cls(self) -> type[ObjectCentricState]:
         """Env-specific ObjectCentricState subclass to construct.
 
-        Bilevel-planning env models for each kinder env assert that the
-        state is an instance of the env's specific state class (e.g.
-        `BaseMotion3DObjectCentricState`), so we have to construct that
-        same subclass here rather than a plain ObjectCentricState.
+        Bilevel-planning env models for each kinder env assert that the state is an
+        instance of the env's specific state class (e.g.
+        `BaseMotion3DObjectCentricState`), so we have to construct that same subclass
+        here rather than a plain ObjectCentricState.
         """
 
     @abc.abstractmethod
@@ -77,8 +77,7 @@ class KinematicRobotPerceiverBase(
     ) -> dict[Object, dict[str, float]]:
         """Return the non-robot objects in the scene with their features.
 
-        Currently returns hardcoded placeholders; replace when real
-        perception lands.
+        Currently returns hardcoded placeholders; replace when real perception lands.
         """
 
     def reset(
@@ -129,8 +128,8 @@ class KinematicRobotPerceiverBase(
 class PrplLab3DPerceiver(KinematicRobotPerceiverBase):
     """Perceiver for kinder/PrplLab3D-o{1,2}-v0.
 
-    Non-robot detection currently emits placeholder cubes at the origin
-    with the env's default half-extents.
+    Non-robot detection currently emits placeholder cubes at the origin with the env's
+    default half-extents.
     """
 
     def __init__(self, robot_name: str = "robot", num_cubes: int = 1) -> None:
@@ -168,19 +167,17 @@ class PrplLab3DPerceiver(KinematicRobotPerceiverBase):
 class BaseMotion3DPerceiver(KinematicRobotPerceiverBase):
     """Perceiver for kinder/BaseMotion3D-v0.
 
-    Emits a single `target` of `Kinematic3DPointType` whose `(x, y, z)` comes
-    from the supplied `TargetSource`. In fake / sim modes the source is a
-    `ConstantTargetSource` threaded in from the env yaml; in real mode it's a
-    `MarkerDetectorTargetSource` that subscribes to the marker-detector
-    publisher.
+    Emits a single `target` of `Kinematic3DPointType` whose `(x, y, z)` comes from the
+    supplied `TargetSource`. In fake / sim modes the source is a `ConstantTargetSource`
+    threaded in from the env yaml; in real mode it's a `MarkerDetectorTargetSource` that
+    subscribes to the marker-detector publisher.
 
-    The target is queried once per :meth:`reset` and cached for every
-    :meth:`step` call within that episode. A `MarkerDetectorTargetSource`
-    query blocks up to the publisher's refresh interval; doing it every
-    inner tick stretched the gap between consecutive base commands past the
-    base controller's "no command in 2.5 * POLICY_CONTROL_PERIOD" timeout,
-    producing chunky individual motions. The target marker is stationary
-    during a rollout by design, so episode-scoped caching is safe.
+    The target is queried once per :meth:`reset` and cached for every :meth:`step` call
+    within that episode. A `MarkerDetectorTargetSource` query blocks up to the
+    publisher's refresh interval; doing it every inner tick stretched the gap between
+    consecutive base commands past the base controller's "no command in 2.5 *
+    POLICY_CONTROL_PERIOD" timeout, producing chunky individual motions. The target
+    marker is stationary during a rollout by design, so episode-scoped caching is safe.
     """
 
     def __init__(
@@ -251,6 +248,7 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
         self._shelf_pose = tuple(shelf_pose)
         self._cube_half_extents = tuple(cube_half_extents)
         self._cached_cube_target: tuple[float, float, float] | None = None
+        self._cached_cube_yaw = 0.0
 
     @property
     def _state_cls(self) -> type[ObjectCentricState]:
@@ -260,17 +258,48 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
         self, obs: TidyBotObservation, info: dict[str, Any]
     ) -> ObjectCentricState:
         self._cached_cube_target = self._target_source.get_target()
+        self._cached_cube_yaw = self._target_source.get_yaw()
         return super().reset(obs, info)
+
+    def _cube_yaw_facing_robot(
+        self, cube_xy: tuple[float, float], obs: TidyBotObservation
+    ) -> float:
+        """The cube's yaw, swapped for the symmetric equivalent nearest the bearing from
+        the robot to the cube.
+
+        A source yaw is only defined up to the cube's symmetry (90 degrees for a cube,
+        180 for a block), and the shelf3d pick turns the base to face the cube's yaw
+        (plus a sampled offset of at most 45 degrees), so the equivalent nearest the
+        bearing makes the robot approach from its own side. The result stays inside
+        [-3pi/4, 3pi/4]: the pick adds its offset without wrapping and asserts outside
+        [-pi, pi].
+        """
+        hx, hy, _ = self._cube_half_extents
+        period = math.pi / 2 if math.isclose(hx, hy, rel_tol=1e-3) else math.pi
+        pose = obs.map_base_pose
+        bearing = math.atan2(cube_xy[1] - pose.y, cube_xy[0] - pose.x)
+        limit = 3 * math.pi / 4 + 1e-9
+        options = [
+            self._cached_cube_yaw + k * period
+            for k in range(-8, 9)
+            if abs(self._cached_cube_yaw + k * period) <= limit
+        ]
+        return min(
+            options,
+            key=lambda a: abs((a - bearing + math.pi) % (2 * math.pi) - math.pi),
+        )
 
     def _detect_objects(
         self, obs: TidyBotObservation, info: dict[str, Any]
     ) -> dict[Object, dict[str, float]]:
-        del obs, info
+        del info
         if self._cached_cube_target is None:
             # Defensive — reset() should have run first; populate lazily
             # so callers that call step() before reset() still get a cube.
             self._cached_cube_target = self._target_source.get_target()
+            self._cached_cube_yaw = self._target_source.get_yaw()
         cube_x, cube_y, cube_z = self._cached_cube_target
+        cube_yaw = self._cube_yaw_facing_robot((cube_x, cube_y), obs)
         shelf_x, shelf_y, shelf_z = self._shelf_pose
         hx, hy, hz = self._cube_half_extents
         return {
@@ -289,8 +318,8 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
                 "pose_z": cube_z,
                 "pose_qx": 0.0,
                 "pose_qy": 0.0,
-                "pose_qz": 0.0,
-                "pose_qw": 1.0,
+                "pose_qz": math.sin(cube_yaw / 2),
+                "pose_qw": math.cos(cube_yaw / 2),
                 "grasp_active": 0.0,
                 "object_type": 0.0,
                 "half_extent_x": hx,
@@ -303,18 +332,16 @@ class Shelf3DPerceiver(KinematicRobotPerceiverBase):
 class CylinderShelf3DPerceiver(KinematicRobotPerceiverBase):
     """Perceiver for kinder/KinematicCylinderShelf3D-o{N}-v0.
 
-    Emits one object per configured cylinder (cylinder0, cylinder1, ... in
-    spec order), each with its own radius and height, standing upright at
-    the `(x, y, z)` its :class:`CylinderTargets` reports, plus a shelf
-    fixture at a fixed pose threaded in from the env yaml — the same
-    pattern as :class:`Shelf3DPerceiver` with the cube swapped for
-    vertical cylinders. The marker detector only provides `(x, y)` so the
-    orientation is identity, which for a rotationally symmetric cylinder is
-    the only orientation the planner needs. The targets are cached once per
-    :meth:`reset` for the same control-loop-latency reason as in
-    :class:`BaseMotion3DPerceiver` — the cylinders are stationary during a
-    rollout by design (a grasped one is carried, but nothing re-perceives
-    it; grasp tracking is deferred).
+    Emits one object per configured cylinder (cylinder0, cylinder1, ... in spec order),
+    each with its own radius and height, standing upright at the `(x, y, z)` its
+    :class:`CylinderTargets` reports, plus a shelf fixture at a fixed pose threaded in
+    from the env yaml — the same pattern as :class:`Shelf3DPerceiver` with the cube
+    swapped for vertical cylinders. The marker detector only provides `(x, y)` so the
+    orientation is identity, which for a rotationally symmetric cylinder is the only
+    orientation the planner needs. The targets are cached once per :meth:`reset` for the
+    same control-loop-latency reason as in :class:`BaseMotion3DPerceiver` — the
+    cylinders are stationary during a rollout by design (a grasped one is carried, but
+    nothing re-perceives it; grasp tracking is deferred).
     """
 
     def __init__(
