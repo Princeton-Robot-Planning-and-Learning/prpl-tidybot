@@ -163,7 +163,16 @@ def run_toss_cycles(
             _logger.info("Cycle %d/%d: localizing the cube.", cycle, requested)
             if cfg.pick.method == "top_down":
                 failure = _pick_top_down(
-                    cfg, real_env, cube_source, arm, geom, confirm, cycle, record, wrist
+                    cfg,
+                    real_env,
+                    cube_source,
+                    arm,
+                    geom,
+                    confirm,
+                    cycle,
+                    record,
+                    wrist,
+                    toss_pose,
                 )
             else:
                 failure = _pick_kinder(
@@ -477,36 +486,40 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
     cycle: int,
     record: dict[str, Any],
     wrist: "_WristRecorder",
+    toss_pose: list[float],
 ) -> str | None:
     """Jimmy Wu's top-down pick (prpl_tidybot.top_down_pick) on the localized cube.
 
-    Drive to a standoff facing the cube, re-localize, then for up to ``max_attempts``:
-    open, hover 10 cm above, descend, close, and read the gripper. Returns a stop
-    reason, or None once the cube is held (arm at its carry pose).
+    For up to ``max_attempts``: localize the cube, drive to a standoff facing it,
+    re-localize, then open, hover 10 cm above, descend, close, and read the gripper.
+    After a miss the arm retracts and the base returns to the toss pose, where the
+    ceiling cameras see the (possibly nudged) cube without the robot over it. Returns
+    a stop reason, or None once the cube is held (arm at its carry pose).
     """
     td = cfg.pick.top_down
-    try:
-        cube = _localize(cube_source)
-    except RuntimeError as e:
-        return f"{e}; move the cube into the drivable area and rerun"
-    record["cube_before_pick"] = cube
-    obs, _ = real_env.reset()
-    robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
     floor = tuple(cfg.preview.floor_bounds)
-    try:
-        stand = standoff_pose(robot, (cube["x"], cube["y"]), geom, floor)
-    except ValueError as e:
-        return f"{e}; move the cube and rerun"
-    confirm(
-        f"Cycle {cycle}: Drive to the pick standoff ({stand[0]:+.3f}, {stand[1]:+.3f}, "
-        f"{math.degrees(stand[2]):+.0f} deg), {geom.standoff:.2f} m from the cube at "
-        f"({cube['x']:+.3f}, {cube['y']:+.3f})?"
-    )
-    base = _drive_to(real_env, list(stand))
     attempts = int(td.get("max_attempts", 3))
     for attempt in range(1, attempts + 1):
         try:
-            cube = _localize(cube_source)  # the cube may have been nudged
+            cube = _localize(cube_source)
+        except RuntimeError as e:
+            return f"{e}; move the cube into the drivable area and rerun"
+        record.setdefault("cube_before_pick", cube)
+        obs, _ = real_env.reset()
+        robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
+        try:
+            stand = standoff_pose(robot, (cube["x"], cube["y"]), geom, floor)
+        except ValueError as e:
+            return f"{e}; move the cube and rerun"
+        confirm(
+            f"Cycle {cycle}: Drive to the pick standoff ({stand[0]:+.3f}, "
+            f"{stand[1]:+.3f}, {math.degrees(stand[2]):+.0f} deg), "
+            f"{geom.standoff:.2f} m from the cube at ({cube['x']:+.3f}, "
+            f"{cube['y']:+.3f})?"
+        )
+        base = _drive_to(real_env, list(stand))
+        try:
+            cube = _localize(cube_source)  # corrects for where the base parked
         except RuntimeError as e:
             return f"{e}; move the cube and rerun"
         ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
@@ -556,6 +569,13 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         _set_gripper(arm, 0.0, td)
         _logged_move(arm, "retreat", hover, 0.0, cfg.arm_home, geom, moves)
         wrist.stop()
+        if attempt < attempts:
+            confirm(
+                f"Cycle {cycle}: Missed. Retract the arm and drive back to the toss "
+                "pose to re-localize the cube?"
+            )
+            _move_arm(arm, list(RETRACT_ARM_CONF), 0.0, cfg.arm_home)
+            _drive_to(real_env, list(toss_pose))
     return (
         f"pick failed after {attempts} attempts (gripper never closed on the cube); "
         "move the cube and rerun"
