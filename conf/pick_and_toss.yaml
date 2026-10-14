@@ -7,11 +7,12 @@
 #   python scripts/pick_and_toss.py mode=real skip_toss=true   # pick and hold
 #
 # Everything in config.yaml (seed, agent.max_skill_horizon, preview, lab) still
-# applies; the env is the kinematic shelf3d env and its fake/sim/real pipelines.
+# applies; the env is floor-cube-o1 (the shelf3d env with the lab's 5 cm cube,
+# localized from the ceiling cameras) and its fake/sim/real pipelines.
 
 defaults:
   - config
-  - override env: kinematic-shelf3d-o1
+  - override env: floor-cube-o1
   - _self_
 
 # Skip the pick: open the gripper, wait for the operator to hand the object in
