@@ -1,6 +1,14 @@
 """Arm interface."""
 
 import abc
+from typing import Any
+
+from prpl_tidybot.toss import (
+    TOSS_GRIPPER_RELEASE_MS,
+    TOSS_MAX_VEL,
+    plan_toss_swing,
+    toss_windup_pose,
+)
 
 
 class ArmInterface(abc.ABC):
@@ -39,6 +47,21 @@ class ArmInterface(abc.ABC):
         Real-resource subclasses override; the default is a no-op.
         """
 
+    def toss(
+        self,
+        heading: float = 0.0,
+        max_vel: float = TOSS_MAX_VEL,
+        gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
+    ) -> None:
+        """Throw whatever the gripper holds (see ``prpl_tidybot.toss``).
+
+        Moves to the wind-up pose with joint 1 at ``heading`` (Kortex degrees), swings
+        to the release pose at up to ``max_vel`` deg/s and opens the gripper
+        ``gripper_release_ms`` ms into the swing. Blocks until the arm is back under the
+        normal controller, holding the release pose with the gripper open.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot toss.")
+
     def close(self) -> None:
         """Tear down hardware connections; real-resource subclasses override."""
 
@@ -49,6 +72,7 @@ class FakeArmInterface(ArmInterface):
     def __init__(self) -> None:
         self.arm_state: list[float] = [0.0] * 7
         self.gripper_state: float = 0.0
+        self.toss_calls: list[dict[str, Any]] = []
 
     def get_arm_state(self) -> list[float]:
         return list(self.arm_state)
@@ -59,3 +83,29 @@ class FakeArmInterface(ArmInterface):
     def execute_action(self, arm_goal: list[float], gripper_goal: float) -> None:
         self.arm_state = list(arm_goal)
         self.gripper_state = gripper_goal
+
+    def toss(
+        self,
+        heading: float = 0.0,
+        max_vel: float = TOSS_MAX_VEL,
+        gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
+    ) -> None:
+        """Record the call and open the gripper; the arm conf is left unchanged.
+
+        The swing is planned (and discarded) so that parameters the arm server would
+        reject fail here too.
+        """
+        plan_toss_swing(
+            toss_windup_pose(heading),
+            heading,
+            max_vel=max_vel,
+            gripper_release_ms=gripper_release_ms,
+        )
+        self.toss_calls.append(
+            {
+                "heading": float(heading),
+                "max_vel": float(max_vel),
+                "gripper_release_ms": int(gripper_release_ms),
+            }
+        )
+        self.gripper_state = 0.0

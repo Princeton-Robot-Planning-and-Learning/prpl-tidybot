@@ -3,6 +3,7 @@
 from prpl_tidybot.interfaces.arm_interface import ArmInterface
 from prpl_tidybot.third_party.arm_server import ArmManager
 from prpl_tidybot.third_party.constants import ARM_RPC_HOST, ARM_RPC_PORT, RPC_AUTHKEY
+from prpl_tidybot.toss import TOSS_GRIPPER_RELEASE_MS, TOSS_MAX_VEL
 
 
 class RealArmInterface(ArmInterface):
@@ -33,6 +34,17 @@ class RealArmInterface(ArmInterface):
     def resume(self) -> None:
         """Restart the low-level loop from the arm's current configuration."""
         self.arm.resume()
+
+    def toss(
+        self,
+        heading: float = 0.0,
+        max_vel: float = TOSS_MAX_VEL,
+        gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
+    ) -> None:
+        """Run the toss on the arm server (``Arm.toss``); blocks until it is done."""
+        self.arm.toss(
+            heading=heading, max_vel=max_vel, gripper_release_ms=gripper_release_ms
+        )
 
     def close(self) -> None:
         """Tear down the RPC connection and stop the low-level arm control loop."""
