@@ -427,7 +427,7 @@ def _snap_to_peak(profile: np.ndarray, column: int, params: EdgeDetectorParams) 
         return int(np.clip(column, 0, len(profile) - 1))
     # A maximum on the window's rim is a slope towards a peak outside the
     # window, not an edge here: keep the segmentation boundary.
-    on_rim = (best == lo and lo > 0) or (best == hi - 1 and hi < len(profile))
+    on_rim = (0 < lo == best) or (best == hi - 1 and hi < len(profile))
     if on_rim:
         return int(np.clip(column, 0, len(profile) - 1))
     return best
