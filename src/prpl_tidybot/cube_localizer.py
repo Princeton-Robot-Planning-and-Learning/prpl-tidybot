@@ -16,6 +16,8 @@ frames stacked top to bottom in ``camera_serials`` order, so camera ``i`` occupi
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 import time
 from collections.abc import Sequence
@@ -27,8 +29,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from prpl_tidybot.marker_detector.extrinsics import load_extrinsics
-from prpl_tidybot.marker_detector.utils import get_camera_params
+from prpl_tidybot.marker_detector.utils import CAMERA_PARAMS_DIR, get_camera_params
 from prpl_tidybot.real_sim.perceivers.target_source import TargetSource
+
+_logger = logging.getLogger(__name__)
 
 # Unit cube corners, centred in x/y, bottom face on z = 0.
 _CORNERS = np.array(
@@ -81,6 +85,12 @@ class CubeFit:
     yaw: float
     iou: float
     num_views: int
+    # Per-camera fits (camera index, x, y, yaw, iou) and their spread; a large spread
+    # means the cameras' extrinsics disagree where the cube is.
+    per_camera: tuple[tuple[int, float, float, float, float], ...] = ()
+    camera_disagreement_m: float = 0.0
+    # The camera whose fit was kept (-1 when fused).
+    camera: int = -1
 
 
 def load_ceiling_cameras(serials: Sequence[str]) -> list[CeilingCamera]:
@@ -91,6 +101,21 @@ def load_ceiling_cameras(serials: Sequence[str]) -> list[CeilingCamera]:
         rvec, tvec = load_extrinsics(serial)
         cameras.append(CeilingCamera(np.asarray(camera_matrix, np.float64), rvec, tvec))
     return cameras
+
+
+def in_calibrated_region(
+    camera: CeilingCamera, index: int, x: float, y: float, serials: Sequence[str]
+) -> bool:
+    """Whether the floor point (x, y) projects inside the camera's calibrated image
+    region (``camera_corners`` in ``camera_params/<lab>/<serial>.json``), where its
+    extrinsics were fitted. Unknown regions count as calibrated."""
+    path = next(CAMERA_PARAMS_DIR.glob(f"*/{serials[index]}.json"), None)
+    if path is None:
+        return True
+    with open(path, encoding="utf-8") as f:
+        corners = np.array(json.load(f)["camera_corners"], np.float32)
+    u, v = camera.project(np.array([[x, y, 0.0]]))[0]
+    return cv.pointPolygonTest(corners, (float(u), float(v)), False) >= 0
 
 
 def cube_mask(bgr: NDArray[np.uint8]) -> NDArray[np.uint8]:
@@ -168,12 +193,15 @@ def fit_cube_pose(
     cameras: Sequence[CeilingCamera],
     guess_xy: tuple[float, float],
     side: float,
+    only: Sequence[int] | None = None,
 ) -> CubeFit | None:
     """3-DoF silhouette fit around `guess_xy`; masks are averaged over `frames`
-    first."""
+    first. ``only`` restricts the fit to those camera indices."""
     rows = _camera_rows(frames[0], len(cameras))
     views = []
     for i, cam in enumerate(cameras):
+        if only is not None and i not in only:
+            continue
         u, v = cube_silhouette(cam, *guess_xy, 0.0, side).mean(axis=0)
         if not (0 <= u < frames[0].shape[1] and 0 <= v < rows):
             continue
@@ -183,24 +211,29 @@ def fit_cube_pose(
             [cube_mask(f[i * rows : (i + 1) * rows][v0:v1, u0:u1]) for f in frames],
             axis=0,
         )
+        # Rows at the stitch line are unknown: excluded from the score entirely, so a
+        # silhouette crossing them is neither credited nor penalised there.
+        valid = np.ones_like(prob)
         if i > 0:  # stitch line at the top of this camera's rows
-            prob[: max(0, _SEAM_PX - v0), :] = 0
+            valid[: max(0, _SEAM_PX - v0), :] = 0
         if i < len(cameras) - 1:  # ... and at the bottom
-            prob[max(0, rows - _SEAM_PX - v0) :, :] = 0
+            valid[max(0, rows - _SEAM_PX - v0) :, :] = 0
+        prob = prob * valid
         if prob.sum() > 0:
-            views.append((cam, u0, v0, prob))
+            views.append((cam, u0, v0, prob, valid))
     if not views:
         return None
 
     def score(x: float, y: float, yaw: float) -> float:
         total = 0.0
-        for cam, u0, v0, prob in views:
+        for cam, u0, v0, prob, valid in views:
             # Sub-pixel, anti-aliased rasterisation keeps the score smooth in the pose.
             sil = np.zeros(prob.shape, np.float32)
             poly = ((cube_silhouette(cam, x, y, yaw, side) - [u0, v0]) * 16).astype(
                 np.int32
             )
             cv.fillConvexPoly(sil, poly, (1.0,), lineType=cv.LINE_AA, shift=4)
+            sil = sil * valid
             inter = float((sil * prob).sum())
             total += inter / (float(prob.sum()) + float(sil.sum()) - inter)
         return total / len(views)
@@ -236,9 +269,16 @@ def localize_cube(
     side: float,
     exclude: Sequence[Sequence[float]] = (),
     min_iou: float = 0.6,
+    fusion: str = "best_view",
+    serials: Sequence[str] | None = None,
 ) -> CubeFit | None:
     """The best-fitting cube in the drivable area, or None if nothing fits well
-    enough."""
+    enough.
+
+    ``fusion="best_view"`` (default) fits each camera on its own and keeps the best;
+    ``"fused"`` scores every camera that sees the cube together, which is only right
+    when their calibrations agree.
+    """
     best: CubeFit | None = None
     for guess in find_cube_candidates(frames[-1], cameras, floor_bounds, side, exclude):
         fit = fit_cube_pose(frames[-3:], cameras, guess, side)  # quick screen
@@ -246,10 +286,61 @@ def localize_cube(
             best = fit
     if best is None or best.iou < min_iou:
         return None
-    final = fit_cube_pose(frames, cameras, (best.x, best.y), side)
-    if final is None or final.iou < min_iou:
+    guess = (best.x, best.y)
+    singles = []
+    for i in range(len(cameras)):
+        fit = fit_cube_pose(frames, cameras, guess, side, only=[i])
+        if fit is not None:
+            singles.append((i, fit))
+    if not singles:
         return None
-    return final
+    per_camera = tuple((i, f.x, f.y, f.yaw, f.iou) for i, f in singles)
+    spread = max(
+        (math.hypot(a.x - b.x, a.y - b.y) for _, a in singles for _, b in singles),
+        default=0.0,
+    )
+    cam_i = -1
+    if fusion == "fused":
+        chosen = fit_cube_pose(frames, cameras, guess, side)
+    else:
+        # The cameras' calibrations need not agree, so blending their views can match
+        # neither image: keep the single best view. A near tie goes to the camera that
+        # sees the cube more directly from above (less side face, less perspective).
+        # Prefer cameras whose calibrated region contains the cube (their extrinsics
+        # were fitted there); among those, the best fit, a near tie going to the
+        # camera that sees the cube more directly from above.
+        pool = singles
+        if serials is not None:
+            calibrated = [
+                (i, f)
+                for i, f in singles
+                if in_calibrated_region(cameras[i], i, f.x, f.y, serials)
+            ]
+            pool = calibrated or singles
+        top_iou = max(f.iou for _, f in pool)
+        near = [(i, f) for i, f in pool if f.iou >= top_iou - 0.03]
+        cam_i, chosen = min(
+            near, key=lambda t: _off_nadir(cameras[t[0]], t[1].x, t[1].y)
+        )
+    if chosen is None or chosen.iou < min_iou:
+        return None
+    return CubeFit(
+        chosen.x,
+        chosen.y,
+        chosen.yaw,
+        chosen.iou,
+        chosen.num_views,
+        per_camera,
+        spread,
+        cam_i,
+    )
+
+
+def _off_nadir(camera: CeilingCamera, x: float, y: float) -> float:
+    """Horizontal distance from the point under the camera to (x, y)."""
+    rot: Any = cv.Rodrigues(camera.rvec)[0]
+    centre = -rot.T @ camera.tvec
+    return float(math.hypot(x - centre[0], y - centre[1]))
 
 
 class CeilingCubeTargetSource(TargetSource):
@@ -273,6 +364,8 @@ class CeilingCubeTargetSource(TargetSource):
         frame_period_s: float = 0.12,
         min_iou: float = 0.6,
         host: str | None = None,
+        fusion: str = "best_view",
+        warn_disagreement_m: float = 0.01,
     ) -> None:
         if image_client is None:
             from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
@@ -290,13 +383,16 @@ class CeilingCubeTargetSource(TargetSource):
             )
         self._images = image_client
         self._markers = marker_client
-        self._cameras = load_ceiling_cameras(list(serials))
+        self._serials = list(serials)
+        self._cameras = load_ceiling_cameras(self._serials)
         self._side = float(side)
         self._floor_bounds = tuple(floor_bounds)
         self._robot_half = float(robot_exclusion_half)
         self._num_frames = int(num_frames)
         self._period = float(frame_period_s)
         self._min_iou = float(min_iou)
+        self._fusion = fusion
+        self._warn_m = float(warn_disagreement_m)
         self.last_fit: CubeFit | None = None
 
     def _frames(self) -> list[NDArray[np.uint8]]:
@@ -325,11 +421,22 @@ class CeilingCubeTargetSource(TargetSource):
             self._side,
             exclude=self._exclusions(),
             min_iou=self._min_iou,
+            fusion=self._fusion,
+            serials=self._serials,
         )
         if fit is None:
             raise RuntimeError(
                 "CeilingCubeTargetSource: no cube found in the drivable area "
                 f"{self._floor_bounds}"
+            )
+        if fit.camera_disagreement_m > self._warn_m:
+            _logger.warning(
+                "Ceiling cameras disagree by %.1f mm on the cube (%s); check the "
+                "extrinsics calibration.",
+                1000 * fit.camera_disagreement_m,
+                ", ".join(
+                    f"cam {i}: ({x:+.3f}, {y:+.3f})" for i, x, y, _, _ in fit.per_camera
+                ),
             )
         self.last_fit = fit
         return fit
