@@ -40,6 +40,15 @@ from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExecutor
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD, RETRACT_ARM_CONF
 from prpl_tidybot.third_party.ik_solver import IKSolver
+from prpl_tidybot.top_down_pick import (
+    CARRY_ARM_CONF,
+    TopDownPickGeometry,
+    arm_frame_target,
+    geometry_from_config,
+    grasp_succeeded,
+    standoff_pose,
+    top_down_joint_targets,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -126,6 +135,14 @@ def run_toss_cycles(
         .tolist()
     )
     arm: ArmInterface = real_env.interface.arm_interface
+    cube_source = hydra.utils.instantiate(
+        pipeline.perceiver.target_source, _convert_="all"
+    )
+    geom = geometry_from_config(cfg.pick.get("top_down"))
+    wrist = _WristRecorder(
+        cfg.mode == "real" and bool(cfg.pick.top_down.get("record_wrist", True)),
+        resolved_log_dir,
+    )
 
     def confirm(question: str) -> None:
         if not interactive:
@@ -142,50 +159,34 @@ def run_toss_cycles(
         for cycle in range(1, requested + 1):
             record: dict[str, Any] = {"cycle": cycle, "tossed": False}
             records.append(record)
-            _logger.info(
-                "Cycle %d/%d: localizing the cube and planning the pick.",
-                cycle,
-                requested,
-            )
-            agent = PickSkillAgent(
-                env_models,
-                int(cfg.seed) + cycle - 1,
-                max_skill_horizon=cfg.agent.max_skill_horizon,
-                max_attempts=cfg.pick.max_attempts,
-            )
-            runner: Runner = Runner(
-                real_env=real_env,
-                perceiver=perceiver,
-                agent=agent,
-                plan_executor=plan_executor,
-            )
-            try:
-                state = runner.reset(seed=int(cfg.seed) + cycle - 1)
-            except RuntimeError as e:
-                finish_reason = f"{e}; move the cube into the drivable area and rerun"
-                break
-            except AgentFailure as e:
-                finish_reason = f"pick_failure: {e}; move the cube and rerun"
-                break
-            record["cube_before_pick"] = cube_pose(state)
-            if cycle > 1:
+            _logger.info("Cycle %d/%d: localizing the cube.", cycle, requested)
+            if cfg.pick.method == "top_down":
+                failure = _pick_top_down(
+                    cfg, real_env, cube_source, arm, geom, confirm, cycle, record, wrist
+                )
+            else:
+                failure = _pick_kinder(
+                    cfg,
+                    real_env,
+                    perceiver,
+                    plan_executor,
+                    env_models,
+                    resolved_log_dir,
+                    interactive,
+                    prompt_fn,
+                    confirm,
+                    cycle,
+                    record,
+                )
+            if cycle > 1 and "cube_before_pick" in record:
                 records[-2]["landing"] = _landing(record["cube_before_pick"], toss_pose)
-            _confirm_pick(
-                cfg,
-                agent,
-                state,
-                resolved_log_dir,
-                interactive,
-                prompt_fn,
-                confirm,
-                cycle,
-            )
-            try:
-                state, _, _, _, _ = runner.step()
-            except ExecutionFailure as e:
-                finish_reason = f"executor_failure during the pick: {e}"
+            if failure is not None:
+                finish_reason = failure
                 break
             record["picked"] = True
+            if cfg.get("skip_toss"):
+                finish_reason = "picked (toss skipped)"
+                break
 
             confirm(f"Cycle {cycle}: move the arm to home, holding the cube?")
             _move_arm(arm, home_joints, arm.get_gripper_state(), cfg.arm_home)
@@ -227,6 +228,8 @@ def run_toss_cycles(
                 ),
                 encoding="utf-8",
             )
+        wrist.close()
+        cube_source.close()
         real_env.close()
     _logger.info("Toss cycles: %s.", finish_reason)
     return TossCyclesSummary(
@@ -373,3 +376,206 @@ def _reset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         except RuntimeError as e:
             records[-1]["landing"] = {"error": str(e)}
     return reached
+
+
+def _pick_kinder(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    perceiver: Any,
+    plan_executor: Any,
+    env_models: Any,
+    log_dir: Path | None,
+    interactive: bool,
+    prompt_fn: PromptFn,
+    confirm: Any,
+    cycle: int,
+    record: dict[str, Any],
+) -> str | None:
+    """The kinder shelf3d PickController, planned and executed through the Runner.
+
+    Returns a stop reason, or None once the cube is held.
+    """
+    agent = PickSkillAgent(
+        env_models,
+        int(cfg.seed) + cycle - 1,
+        max_skill_horizon=cfg.agent.max_skill_horizon,
+        max_attempts=cfg.pick.max_attempts,
+    )
+    runner: Runner = Runner(
+        real_env=real_env, perceiver=perceiver, agent=agent, plan_executor=plan_executor
+    )
+    try:
+        state = runner.reset(seed=int(cfg.seed) + cycle - 1)
+    except RuntimeError as e:
+        return f"{e}; move the cube into the drivable area and rerun"
+    except AgentFailure as e:
+        return f"pick_failure: {e}; move the cube and rerun"
+    record["cube_before_pick"] = cube_pose(state)
+    _confirm_pick(cfg, agent, state, log_dir, interactive, prompt_fn, confirm, cycle)
+    try:
+        runner.step()
+    except ExecutionFailure as e:
+        return f"executor_failure during the pick: {e}"
+    return None
+
+
+def _localize(source: Any) -> dict[str, float]:
+    x, y, _ = source.get_target()
+    return {"x": float(x), "y": float(y), "yaw_deg": math.degrees(source.get_yaw())}
+
+
+def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    cube_source: Any,
+    arm: ArmInterface,
+    geom: TopDownPickGeometry,
+    confirm: Any,
+    cycle: int,
+    record: dict[str, Any],
+    wrist: "_WristRecorder",
+) -> str | None:
+    """Jimmy Wu's top-down pick (prpl_tidybot.top_down_pick) on the localized cube.
+
+    Drive to a standoff facing the cube, re-localize, then for up to ``max_attempts``:
+    open, hover 10 cm above, descend, close, and read the gripper. Returns a stop
+    reason, or None once the cube is held (arm at its carry pose).
+    """
+    td = cfg.pick.top_down
+    try:
+        cube = _localize(cube_source)
+    except RuntimeError as e:
+        return f"{e}; move the cube into the drivable area and rerun"
+    record["cube_before_pick"] = cube
+    obs, _ = real_env.reset()
+    robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
+    floor = tuple(cfg.preview.floor_bounds)
+    try:
+        stand = standoff_pose(robot, (cube["x"], cube["y"]), geom, floor)
+    except ValueError as e:
+        return f"{e}; move the cube and rerun"
+    confirm(
+        f"Cycle {cycle}: Drive to the pick standoff ({stand[0]:+.3f}, {stand[1]:+.3f}, "
+        f"{math.degrees(stand[2]):+.0f} deg), {geom.standoff:.2f} m from the cube at "
+        f"({cube['x']:+.3f}, {cube['y']:+.3f})?"
+    )
+    base = _drive_to(real_env, list(stand))
+    attempts = int(td.get("max_attempts", 3))
+    for attempt in range(1, attempts + 1):
+        try:
+            cube = _localize(cube_source)  # the cube may have been nudged
+        except RuntimeError as e:
+            return f"{e}; move the cube and rerun"
+        ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
+        yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
+        try:
+            hover, grasp = top_down_joint_targets(
+                ax, ay, yaw_rel, geom, seed=arm.get_arm_state()
+            )
+        except ValueError as e:
+            return f"pick_failure: {e}"
+        record.setdefault("pick_attempts", []).append(
+            {"attempt": attempt, "cube": cube, "arm_target_xy": [ax, ay]}
+        )
+        confirm(
+            f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: open, arm to 10 cm "
+            f"above the cube (arm frame {ax:+.3f}, {ay:+.3f}), descend, close?"
+        )
+        wrist.start(f"cycle_{cycle:02d}_pick_{attempt}")
+        _set_gripper(arm, 0.0, td)
+        _move_arm(arm, hover, 0.0, cfg.arm_home)
+        _move_arm(arm, grasp, 0.0, cfg.arm_home)
+        _set_gripper(arm, float(td.get("close_position", 1.0)), td)
+        reading = arm.get_gripper_state()
+        if cfg.mode == "fake":  # the fake gripper closes on nothing; pretend it holds
+            reading = float(td.get("fake_grasp_reading", 0.49))
+        held = grasp_succeeded(reading, geom)
+        record["pick_attempts"][-1].update({"gripper": reading, "held": held})
+        _logger.info(
+            "Pick attempt %d: gripper %.3f -> %s.",
+            attempt,
+            reading,
+            "held" if held else "missed",
+        )
+        if held:
+            _move_arm(arm, hover, arm.get_gripper_state(), cfg.arm_home)
+            _move_arm(arm, list(CARRY_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
+            wrist.stop()
+            return None
+        _set_gripper(arm, 0.0, td)
+        _move_arm(arm, hover, 0.0, cfg.arm_home)
+        wrist.stop()
+    return (
+        f"pick failed after {attempts} attempts (gripper never closed on the cube); "
+        "move the cube and rerun"
+    )
+
+
+def _set_gripper(arm: ArmInterface, position: float, td: Any) -> None:
+    """Command the gripper and wait until it stops moving."""
+    arm.execute_action(arm.get_arm_state(), position)
+    deadline = time.monotonic() + float(td.get("gripper_timeout_s", 4.0))
+    last = arm.get_gripper_state()
+    while time.monotonic() < deadline:
+        time.sleep(0.15)
+        arm.execute_action(arm.get_arm_state(), position)
+        now = arm.get_gripper_state()
+        if abs(now - last) < 0.005:
+            return
+        last = now
+
+
+class _WristRecorder:
+    """Records the Kinova wrist camera during each pick attempt (real mode only)."""
+
+    def __init__(self, enabled: bool, log_dir: Path | None) -> None:
+        self._enabled = enabled and log_dir is not None
+        self._log_dir = log_dir
+        self._source: Any = None
+        self._thread: Any = None
+        self._frames: list[Any] = []
+        self._name = ""
+        self._running = False
+
+    def start(self, name: str) -> None:
+        """Begin recording a clip called `name`."""
+        if not self._enabled:
+            return
+        import threading  # pylint: disable=import-outside-toplevel
+
+        from prpl_tidybot.visual_servo.image_sources import (  # pylint: disable=import-outside-toplevel
+            KinovaWristCameraSource,
+        )
+
+        if self._source is None:
+            self._source = KinovaWristCameraSource()
+        self._frames, self._name, self._running = [], name, True
+
+        def grab() -> None:
+            while self._running:
+                img = self._source.get_image()
+                if img is not None:
+                    self._frames.append(img)
+                time.sleep(0.1)
+
+        self._thread = threading.Thread(target=grab, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop and write the clip to <log_dir>/<name>_wrist.mp4."""
+        if not self._enabled or not self._running:
+            return
+        self._running = False
+        self._thread.join(timeout=2)
+        if self._frames and self._log_dir is not None:
+            from prpl_tidybot.video import (  # pylint: disable=import-outside-toplevel
+                write_mp4,
+            )
+
+            write_mp4(self._frames, self._log_dir / f"{self._name}_wrist.mp4", fps=10)
+
+    def close(self) -> None:
+        """Release the camera."""
+        self.stop()
+        if self._source is not None:
+            self._source.close()

@@ -13,6 +13,7 @@ from hydra import compose, initialize_config_dir
 from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
 from prpl_tidybot.real_sim.perceivers.target_source import ConstantTargetSource
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
+from prpl_tidybot.top_down_pick import TopDownPickGeometry, forward_kinematics
 from prpl_tidybot.toss_cycles import run_toss_cycles
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
@@ -134,3 +135,59 @@ def test_no_cube_stops_and_asks_for_it_to_be_moved(tmp_path, arm_log, monkeypatc
     assert "move the cube" in result.finish_reason
     assert not [e for e in arm_log if e[0] == "toss"]
     assert operator.asked("Reset") == 1
+
+
+def test_top_down_pick_hovers_then_descends_pointing_down(tmp_path, arm_log):
+    """The default pick drives to the standoff, then streams a hover target and a grasp
+    target straight below it with the tool pointing down, opening before and closing
+    after."""
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    geom = TopDownPickGeometry()
+    downward = []
+    for entry in arm_log:
+        if entry[0] != "arm":
+            continue
+        pos, approach, _ = forward_kinematics(entry[1], geom)
+        if approach[2] < -0.99 and pos[2] < geom.floor_z + 0.2:
+            downward.append((round(pos[2], 3), entry[2]))
+    heights = sorted({z for z, _ in downward})
+    assert len(heights) >= 2
+    assert heights[-1] - heights[0] == pytest.approx(geom.hover_height, abs=0.005)
+    assert any(g == 0.0 for _, g in downward) and any(g == 1.0 for _, g in downward)
+
+
+def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
+    """Readings that look like an empty gripper retry up to max_attempts, then stop."""
+    operator = _Operator()
+    cfg = _compose(
+        **{"pick.top_down.fake_grasp_reading": 0.996, "pick.top_down.max_attempts": 2}
+    )
+    result = run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=operator)
+    assert result.completed == 0
+    assert "pick failed after 2 attempts" in result.finish_reason
+    assert operator.asked("Pick attempt") == 2
+    assert not [e for e in arm_log if e[0] == "toss"]
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    assert [a["held"] for a in log["cycles"][0]["pick_attempts"]] == [False, False]
+
+
+def test_skip_toss_stops_holding_the_cube(tmp_path, arm_log):
+    """skip_toss ends after a successful pick, with no throw."""
+    result = run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    assert result.finish_reason == "picked (toss skipped)"
+    assert not [e for e in arm_log if e[0] == "toss"]
+
+
+@pytest.mark.usefixtures("arm_log")
+def test_the_kinder_pick_is_still_selectable(tmp_path):
+    """pick.method=kinder runs the shelf3d PickController as before."""
+    result = run_toss_cycles(
+        _compose(cycles=1, **{"pick.method": "kinder"}),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    assert result.completed == 1
