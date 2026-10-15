@@ -134,6 +134,34 @@ def test_the_servo_moves_the_grasp_onto_a_cube_the_ceiling_misplaced(
     assert list((tmp_path / "wrist_servo").glob("*_raw.png"))
 
 
+def test_a_nudge_whose_ik_flips_branch_is_refused(tmp_path, monkeypatch):
+    """As in the cylinder servo, a nudge whose IK would swing an arm joint by more
+    than max_joint_step is not commanded; the servo stops and nothing descends."""
+    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+
+    real = tc.top_down_joint_targets
+    calls = {"n": 0}
+
+    def flipping(ax, ay, yaw, geom, seed=None):
+        calls["n"] += 1
+        hover, grasp = real(ax, ay, yaw, geom, seed=seed)
+        if calls["n"] >= 3:  # the servo's probes and nudges
+            hover = list(hover)
+            hover[3] += 1.0
+        return hover, grasp
+
+    monkeypatch.setattr(tc, "top_down_joint_targets", flipping)
+    result, _, log = _run(
+        tmp_path, monkeypatch, (0.01, 0.0), **{"pick.top_down.max_attempts": 1}
+    )
+    assert "pick failed" in result.finish_reason
+    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
+        "pick_attempts"
+    ][0]
+    assert "did not arrive" in attempt["note"]
+    assert not [g for _, g in log if g == 1.0]
+
+
 def test_no_cube_in_the_wrist_camera_means_no_descent_and_no_close(
     tmp_path, monkeypatch
 ):

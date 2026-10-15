@@ -68,12 +68,12 @@ pick:
     grasp_min: 0.2
     grasp_max: 0.9
     close_position: 1.0
-    # compliant: grasp moves streamed through the torque loop, waiting for the arm to
-    # arrive (within arrive_deg) or stop; it settles short (24 mm, run 3), which the
-    # wrist servo absorbs at the hover; only the descent is corrected (below).
-    # angular: the arm's onboard position controller (Jimmy Wu's pick_object).
-    # One controller per run; try each on its own.
-    arm_controller: compliant
+    # angular: the arm's onboard position controller (Jimmy Wu's pick_object); lands
+    # within 0.1 deg, which the wrist servo's step-and-look needs. compliant: the
+    # torque loop; it settles 4-5 deg short and then creeps for seconds (run 9: the
+    # hover 48 mm short, a 15 mm probe moved 40 mm), so the servo could not converge.
+    # One controller per run.
+    arm_controller: angular
     arrive_deg: 1.0
     # The compliant descent is corrected: after the arm settles the pinch point is
     # re-aimed by the measured position error, up to correction_rounds times, until
@@ -94,13 +94,18 @@ pick:
       target_uv: [318, 280]
       probe_step: 0.015
       tolerance_px: 6.0
-      confirm_looks: 2
+      confirm_looks: 3
       min_step: 0.002
-      max_step: 0.03
+      max_step: 0.01
+      max_area_change_frac: 0.3
       max_moves: 5
       travel_limit: 0.08
       align_yaw: true
       settle_s: 0.3
+    # Refuse a servo nudge whose IK jumps an arm joint by more than max_joint_step rad
+    # (the wrist may turn up to max_wrist_step to square the fingers).
+    max_joint_step: 0.2
+    max_wrist_step: 0.9
     gripper_timeout_s: 4.0
     max_attempts: 3
     # Record the wrist camera during each pick attempt (real mode).
