@@ -24,7 +24,7 @@ os.environ["MUJOCO_GL"] = "egl"
 os.environ["PYOPENGL_PLATFORM"] = "egl"
 
 import cv2 as cv  # noqa: E402
-import mujoco  # noqa: E402
+import mujoco  # type: ignore[import-untyped]  # noqa: E402
 
 from prpl_tidybot.cube_pick.camera import RGBDFrame  # noqa: E402
 from prpl_tidybot.cube_pick.kinder_sim import KinderPickRobot  # noqa: E402
@@ -246,12 +246,12 @@ class TossingSim:
     ) -> None:
         self.perception_port = perception_port
         self.grasp_port = grasp_port
-        self.env = kinder.make(
+        # KINDER internals (private object-centric env, devectorize) are untyped here.
+        self.env: Any = kinder.make(
             env_id, render_mode="rgb_array", scene_bg=True, allow_state_access=True
         )
-        self.oc = (
-            self.env.unwrapped._object_centric_env
-        )  # pylint: disable=protected-access
+        unwrapped: Any = self.env.unwrapped
+        self.oc = unwrapped._object_centric_env  # pylint: disable=protected-access
         from kinder_models.dynamic3d.tossing.state_abstractions import (  # pylint: disable=import-outside-toplevel
             Tossing3DStateAbstractor,
         )
@@ -259,7 +259,8 @@ class TossingSim:
         # Built before the seeded reset: its constructor resets the sim unseeded.
         self.abstractor = Tossing3DStateAbstractor(self.oc)
         obs, _ = self.env.reset(seed=0)
-        self.template = self.env.observation_space.devectorize(obs)
+        space: Any = self.env.observation_space
+        self.template = space.devectorize(obs)
         self.robot_obj = next(
             o for o in self.template if o.type.name == "mujoco_tidybot_robot"
         )
@@ -328,7 +329,7 @@ class TossingSim:
 
     def containers(self, state: Any) -> list[ContainerSpec]:
         obj = state.get_object_from_name(BIN)
-        from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
+        from scipy.spatial.transform import (  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
             Rotation,
         )
 
@@ -384,7 +385,7 @@ class TossingSim:
                 obs_state.get_object_from_name(n)
                 for n in (self.robot_obj.name, CUBE, BARRIER)
             )
-            controller = lifted["pick_cube"].ground(objects)
+            controller: Any = lifted["pick_cube"].ground(objects)
             try:
                 controller.reset(obs_state, None)
             except (
@@ -392,13 +393,14 @@ class TossingSim:
             ) as exc:  # noqa: BLE001  (TrajectorySamplingFailure is not an Exception)
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
-                stage = "filter" if "grasp" in str(exc).lower() else "plan"
+                stage: str | None = "filter" if "grasp" in str(exc).lower() else "plan"
                 if recorder is not None:
                     # A refusal moves nothing: two seconds of the state it refused.
                     recorder.overlay["caption"] = (
                         f"old KINDER pick: refused ({type(exc).__name__}: {exc})"[:110]
                     )
                     for _ in range(20):
+                        assert robot_view is not None
                         recorder(robot_view)
                 return {
                     "success": False,
@@ -421,6 +423,7 @@ class TossingSim:
                     recorder.overlay["caption"] = (
                         f"old KINDER pick  phase {controller.current_phase.name}"
                     )
+                    assert robot_view is not None
                     recorder(robot_view)
                 controller.observe(self.env.observation_space.devectorize(obs))
                 if controller.terminated():

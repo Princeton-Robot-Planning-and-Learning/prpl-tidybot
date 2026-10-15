@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-import mujoco
+import mujoco  # type: ignore[import-untyped]
 import numpy as np
 from numpy.typing import NDArray
 
@@ -96,16 +96,18 @@ class KinderWristCamera:
         world_from_color = self.world_from_camera()
         # Sites are annotations (goal regions drawn as translucent boxes), not things
         # a real camera would see.
+        render = self.render
+        assert render is not None  # set in __post_init__
         vopt = (
             self.sim._render_context_offscreen.vopt
         )  # pylint: disable=protected-access
         sitegroup0 = np.array(vopt.sitegroup).copy()
         vopt.sitegroup[:] = 0
         try:
-            model.cam_fovy[cam] = self.render.vertical_fov_deg
+            model.cam_fovy[cam] = render.vertical_fov_deg
             rgb = self.sim.render(
-                width=self.render.width,
-                height=self.render.height,
+                width=render.width,
+                height=render.height,
                 camera_name=f"{self.robot_name}_wrist",
             )
             # Move the camera to the depth sensor (its offset is given in the colour

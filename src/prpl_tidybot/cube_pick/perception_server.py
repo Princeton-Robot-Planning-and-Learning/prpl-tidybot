@@ -30,9 +30,9 @@ from typing import Any
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import wire  # noqa: E402  (sibling module, imported without installing the package)
+import wire  # type: ignore[import-not-found]  # noqa: E402  (sibling module, imported without installing the package)
 
-_CUBEPOSE_ROOT = "/home/josh/Documents/repos/research/cubepose"
+_CUBEPOSE_ROOT = os.environ.get("CUBEPOSE_ROOT", os.path.expanduser("~/cubepose"))
 _DEFAULT_FP_DIR = os.environ.get("CUBEPOSE_FP_DIR", f"{_CUBEPOSE_ROOT}/FoundationPose")
 _DEFAULT_SAM2_CKPT = os.environ.get(
     "CUBEPOSE_SAM2_CKPT", f"{_CUBEPOSE_ROOT}/checkpoints/sam2.1_hiera_small.pt"
@@ -49,9 +49,11 @@ class Sam2Backend:
     """Point/box prompted SAM 2 image predictor."""
 
     def __init__(self, *, checkpoint: str, config: str) -> None:
-        import torch
-        from sam2.build_sam import build_sam2
-        from sam2.sam2_image_predictor import SAM2ImagePredictor
+        import torch  # type: ignore[import-not-found]
+        from sam2.build_sam import build_sam2  # type: ignore[import-not-found]
+        from sam2.sam2_image_predictor import (  # type: ignore[import-not-found]
+            SAM2ImagePredictor,
+        )
 
         self._torch = torch
         model = build_sam2(config, checkpoint, device="cuda")
@@ -102,8 +104,9 @@ class FoundationPoseBackend:
     def __init__(self, *, fp_dir: str) -> None:
         if fp_dir not in sys.path:
             sys.path.insert(0, fp_dir)
-        import estimater  # FoundationPose's own module, from the local checkout
-        import nvdiffrast.torch as dr
+        # FoundationPose's own module, from the local checkout.
+        import estimater  # type: ignore[import-not-found]
+        import nvdiffrast.torch as dr  # type: ignore[import-not-found]
         import torch
 
         self._torch = torch
@@ -136,7 +139,7 @@ class FoundationPoseBackend:
 
         box = trimesh.creation.box(extents=[size, size, size])
         box.unmerge_vertices()  # per-face vertices, so normals stay flat on each face
-        verts, faces = trimesh.remesh.subdivide_to_size(
+        verts, faces = trimesh.remesh.subdivide_to_size(  # type: ignore[no-untyped-call]
             box.vertices, box.faces, max_edge=size / 8
         )
         mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)

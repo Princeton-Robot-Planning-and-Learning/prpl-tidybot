@@ -37,7 +37,7 @@ from pybullet_helpers.motion_planning import (
     remap_joint_position_plan_to_constant_distance,
     run_motion_planning,
 )
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 from spatialmath import SE2
 
 FloatArray = NDArray[np.float64]
@@ -84,7 +84,9 @@ def opening_to_command(opening: float) -> float:
 def matrix_to_pose(matrix: FloatArray) -> Pose:
     """4x4 transform to a pybullet_helpers Pose."""
     quat = Rotation.from_matrix(matrix[:3, :3]).as_quat()
-    return Pose(tuple(float(v) for v in matrix[:3, 3]), tuple(float(v) for v in quat))
+    x, y, z = (float(v) for v in matrix[:3, 3])
+    qx, qy, qz, qw = (float(v) for v in quat)
+    return Pose((x, y, z), (qx, qy, qz, qw))
 
 
 def pose_to_matrix(pose: Pose) -> FloatArray:
@@ -611,7 +613,7 @@ class PlanningScene:
         self._sim.close()
 
 
-def _wrap(diff: Sequence[float]) -> FloatArray:
+def _wrap(diff: Sequence[float] | FloatArray) -> FloatArray:
     out = np.asarray(diff, dtype=float).copy()
     for i in (0, 2, 4, 6):
         if i < len(out):

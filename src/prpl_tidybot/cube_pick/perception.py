@@ -162,8 +162,12 @@ def depth_prompt(
     raised = (above > 0.3 * prior.size) & (above < 1.3 * prior.size)
     blob = np.zeros(frame.depth.shape, np.uint8)
     blob[pixels[raised, 0], pixels[raised, 1]] = 1
-    blob = cv.morphologyEx(blob, cv.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    count, labels, stats, centroids = cv.connectedComponentsWithStats(blob, 8)
+    blob = np.asarray(
+        cv.morphologyEx(blob, cv.MORPH_OPEN, np.ones((3, 3), np.uint8)), dtype=np.uint8
+    )
+    count, labels, stats, centroids = cv.connectedComponentsWithStats(
+        blob, connectivity=8
+    )
     best = None
     best_score = -np.inf
     centre_px = prompt[0]
@@ -217,8 +221,8 @@ class ColourSegmenter:
         if prompt is None:
             return PerceptionFailure("prior not in view")
         centre, box, _ = prompt
-        hsv = cv.cvtColor(frame.rgb, cv.COLOR_RGB2HSV)
-        target = np.uint8([[[int(255 * c) for c in prior.rgba[:3]]]])
+        hsv = np.asarray(cv.cvtColor(frame.rgb, cv.COLOR_RGB2HSV), dtype=np.uint8)
+        target = np.array([[[int(255 * c) for c in prior.rgba[:3]]]], dtype=np.uint8)
         target_hue = float(cv.cvtColor(target, cv.COLOR_RGB2HSV)[0, 0, 0])
         hue = hsv[..., 0].astype(float)
         diff = np.minimum(np.abs(hue - target_hue), 180 - np.abs(hue - target_hue))
@@ -460,9 +464,12 @@ def _gate(estimate: CubeEstimate, prior: CubePrior) -> CubeEstimate | Perception
 
 def _largest_component(mask: Mask, centre: FloatArray) -> Mask | None:
     """The connected component containing (or nearest) `centre`."""
-    count, labels, stats, centroids = cv.connectedComponentsWithStats(
-        mask.astype(np.uint8), 8
+    count, labels_, stats_, centroids_ = cv.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8
     )
+    labels = np.asarray(labels_)
+    stats = np.asarray(stats_, dtype=np.int64)
+    centroids = np.asarray(centroids_, dtype=np.float64)
     if count <= 1:
         return None
     u, v = int(round(centre[0])), int(round(centre[1]))

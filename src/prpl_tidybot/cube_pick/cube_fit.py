@@ -20,13 +20,13 @@ cube rests (1.0 = flat on a face).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Iterable, Sequence
 
 import cv2 as cv
 import numpy as np
 from numpy.typing import NDArray
-from scipy.optimize import least_squares
-from scipy.spatial.transform import Rotation
+from scipy.optimize import least_squares  # type: ignore[import-untyped]
+from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 FloatArray = NDArray[np.float64]
 
@@ -57,13 +57,18 @@ class SupportSurface:
         )
 
 
-def as_supports(supports: object) -> list[SupportSurface]:
+def as_supports(
+    supports: float | SupportSurface | Iterable[float | SupportSurface] | None,
+) -> list[SupportSurface]:
     """Normalise floats (global heights) and SupportSurfaces into SupportSurfaces."""
     if supports is None:
         return []
     if isinstance(supports, (int, float, SupportSurface)):
         supports = [supports]
-    return [s if isinstance(s, SupportSurface) else SupportSurface(float(s)) for s in supports]  # type: ignore[union-attr]
+    return [
+        s if isinstance(s, SupportSurface) else SupportSurface(float(s))
+        for s in supports
+    ]
 
 
 def height_above_supports(
@@ -130,7 +135,7 @@ def fit_cube(
     viewpoint: FloatArray,
     up: FloatArray = np.array([0.0, 0.0, 1.0]),
     seed: int = 0,
-    support_z: object = None,
+    support_z: float | SupportSurface | Iterable[float | SupportSurface] | None = None,
 ) -> CubeFit:
     """Fit a cube of edge `size` to world-frame `points` seen from `viewpoint`.
 

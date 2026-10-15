@@ -31,7 +31,7 @@ from typing import Any, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 FloatArray = NDArray[np.float64]
 
@@ -178,7 +178,9 @@ class GraspGenerator(Protocol):
     frame the estimate came from, for generators that work on depth.
     """
 
-    name: str
+    @property
+    def name(self) -> str:
+        """A short label for logs and results."""
 
     def candidates(
         self, *, cube_frame: FloatArray, frame: Any, mask: Any

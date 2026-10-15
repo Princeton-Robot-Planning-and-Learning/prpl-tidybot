@@ -153,7 +153,7 @@ class FisheyeIntrinsics:
         uv, _ = cv.fisheye.projectPoints(
             points, np.zeros(3), np.zeros(3), self.matrix, self.coefficients
         )
-        return uv.reshape(-1, 2)  # type: ignore[no-any-return]
+        return np.asarray(uv, dtype=np.float64).reshape(-1, 2)
 
     def undistort(
         self,
@@ -188,8 +188,9 @@ class FisheyeIntrinsics:
 
         v, u = np.mgrid[0 : self.height, 0 : self.width].astype(np.float64)
         pixels = np.stack([u.ravel(), v.ravel()], axis=1).reshape(-1, 1, 2)
-        rays = cv.fisheye.undistortPoints(
-            pixels, self.matrix, self.coefficients
+        rays = np.asarray(
+            cv.fisheye.undistortPoints(pixels, self.matrix, self.coefficients),
+            dtype=np.float64,
         ).reshape(-1, 2)
         map_x = (rays[:, 0] * source.fx + source.cx).reshape(self.height, self.width)
         map_y = (rays[:, 1] * source.fy + source.cy).reshape(self.height, self.width)
@@ -253,11 +254,15 @@ class RGBDFrame:
         import cv2 as cv  # pylint: disable=import-outside-toplevel
 
         intr = self.intrinsics.scaled(factor)
-        rgb = cv.resize(
-            self.rgb, (intr.width, intr.height), interpolation=cv.INTER_AREA
+        rgb = np.asarray(
+            cv.resize(self.rgb, (intr.width, intr.height), interpolation=cv.INTER_AREA),
+            dtype=np.uint8,
         )
-        depth = cv.resize(
-            self.depth, (intr.width, intr.height), interpolation=cv.INTER_NEAREST
+        depth = np.asarray(
+            cv.resize(
+                self.depth, (intr.width, intr.height), interpolation=cv.INTER_NEAREST
+            ),
+            dtype=np.float32,
         )
         return RGBDFrame(rgb, depth, intr, self.world_from_camera, dict(self.metadata))
 

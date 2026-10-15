@@ -19,6 +19,7 @@ import zlib
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import NDArray
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -47,7 +48,7 @@ def camera_pose(
     tilt: float,
     azimuth: float,
     distance: float,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     direction = np.array(
         [
             np.sin(tilt) * np.cos(base_heading + azimuth),
@@ -88,7 +89,7 @@ def main() -> None:
             cube = state.get_object_from_name(harness.CUBE)
             robot = state.get_object_from_name(sim.robot_obj.name)
             truth = np.array([state.get(cube, k) for k in ("x", "y", "z")])
-            from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
+            from scipy.spatial.transform import (  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
                 Rotation,
             )
 

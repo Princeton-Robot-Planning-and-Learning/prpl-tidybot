@@ -34,7 +34,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import harness  # noqa: E402  pylint: disable=wrong-import-position
-import mujoco  # noqa: E402  pylint: disable=wrong-import-position
+import mujoco  # type: ignore[import-untyped]  # noqa: E402  pylint: disable=wrong-import-position
 
 BOX = "box_0"
 BOX_DIMENSIONS = {"length": 0.25, "width": 0.5, "height": 0.2, "wall_thickness": 0.01}
@@ -47,15 +47,14 @@ class ShelfSim:
     OLD_STEP_LIMIT = 600
 
     def __init__(self, perception_port: int, grasp_port: int) -> None:
-        self.env = harness.kinder.make(
+        self.env: Any = harness.kinder.make(
             "kinder/SweepOffShelf3D-o5-v0",
             render_mode="rgb_array",
             scene_bg=True,
             allow_state_access=True,
         )
-        self.oc = (
-            self.env.unwrapped._object_centric_env
-        )  # pylint: disable=protected-access
+        unwrapped: Any = self.env.unwrapped
+        self.oc = unwrapped._object_centric_env  # pylint: disable=protected-access
         self.env.reset(seed=0)
         self.sim = self.oc._robot_env.sim  # pylint: disable=protected-access
         self.model = self.sim.model.mj_model
@@ -115,7 +114,7 @@ class ShelfSim:
         }
 
     def box_spec(self, state: Any) -> Any:
-        from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
+        from scipy.spatial.transform import (  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
             Rotation,
         )
 
@@ -189,7 +188,7 @@ class ShelfSim:
             except BaseException as exc:  # noqa: BLE001
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
-                stage = "filter" if "grasp" in str(exc).lower() else "plan"
+                stage: str | None = "filter" if "grasp" in str(exc).lower() else "plan"
                 return {
                     "success": False,
                     "stage": stage,
@@ -267,13 +266,14 @@ class ShelfSim:
             config.generator = self.tossing.generator(generator, size)
         est = self.tossing.estimator(estimator)
         if recorder is not None:
-            est = harness._RecordingEstimator(
+            est = harness._RecordingEstimator(  # pylint: disable=protected-access
                 est, recorder
-            )  # pylint: disable=protected-access
+            )
         spec, _ = self.box_spec(state)
-        cube_rgba = tuple(
+        r, g, b, alpha = (
             float(v) for v in self.model.geom_rgba[min(self.cube_geoms(cube))]
         )
+        cube_rgba = (r, g, b, alpha)
         prior = harness.CubePrior(
             position=prior_position,
             size=size,

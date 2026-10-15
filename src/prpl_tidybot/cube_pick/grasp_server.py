@@ -41,12 +41,14 @@ from typing import Any
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import wire  # noqa: E402  (sibling module, imported without installing the package)
+import wire  # type: ignore[import-not-found]  # noqa: E402  (sibling module, imported without installing the package)
 
-_ROOT = "/home/josh/Documents/repos/research/graspgen"
+# Local checkouts and interpreters for the two models live outside this repository;
+# point at them with these environment variables or the matching flags.
+_ROOT = os.environ.get("GRASPGEN_ROOT", os.path.expanduser("~/graspgen"))
 _DEFAULTS = {
-    "m2t2_python": "/home/josh/miniconda3/envs/graspgen/bin/python",
-    "cgn_python": "/home/josh/miniconda3/envs/graspgen-tf/bin/python",
+    "m2t2_python": os.environ.get("GRASPGEN_M2T2_PYTHON", "python"),
+    "cgn_python": os.environ.get("GRASPGEN_CGN_PYTHON", "python"),
     "m2t2_dir": f"{_ROOT}/M2T2",
     "m2t2_ckpt": f"{_ROOT}/weights/m2t2/m2t2.pth",
     "cgn_dir": f"{_ROOT}/contact_graspnet",
@@ -403,21 +405,22 @@ class ContactGraspNetBackend:
     """Official TF Contact-GraspNet (NVlabs), used through its own GraspEstimator."""
 
     def __init__(self, *, repo: str, ckpt_dir: str) -> None:
-        import yaml
+        import yaml  # type: ignore[import-untyped]
 
         # The checkout calls yaml.load(f) with no Loader, which PyYAML >= 6 rejects.
         _orig_load = yaml.load
         yaml.load = lambda stream, Loader=yaml.FullLoader: _orig_load(stream, Loader)  # type: ignore[assignment]  # noqa: E501
 
-        import tensorflow.compat.v1 as tf
+        import tensorflow.compat.v1 as tf  # type: ignore[import-untyped]
 
         tf.disable_eager_execution()
         for gpu in tf.config.experimental.list_physical_devices("GPU"):
             tf.config.experimental.set_memory_growth(gpu, True)
         sys.path.insert(0, os.path.join(repo, "contact_graspnet"))
         import config_utils  # type: ignore[import-not-found]
-        from contact_grasp_estimator import (
-            GraspEstimator,)  # type: ignore[import-not-found]
+        from contact_grasp_estimator import (  # type: ignore[import-not-found]
+            GraspEstimator,
+        )
 
         self.tf = tf
         self.cfg = config_utils.load_config(ckpt_dir, batch_size=1)
@@ -474,7 +477,7 @@ class M2T2Backend:
     """M2T2 (NVlabs) with its released generic pick-and-place checkpoint."""
 
     def __init__(self, *, repo: str, ckpt: str) -> None:
-        import torch
+        import torch  # type: ignore[import-not-found]
         from omegaconf import OmegaConf
 
         sys.path.insert(0, repo)

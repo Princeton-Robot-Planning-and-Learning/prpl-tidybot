@@ -301,7 +301,7 @@ class CubePickPolicy:
         options = [here.base] + [
             b for b in bases if not self._base_close(b, here.base, 0.03, 0.05)
         ]
-        self._hand_blocked: set[tuple] = set()
+        self._hand_blocked: set[tuple[Any, ...]] = set()
         last = PickFailed("filter", "no grasp fits from any base placement")
         for base in options[: cfg.max_filter_bases]:
             self.scene.set_robot(base, here.arm)
@@ -512,7 +512,7 @@ class CubePickPolicy:
         cfg = self.config
         proprio = self.robot.proprio()
         frame = self._grasp_frame(estimate, base_heading)
-        blocked = getattr(self, "_hand_blocked", set())
+        blocked: set[tuple[Any, ...]] = getattr(self, "_hand_blocked", set())
         hand_only = True
         counts: dict[str, int] = {}
         last_frame = self._last_frame

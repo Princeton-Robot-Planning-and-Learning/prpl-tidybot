@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 from prpl_tidybot.cube_pick.cube_fit import (
     CubeFitError,

@@ -79,7 +79,8 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     recs = load(args.tossing, "tossing") + load(args.shelf, "shelf")
-    by = collections.defaultdict(dict)  # (domain, key) -> armname -> rec
+    # (domain, key) -> armname -> rec
+    by: dict[tuple[str, str], dict[str, dict]] = collections.defaultdict(dict)
     for r in recs:
         by[(r["domain"], r["key"])][r["armname"]] = r
     arms = sorted({r["armname"] for r in recs}, key=lambda a: (a != "old", a))
@@ -90,7 +91,9 @@ def main() -> None:
         if not keys:
             continue
         # Per class success/total per arm.
-        table = collections.defaultdict(lambda: collections.defaultdict(lambda: [0, 0]))
+        table: dict[str, dict[str, list[int]]] = collections.defaultdict(
+            lambda: collections.defaultdict(lambda: [0, 0])
+        )
         for key in keys:
             for arm, rec in by[key].items():
                 for cls in (rec["cls"], f"[{rec['group']}]", "[all]"):
