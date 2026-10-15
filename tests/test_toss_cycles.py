@@ -234,9 +234,7 @@ def test_an_angular_move_that_does_not_arrive_is_not_closed_on(
     assert not any(e[0] == "angular" and e[2] == 1.0 for e in arm_log)
 
 
-def test_ctrl_c_during_a_pick_move_stops_without_further_motion(
-    tmp_path, arm_log, monkeypatch
-):
+def test_ctrl_c_during_a_pick_move_stops_without_further_motion(tmp_path, monkeypatch):
     """After an aborted onboard move nothing else is commanded: no reset prompt, no
     torque-loop restart; the arm is left halted where it stopped."""
     from prpl_tidybot.interfaces.arm_interface import (  # pylint: disable=import-outside-toplevel

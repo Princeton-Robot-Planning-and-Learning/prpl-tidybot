@@ -13,6 +13,7 @@ cycle's cube pose before the pick and where its throw landed relative to ``toss_
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -566,7 +567,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         wrist.start(f"cycle_{cycle:02d}_pick_{attempt}")
         # The fake gripper closes on nothing; pretend it read fake_grasp_reading.
         fake = float(td.get("fake_grasp_reading", 0.49))
-        read = (lambda _, v=fake: v) if cfg.mode == "fake" else (lambda r: r)
+        read = functools.partial(_fake_reading, fake) if cfg.mode == "fake" else float
         if td.get("arm_controller", "angular") == "angular":
             held, reading, note = _grasp_angular(
                 arm, td, geom, hover, grasp, moves, read
@@ -726,6 +727,11 @@ def _finish_grasp(  # pylint: disable=too-many-arguments,too-many-positional-arg
     else:
         _set_gripper(arm, 0.0, td)
         _logged_move(arm, "retreat", hover, 0.0, cfg.arm_home, geom, moves)
+
+
+def _fake_reading(value: float, _reading: float) -> float:
+    """The fake gripper closes on nothing; report `value` instead."""
+    return value
 
 
 def _set_gripper(arm: ArmInterface, position: float, td: Any) -> None:
