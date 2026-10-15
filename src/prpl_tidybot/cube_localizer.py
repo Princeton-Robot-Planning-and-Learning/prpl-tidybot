@@ -47,6 +47,11 @@ _AREA_RANGE = (24, 1600)
 # Search window around a candidate (px) and the stitch-line rows to ignore.
 _WINDOW = 50
 _SEAM_PX = 8
+# A candidate blob's area relative to a cube's silhouette at its spot, and its longest
+# over shortest side: the cube measured 1.07-1.27x and square on the robot; shelf
+# edges, tape and specks were 0.05-0.4x or 2.5x, or strips.
+_AREA_RATIO = (0.45, 2.0)
+_MAX_ELONGATION = 2.0
 
 
 @dataclass(frozen=True)
@@ -162,6 +167,51 @@ def _excluded(xy: NDArray[np.float64], exclude: Sequence[Sequence[float]]) -> bo
     )
 
 
+def _cube_like(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    blob: NDArray[np.bool_],
+    stat: NDArray[np.int32],
+    camera: CeilingCamera,
+    xy: NDArray[np.float64],
+    side: float,
+    index: int,
+    rows: int,
+    num_cameras: int,
+) -> bool:
+    """Whether a blob is the size and shape a cube makes at its spot on the floor.
+
+    Each candidate costs a full pose fit, and the clutter in the lab (shelf edges,
+    tape, specks) is never cube-sized and square-ish there. A blob cut by the stitch
+    line is only held to the upper size bound, since part of the cube is hidden; one
+    cut by the outer image border is rejected (the vignetted border passes the colour
+    test in cube-sized pieces, and no camera sees a cube there whole)."""
+    expected = [
+        cv.contourArea(
+            cube_silhouette(camera, xy[0], xy[1], yaw, side).astype(np.float32)
+        )
+        for yaw in (0.0, math.pi / 4)
+    ]
+    area = float(stat[cv.CC_STAT_AREA])
+    if area > _AREA_RATIO[1] * max(expected):
+        return False
+    x, y, w, h = (
+        int(stat[c])
+        for c in (cv.CC_STAT_LEFT, cv.CC_STAT_TOP, cv.CC_STAT_WIDTH, cv.CC_STAT_HEIGHT)
+    )
+    if x <= 0 or x + w >= blob.shape[1] or y <= 0 or y + h >= blob.shape[0]:
+        return False  # cut by the outer border: no camera sees the whole cube
+    top, bottom = index * rows, (index + 1) * rows
+    seam_cut = (index > 0 and y <= top + _SEAM_PX) or (
+        index < num_cameras - 1 and y + h >= bottom - _SEAM_PX
+    )
+    if seam_cut:
+        return True
+    if area < _AREA_RATIO[0] * min(expected):
+        return False
+    points = cv.findNonZero(blob[y : y + h, x : x + w].astype(np.uint8))
+    (_, _), (rw, rh), _ = cv.minAreaRect(points)
+    return max(rw, rh) <= _MAX_ELONGATION * max(min(rw, rh), 1.0)
+
+
 def find_cube_candidates(
     frame: NDArray[np.uint8],
     cameras: Sequence[CeilingCamera],
@@ -174,7 +224,7 @@ def find_cube_candidates(
     mask = cube_mask(frame)
     for i in range(1, len(cameras)):
         mask[i * rows - _SEAM_PX : i * rows + _SEAM_PX, :] = 0
-    num, _, stats, centroids = cv.connectedComponentsWithStats(mask)
+    num, labels, stats, centroids = cv.connectedComponentsWithStats(mask)
     candidates: list[tuple[float, float]] = []
     for k in range(1, num):
         if not _AREA_RANGE[0] <= stats[k, cv.CC_STAT_AREA] <= _AREA_RANGE[1]:
@@ -183,6 +233,10 @@ def find_cube_candidates(
         i = min(int(v // rows), len(cameras) - 1)
         xy = cameras[i].to_floor(u, v - i * rows, z=side / 2)
         if not _in_bounds(xy, floor_bounds) or _excluded(xy, exclude):
+            continue
+        if not _cube_like(
+            labels == k, stats[k], cameras[i], xy, side, i, rows, len(cameras)
+        ):
             continue
         if all(math.hypot(xy[0] - cx, xy[1] - cy) > 2 * side for cx, cy in candidates):
             candidates.append((float(xy[0]), float(xy[1])))
@@ -282,18 +336,36 @@ def localize_cube(
     when their calibrations agree. ``diagnostics``, when given, is filled with every
     candidate and its quick-screen fit.
     """
-    best: CubeFit | None = None
     screened: list[dict[str, Any]] = []
     if diagnostics is not None:
         diagnostics["candidates"] = screened
+    passed: list[CubeFit] = []
     for guess in find_cube_candidates(frames[-1], cameras, floor_bounds, side, exclude):
         fit = fit_cube_pose(frames[-3:], cameras, guess, side)  # quick screen
         screened.append({"guess": list(guess), "iou": None if fit is None else fit.iou})
-        if fit is not None and (best is None or fit.iou > best.iou):
-            best = fit
-    if best is None or best.iou < min_iou:
-        return None
-    guess = (best.x, best.y)
+        if fit is not None and fit.iou >= min_iou:
+            passed.append(fit)
+    # Best screen first, but a winner that fails the full refit (a flicker present
+    # only in the last frames) must not hide the cube behind it.
+    for screen in sorted(passed, key=lambda f: -f.iou):
+        fit = _refine(
+            frames, cameras, (screen.x, screen.y), side, min_iou, fusion, serials
+        )
+        if fit is not None and _in_bounds(np.array([fit.x, fit.y]), floor_bounds):
+            return fit
+    return None
+
+
+def _refine(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    frames: Sequence[NDArray[np.uint8]],
+    cameras: Sequence[CeilingCamera],
+    guess: tuple[float, float],
+    side: float,
+    min_iou: float,
+    fusion: str,
+    serials: Sequence[str] | None,
+) -> CubeFit | None:
+    """The full fit over every frame around a screened guess, or None if it fails."""
     singles = []
     for i in range(len(cameras)):
         fit = fit_cube_pose(frames, cameras, guess, side, only=[i])
