@@ -237,3 +237,31 @@ def test_a_cube_cut_off_by_the_image_edge_is_walked_into_view():
     assert result.aligned, result.note
     assert math.hypot(*(world.pinch - world.cube)) < 0.004
     assert result.trace[0].cube is not None and result.trace[0].cube.clipped
+
+
+def test_a_gain_measured_on_a_cut_off_cube_is_remeasured_before_turning_the_wrist():
+    """Probes on a cut-off cube under-read the gain (run 12: 838 vs 2753 px/m) and a
+    wrist turn computed from it went the wrong way. The servo re-probes once the cube
+    is fully in view, turns only then, at most max_turn per nudge, and converges."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.55, 0.0), 0.15, start[:2], start[2])
+    world.k = np.array([[2000.0, 0.0], [0.0, -2000.0]])
+    _, y_axis = _tool_axes(0.0)
+    world.cube = np.array(start[:2]) - 0.07 * y_axis
+    turns = []
+    move = world.move
+
+    def recording(label, ax, ay, yaw):
+        turns.append(abs(yaw - world.yaw))
+        return move(label, ax, ay, yaw)
+
+    params = TopDownServoParams(target_uv=TARGET, max_moves=12, travel_limit=0.12)
+    result = TopDownCubeServo(world, params).align(
+        start, recording, _tool_axes, measured_xy=lambda: tuple(world.pinch)
+    )
+    assert result.aligned, result.note
+    assert math.hypot(*(world.pinch - world.cube)) < 0.004
+    assert max(turns) <= params.max_turn + 1e-9
+    assert sum(t.label == "probe_x" for t in result.trace) == 2
+    turn = (result.yaw - 0.15 + math.pi / 4) % (math.pi / 2) - math.pi / 4
+    assert abs(turn) < math.radians(4)
