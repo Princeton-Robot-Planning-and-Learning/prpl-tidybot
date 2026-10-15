@@ -42,6 +42,8 @@ from prpl_tidybot.cube_pick.planning import ContainerSpec  # noqa: E402
 from prpl_tidybot.cube_pick.policy import CubePickPolicy, PickConfig  # noqa: E402
 
 CUBE = "cube_0"
+# Failures before anything is executed: the record and a still, no video.
+PLAN_TIME_STAGES = ("look", "perceive", "propose", "filter", "plan", "no_grasp_candidate")
 BIN = "bin_0"
 BARRIER = "cuboid_barrier"
 
@@ -59,7 +61,7 @@ def parse_rows(spec: str, n: int) -> list[int]:
 class VideoRecorder:
     """Scene (free camera following the gripper) | wrist view, written with libx264."""
 
-    def __init__(self, sim: Any, out_dir: Path, robot_name: str = "robot", every: int = 1) -> None:
+    def __init__(self, sim: Any, out_dir: Path, robot_name: str = "robot", every: int = 2) -> None:
         self.sim = sim
         self.out_dir = out_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -128,8 +130,11 @@ class VideoRecorder:
         self.frames = [frame]  # keep only the latest, so `if recorder.frames` still works
 
     def write(self, name: str = "video", fps: int = 20) -> Path:
-        """Close the stream (frames were written as they came)."""
+        """Close the stream (frames were written as they came); keep the last frame
+        as still.png."""
         del name, fps
+        if self.frames:
+            cv.imwrite(str(self.out_dir / "still.png"), cv.cvtColor(self.frames[-1], cv.COLOR_RGB2BGR))
         if self._writer is not None:
             self._writer.close()
             self._writer = None
@@ -293,7 +298,12 @@ class TossingSim:
             except BaseException as exc:  # noqa: BLE001  (TrajectorySamplingFailure is not an Exception)
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
-                stage = "no_grasp_candidate" if "grasp" in str(exc).lower() else "plan"
+                stage = "filter" if "grasp" in str(exc).lower() else "plan"
+                if recorder is not None:
+                    # A refusal moves nothing: two seconds of the state it refused.
+                    recorder.overlay["caption"] = f"old KINDER pick: refused ({type(exc).__name__}: {exc})"[:110]
+                    for _ in range(20):
+                        recorder(robot_view)
                 return {"success": False, "stage": stage, "detail": f"{type(exc).__name__}: {exc}", "ticks": 0}
             ticks = 0
             error = None

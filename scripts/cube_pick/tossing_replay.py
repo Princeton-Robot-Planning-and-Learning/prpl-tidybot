@@ -51,6 +51,11 @@ def main() -> None:
     parser.add_argument("--prior-noise", type=float, default=0.02)
     parser.add_argument("--video-dir", default="")
     parser.add_argument("--video-rows", default="")
+    parser.add_argument(
+        "--video-failures",
+        action="store_true",
+        help="record every run and keep the video of each failure (and of --video-rows)",
+    )
     parser.add_argument("--max-ticks", type=int, default=4000)
     parser.add_argument("--perception-port", type=int, default=50111)
     parser.add_argument("--grasp-port", type=int, default=50112)
@@ -71,9 +76,11 @@ def main() -> None:
             for arm in args.arms.split(","):
                 if (index, arm) in done:
                     continue
-                video = (
-                    Path(args.video_dir) / f"row{index:03d}_{arm}" if index in video_rows and args.video_dir else None
-                )
+                generator = args.generator if arm != "old" else "kinder_topdown"
+                video = None
+                if args.video_dir and (index in video_rows or args.video_failures):
+                    safe = row["id"].replace("/", "_").replace("#", "-")
+                    video = Path(args.video_dir) / f"{safe}__{arm}__{generator}"
                 start = time.time()
                 try:
                     if arm == "old":
@@ -104,6 +111,18 @@ def main() -> None:
                     generator=args.generator if arm != "old" else "kinder_topdown",
                     seconds=round(time.time() - start, 2),
                 )
+                if video is not None:
+                    import shutil  # pylint: disable=import-outside-toplevel
+
+                    if record["success"] and index not in video_rows:
+                        shutil.rmtree(video, ignore_errors=True)
+                    elif not record["success"] and record.get("stage") in harness.PLAN_TIME_STAGES:
+                        # Nothing worth filming: keep the status record and a still.
+                        (video / "video.mp4").unlink(missing_ok=True)
+                        record["still"] = str(video / "still.png")
+                    else:
+                        record["video"] = str(video / "video.mp4")
+                        record["still"] = str(video / "still.png")
                 out.write(json.dumps(record) + "\n")
                 out.flush()
                 print(
