@@ -48,7 +48,8 @@ class _WristCamera:
         self.geom = TopDownPickGeometry()
 
     def _pinch(self):
-        pos, approach, closing = forward_kinematics(self.arm.get_arm_state(), self.geom)
+        # Where the arm really is (not a possibly stale reading of it).
+        pos, approach, closing = forward_kinematics(self.arm.arm_state, self.geom)
         x_axis = np.cross(closing, approach)[:2]
         return (
             pos[:2],
@@ -132,6 +133,47 @@ def test_the_servo_moves_the_grasp_onto_a_cube_the_ceiling_misplaced(
     turn = math.atan2(closing[1], closing[0]) - cameras[0].cube_yaw
     assert abs((turn + math.pi / 4) % (math.pi / 2) - math.pi / 4) < math.radians(4)
     assert list((tmp_path / "wrist_servo").glob("*_raw.png"))
+
+
+def test_the_servo_under_the_onboard_controller_ignores_stale_joint_readings(
+    tmp_path, monkeypatch
+):
+    """With the torque loop released the arm server reports the joints from before
+    the release (run 10: the servo seeded its IK from the retract pose, got another
+    branch and its first probe was refused). The onboard-controller moves report
+    where the arm is; those are used instead."""
+    stale = {}
+
+    def release(self):
+        stale["joints"] = list(self.arm_state)
+        self.released = True
+
+    def resume(self):
+        stale.pop("joints", None)
+        self.released = False
+
+    def get_arm_state(self):
+        return list(stale.get("joints", self.arm_state))
+
+    monkeypatch.setattr(FakeArmInterface, "release", release)
+    monkeypatch.setattr(FakeArmInterface, "resume", resume)
+    monkeypatch.setattr(FakeArmInterface, "get_arm_state", get_arm_state)
+    result, cameras, _ = _run(
+        tmp_path,
+        monkeypatch,
+        (0.018, -0.012),
+        **{"pick.top_down.arm_controller": "angular"},
+    )
+    assert result.finish_reason == "picked (toss skipped)"
+    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
+        "pick_attempts"
+    ][0]
+    assert attempt["servo"]["aligned"], attempt["servo"]
+    grasp = next(m for m in attempt["moves"] if m["name"] == "grasp")
+    pinch, _, _ = forward_kinematics(
+        np.radians(grasp["measured_deg"]), TopDownPickGeometry()
+    )
+    assert math.dist(pinch[:2], cameras[0].cube) < 0.003
 
 
 def test_a_nudge_whose_ik_flips_branch_is_refused(tmp_path, monkeypatch):

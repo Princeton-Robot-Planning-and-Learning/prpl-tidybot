@@ -159,13 +159,27 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
     servo = _build_servo(cfg, source, resolved_log_dir)
     ceiling = _CeilingRecorder(cfg, resolved_log_dir)
 
+    once = str(cfg.get("confirm", "once")) == "once"
+    confirmed = {"done": False}
+
+    def asking() -> bool:
+        """Whether to prompt now: every step, or (confirm=once) only before the first."""
+        return interactive and not (once and confirmed["done"])
+
     def confirm(question: str) -> None:
         ceiling.label = question
-        if not interactive:
+        if not asking():
             return
+        if once:
+            question = (
+                f"Run all {requested} cycle(s) (pick, drive, toss, retract; on a miss "
+                f"retract and return to the toss pose) without asking again? First: "
+                f"{question}"
+            )
         answer = prompt_fn(f"\n{question} [y/N]: ")
         if answer.strip().lower() not in ("y", "yes"):
             raise _Declined(question)
+        confirmed["done"] = True
 
     records: list[dict[str, Any]] = []
     completed = 0
@@ -222,7 +236,7 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
             _drive_to(real_env, toss_pose)
 
             tossed, reason, info, _ = _toss(
-                cfg, arm, resolved_log_dir, interactive, prompt_fn
+                cfg, arm, resolved_log_dir, asking(), prompt_fn
             )
             record["toss"] = info
             if not tossed:
@@ -254,7 +268,7 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
                 arm,
                 toss_pose,
                 records,
-                interactive,
+                asking(),
                 prompt_fn,
             )
         if resolved_log_dir is not None:
@@ -617,6 +631,10 @@ class _Mover:
         self.geom = geom
         self.moves = moves
 
+    def joints(self) -> list[float]:
+        """Where the arm is now (IK seeds, the servo's jump check and position)."""
+        return list(self.arm.get_arm_state())
+
     def begin(self) -> None:
         """Take whatever control the controller needs."""
 
@@ -669,8 +687,16 @@ class _AngularMover(_Mover):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._aborted = False
+        self._joints = list(self.arm.get_arm_state())
+
+    def joints(self) -> list[float]:
+        # With the torque loop released the arm server's joint reading is frozen at
+        # the release (run 10: an IK seeded from it flipped branch); each onboard
+        # move reports where the arm stopped, so track that instead.
+        return list(self._joints)
 
     def begin(self) -> None:
+        self._joints = list(self.arm.get_arm_state())
         self.arm.release()
 
     def end(self) -> None:
@@ -683,6 +709,7 @@ class _AngularMover(_Mover):
         except ArmMotionAborted:
             self._aborted = True
             raise
+        self._joints = list(measured)
         return bool(self._record(name, goal, list(measured))["reached"])
 
     def gripper(self, position: float) -> float:
@@ -869,9 +896,7 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
     """
     td = mover.td
     ax, ay, yaw = start
-    hover, grasp = top_down_joint_targets(
-        ax, ay, yaw, geom, seed=mover.arm.get_arm_state()
-    )
+    hover, grasp = top_down_joint_targets(ax, ay, yaw, geom, seed=mover.joints())
     servo_log: dict[str, Any] | None = None
     mover.begin()
     try:
@@ -882,14 +907,14 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
         if servo is not None:
 
             def move_hover(label: str, x: float, y: float, w: float) -> bool:
-                here = mover.arm.get_arm_state()
+                here = mover.joints()
                 joints, _ = top_down_joint_targets(x, y, w, geom, seed=here)
                 if not _servo_step_is_small(here, joints, td):
                     return False
                 return mover.move(f"servo_{label}", joints)
 
             def measured_xy() -> tuple[float, float]:
-                pos = forward_kinematics(mover.arm.get_arm_state(), geom)[0]
+                pos = forward_kinematics(mover.joints(), geom)[0]
                 return float(pos[0]), float(pos[1])
 
             result = servo.align(
@@ -902,7 +927,7 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
             servo_log = _servo_log(result)
             ax, ay, yaw = result.ax, result.ay, result.yaw
             hover, grasp = top_down_joint_targets(
-                ax, ay, yaw, geom, seed=mover.arm.get_arm_state()
+                ax, ay, yaw, geom, seed=mover.joints()
             )
             if not result.aligned:
                 mover.move("retreat", hover)

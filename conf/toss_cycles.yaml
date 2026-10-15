@@ -107,7 +107,8 @@ pick:
     max_joint_step: 0.2
     max_wrist_step: 0.9
     gripper_timeout_s: 4.0
-    max_attempts: 3
+    # One attempt: a miss retracts, returns to the toss pose and ends the run.
+    max_attempts: 1
     # Record the wrist camera during each pick attempt (real mode).
     record_wrist: true
     # Fake mode only: the gripper reading to pretend after closing.
@@ -115,6 +116,10 @@ pick:
 
 # Stop after the pick, holding the cube (then the reset prompt).
 skip_toss: false
+
+# once: one confirmation before the first action covers the whole run (Ctrl-C still
+# stops the arm); each: confirm every action.
+confirm: once
 
 # Seconds to wait after each toss before anything looks for the cube. Localizing right
 # after the swing caught the cube mid-flight and mid-slide (at rest ~1.6 s after
