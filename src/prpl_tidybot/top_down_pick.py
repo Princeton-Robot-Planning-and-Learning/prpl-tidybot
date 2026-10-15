@@ -105,6 +105,24 @@ def standoff_pose(
     )
 
 
+def grasp_search_bounds(
+    floor_bounds: Sequence[float],
+    geom: TopDownPickGeometry,
+    base_front: float = 0.274,
+    clearance: float = 0.05,
+) -> tuple[float, float, float, float]:
+    """Where a cube can be and still be picked with the base inside `floor_bounds`:
+    the drivable box grown on every side by standoff - (base front + clearance), so a
+    cube just past the box edge (e.g. in a bin there) is still searched for."""
+    margin = geom.standoff - base_front - clearance
+    return (
+        float(floor_bounds[0]) - margin,
+        float(floor_bounds[1]) + margin,
+        float(floor_bounds[2]) - margin,
+        float(floor_bounds[3]) + margin,
+    )
+
+
 def arm_frame_target(
     base_pose: Sequence[float], cube_xy: Sequence[float], geom: TopDownPickGeometry
 ) -> tuple[float, float]:

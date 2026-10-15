@@ -14,6 +14,7 @@ from prpl_tidybot.top_down_pick import (
     arm_frame_target,
     forward_kinematics,
     geometry_from_config,
+    grasp_search_bounds,
     grasp_succeeded,
     standoff_pose,
     top_down_joint_targets,
@@ -128,3 +129,23 @@ def test_the_configured_grasp_stops_the_finger_pads_just_above_the_floor():
     )
     clearance = _pad_bottom_z(grasp) - geom.floor_z
     assert 0.005 < clearance < 0.02
+
+
+def test_the_cube_search_covers_what_the_arm_can_grasp_beyond_the_driving_range():
+    """A cube up to standoff - (base front + clearance) beyond the drivable box can
+    still be picked with the base inside it (a bin past the box edge, 2026-10-15):
+    the search box is the drivable box grown by that margin on every side."""
+    margin = GEOM.standoff - 0.274 - 0.05
+    assert grasp_search_bounds(
+        FLOOR_BOUNDS, GEOM, base_front=0.274, clearance=0.05
+    ) == (
+        pytest.approx(FLOOR_BOUNDS[0] - margin),
+        pytest.approx(FLOOR_BOUNDS[1] + margin),
+        pytest.approx(FLOOR_BOUNDS[2] - margin),
+        pytest.approx(FLOOR_BOUNDS[3] + margin),
+    )
+    # The bin's interior (y up to 1.84) is inside it.
+    assert (
+        grasp_search_bounds(FLOOR_BOUNDS, GEOM, base_front=0.274, clearance=0.05)[3]
+        > 1.84
+    )
