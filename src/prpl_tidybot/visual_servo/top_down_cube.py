@@ -126,6 +126,7 @@ class TopDownServoParams:
     max_area_change_frac: float = 0.3
     area_history: int = 5
     yaw_tolerance: float = math.radians(4.0)
+    max_turn: float = math.radians(10.0)
     align_yaw: bool = True
     max_missed_detections: int = 2
     max_moves: int = 5
@@ -237,50 +238,61 @@ class TopDownCubeServo:
         def where() -> NDArray[np.float64]:
             return np.array(measured_xy() if measured_xy is not None else (ax, ay))
 
-        pixel_moves, tool_moves = [], []
-        for label, axis in (("probe_x", x_axis), ("probe_y", y_axis)):
-            before, cube_before = where(), result.trace[-1].cube
-            if cube_before is None:
-                return fail(f"cube lost before {label}")
-            seen = None
-            # As the cylinder servo walks a cut-off object into view: if a probe
-            # pushes the cube out of (or further off) the image, probe the other way.
-            for sign in (1.0, -1.0):
-                step = sign * p.probe_step
-                px, py = ax + step * axis[0], ay + step * axis[1]
-                if not move(label, px, py, yaw):
-                    return fail(f"{label} move did not arrive")
-                seen = look(label)
-                pushed_out = seen is None or (
-                    seen.clipped and seen.area < cube_before.area
+        def measure() -> tuple[NDArray[np.float64], bool] | str:
+            """Probe along tool x and y from the current hover: the Jacobian, and
+            whether any probe saw the cube cut off by the image border (its centroid
+            then moves less than the cube, so the gain is biased low)."""
+            x_axis, y_axis = tool_axes(yaw)
+            pixel_moves, tool_moves, cut = [], [], False
+            for label, axis in (("probe_x", x_axis), ("probe_y", y_axis)):
+                before, cube_before = where(), result.trace[-1].cube
+                if cube_before is None:
+                    return f"cube lost before {label}"
+                seen = None
+                # As the cylinder servo walks a cut-off object into view: if a probe
+                # pushes the cube out of (or further off) the image, go the other way.
+                for sign in (1.0, -1.0):
+                    step = sign * p.probe_step
+                    px, py = ax + step * axis[0], ay + step * axis[1]
+                    if not move(label, px, py, yaw):
+                        return f"{label} move did not arrive"
+                    seen = look(label)
+                    pushed_out = seen is None or (
+                        seen.clipped and seen.area < cube_before.area
+                    )
+                    if not pushed_out:
+                        break
+                    if sign > 0 and not move("probe_back", ax, ay, yaw):
+                        return "probe return did not arrive"
+                if seen is None:
+                    return f"cube lost during {label} both ways"
+                cut = cut or seen.clipped or cube_before.clipped
+                moved = (
+                    where() - before
+                    if measured_xy is not None
+                    else p.probe_step * np.asarray(axis)
                 )
-                if not pushed_out:
-                    break
-                if sign > 0 and not move("probe_back", ax, ay, yaw):
-                    return fail("probe return did not arrive")
-            if seen is None:
-                return fail(f"cube lost during {label} both ways")
-            moved = (
-                where() - before
-                if measured_xy is not None
-                else p.probe_step * np.asarray(axis)
-            )
-            tool_moves.append([float(moved @ x_axis), float(moved @ y_axis)])
-            pixel_moves.append([seen.u - cube_before.u, seen.v - cube_before.v])
-            if not move("probe_back", ax, ay, yaw):
-                return fail("probe return did not arrive")
-            if look("probe_back") is None:
-                return fail("cube lost after the probe")
-        if min(np.linalg.norm(tool_moves, axis=1)) < 0.3 * p.probe_step:
-            return fail("the probes barely moved the gripper")
-        if abs(np.linalg.det(np.array(tool_moves))) < 0.05 * p.probe_step**2:
-            return fail("the probe moves were nearly parallel")
-        jacobian = jacobian_from_moves(pixel_moves, tool_moves)
+                tool_moves.append([float(moved @ x_axis), float(moved @ y_axis)])
+                pixel_moves.append([seen.u - cube_before.u, seen.v - cube_before.v])
+                if not move("probe_back", ax, ay, yaw):
+                    return "probe return did not arrive"
+                if look("probe_back") is None:
+                    return "cube lost after the probe"
+            if min(np.linalg.norm(tool_moves, axis=1)) < 0.3 * p.probe_step:
+                return "the probes barely moved the gripper"
+            if abs(np.linalg.det(np.array(tool_moves))) < 0.05 * p.probe_step**2:
+                return "the probe moves were nearly parallel"
+            # Each probe must move the cube by at least a few pixels, or the inverse
+            # is all noise (a frozen image, the wrong blob).
+            if min(np.linalg.norm(pixel_moves, axis=1)) < 4.0:
+                return "the probes barely moved the cube in the image"
+            return jacobian_from_moves(pixel_moves, tool_moves), cut
+
+        measured = measure()
+        if isinstance(measured, str):
+            return fail(measured)
+        jacobian, provisional = measured
         result.jacobian = jacobian.round(1).tolist()
-        # Each probe must move the cube by at least a few pixels, or the inverse is
-        # all noise (a frozen image, the wrong blob).
-        if min(np.linalg.norm(pixel_moves, axis=1)) < 4.0:
-            return fail("the probes barely moved the cube in the image")
 
         origin = (ax, ay)
         cube = result.trace[-1].cube
@@ -294,10 +306,22 @@ class TopDownCubeServo:
                 cube = look("retry")
                 missed = missed + 1 if cube is None else 0
                 continue
+            if provisional and not cube.clipped:
+                # The cube is now fully in view: measure the gain again, unbiased.
+                measured = measure()
+                if isinstance(measured, str):
+                    return fail(measured)
+                jacobian, provisional = measured
+                result.jacobian = jacobian.round(1).tolist()
+                cube = result.trace[-1].cube
+                if cube is None:
+                    continue
             delta = tool_correction(jacobian, cube, p.target_uv)
             error_px = math.hypot(p.target_uv[0] - cube.u, p.target_uv[1] - cube.v)
             new_yaw = yaw
-            if p.align_yaw:
+            # A cut-off blob's edge angle, or a gain measured on one, can turn the
+            # wrist the wrong way (run 12); turn only on a whole cube, a step at most.
+            if p.align_yaw and not cube.clipped and not provisional:
                 edge = edge_direction_in_tool(jacobian, cube.angle)
                 x_axis, y_axis = tool_axes(yaw)
                 arm_edge = edge[0] * x_axis + edge[1] * y_axis
@@ -305,7 +329,7 @@ class TopDownCubeServo:
                 closing = math.atan2(y_axis[1], y_axis[0])
                 turn = (edge_yaw - closing + math.pi / 4) % (math.pi / 2) - math.pi / 4
                 if abs(turn) > p.yaw_tolerance:
-                    new_yaw = yaw + turn
+                    new_yaw = yaw + max(-p.max_turn, min(p.max_turn, turn))
             if error_px <= p.tolerance_px and new_yaw == yaw:
                 aligned_looks += 1
                 if aligned_looks >= p.confirm_looks:
