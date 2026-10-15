@@ -83,6 +83,11 @@ class TargetSource(abc.ABC):
         point."""
         return 0.0
 
+    def alternates(self) -> list[tuple[float, float, float]]:
+        """Other estimates (x, y, yaw) of the same target from the last call, most
+        confident first, to try if acting on the main one fails; none by default."""
+        return []
+
     def close(self) -> None:
         """Release any resources held by the source (e.g. detector sockets)."""
 

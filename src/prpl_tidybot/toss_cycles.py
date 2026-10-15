@@ -561,59 +561,39 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
             cube = _localize(cube_source)  # corrects for where the base parked
         except RuntimeError as e:
             return f"{e}; move the cube and rerun"
-        ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
-        yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
-        try:
-            top_down_joint_targets(ax, ay, yaw_rel, geom, seed=arm.get_arm_state())
-        except ValueError as e:
-            return f"pick_failure: {e}"
-        moves: list[dict[str, Any]] = []
-        record.setdefault("pick_attempts", []).append(
-            {
-                "attempt": attempt,
-                "cube": cube,
-                "arm_target_xy": [ax, ay],
-                "moves": moves,
-            }
-        )
-        confirm(
-            f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: open, arm to 10 cm "
-            f"above the cube (arm frame {ax:+.3f}, {ay:+.3f}), "
-            + ("align with the wrist camera, " if servo is not None else "")
-            + "descend, close?"
-        )
-        wrist.start(f"cycle_{cycle:02d}_pick_{attempt}")
-        # The fake gripper closes on nothing; pretend it read fake_grasp_reading.
-        fake = float(td.get("fake_grasp_reading", 0.49))
-        read = functools.partial(_fake_reading, fake) if cfg.mode == "fake" else float
-        mover: _Mover = (
-            _AngularMover(arm, td, geom, moves)
-            if td.get("arm_controller", "compliant") == "angular"
-            else _CompliantMover(arm, td, geom, moves, cfg.arm_home)
-        )
-        held, reading, note, servo_log = _grasp(
-            mover,
-            geom,
-            (ax, ay, yaw_rel),
-            read,
-            servo,
-            f"c{cycle}a{attempt}",
-        )
-        if servo_log is not None:
-            record["pick_attempts"][-1]["servo"] = servo_log
-        record["pick_attempts"][-1].update({"gripper": reading, "held": held})
-        if note is not None:
-            record["pick_attempts"][-1]["note"] = note
-        _logger.info(
-            "Pick attempt %d: gripper %.3f -> %s%s.",
-            attempt,
-            reading,
-            "held" if held else "missed",
-            f" ({note})" if note else "",
-        )
-        if held:
-            wrist.stop()
-            return None
+        # The more confident camera's estimate first; on a miss, the other cameras'
+        # (they disagree by ~3 cm where they overlap).
+        targets = [(cube, "best camera")] + [
+            ({"x": x, "y": y, "yaw_deg": math.degrees(yaw)}, "other camera")
+            for x, y, yaw in cube_source.alternates()
+        ]
+        for k, (cube, label) in enumerate(targets):
+            if k > 0:
+                confirm(
+                    f"Cycle {cycle}: Missed. Try the other ceiling camera's estimate "
+                    f"of the cube, ({cube['x']:+.3f}, {cube['y']:+.3f})?"
+                )
+            held, failure = _grasp_at(
+                cfg,
+                cube,
+                label,
+                base,
+                arm,
+                geom,
+                confirm,
+                cycle,
+                attempt,
+                record,
+                wrist,
+                servo,
+                attempts,
+                f"{attempt}" + (f"_{k + 1}" if k else ""),
+            )
+            if failure is not None:
+                return failure
+            if held:
+                wrist.stop()
+                return None
         wrist.stop()
         if attempt < attempts:
             confirm(
@@ -885,6 +865,81 @@ class _CompliantMover(_Mover):
         _set_gripper(self.arm, position, self.td, hold=self.command)
         self.grip = self.arm.get_gripper_state()
         return self.grip
+
+
+def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    cfg: DictConfig,
+    cube: dict[str, float],
+    label: str,
+    base: tuple[float, float, float],
+    arm: ArmInterface,
+    geom: TopDownPickGeometry,
+    confirm: Any,
+    cycle: int,
+    attempt: int,
+    record: dict[str, Any],
+    wrist: "_WristRecorder",
+    servo: Any,
+    attempts: int,
+    clip: str,
+) -> tuple[bool, str | None]:
+    """One grasp from where the base parked at `cube`: (held, stop reason or None).
+    The wrist clip is left recording when the cube is held."""
+    td = cfg.pick.top_down
+    ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
+    yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
+    try:
+        top_down_joint_targets(ax, ay, yaw_rel, geom, seed=arm.get_arm_state())
+    except ValueError as e:
+        return False, f"pick_failure: {e}"
+    moves: list[dict[str, Any]] = []
+    record.setdefault("pick_attempts", []).append(
+        {
+            "attempt": attempt,
+            "cube": cube,
+            "target": label,
+            "arm_target_xy": [ax, ay],
+            "moves": moves,
+        }
+    )
+    confirm(
+        f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: open, arm to 10 cm "
+        f"above the cube (arm frame {ax:+.3f}, {ay:+.3f}), "
+        + ("align with the wrist camera, " if servo is not None else "")
+        + "descend, close?"
+    )
+    wrist.start(f"cycle_{cycle:02d}_pick_{clip}")
+    # The fake gripper closes on nothing; pretend it read fake_grasp_reading.
+    fake = float(td.get("fake_grasp_reading", 0.49))
+    read = functools.partial(_fake_reading, fake) if cfg.mode == "fake" else float
+    mover: _Mover = (
+        _AngularMover(arm, td, geom, moves)
+        if td.get("arm_controller", "compliant") == "angular"
+        else _CompliantMover(arm, td, geom, moves, cfg.arm_home)
+    )
+    held, reading, note, servo_log = _grasp(
+        mover,
+        geom,
+        (ax, ay, yaw_rel),
+        read,
+        servo,
+        f"c{cycle}a{clip}",
+    )
+    if servo_log is not None:
+        record["pick_attempts"][-1]["servo"] = servo_log
+    record["pick_attempts"][-1].update({"gripper": reading, "held": held})
+    if note is not None:
+        record["pick_attempts"][-1]["note"] = note
+    _logger.info(
+        "Pick attempt %d: gripper %.3f -> %s%s.",
+        attempt,
+        reading,
+        "held" if held else "missed",
+        f" ({note})" if note else "",
+    )
+    if not held:
+        wrist.stop()
+    return held, None
 
 
 def _wrap(angles: Any) -> Any:

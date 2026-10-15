@@ -596,3 +596,28 @@ def test_the_real_cube_source_saves_failed_localizations_in_the_run_log(tmp_path
     real = {"_target_": "prpl_tidybot.cube_localizer.CeilingCubeTargetSource"}
     kwargs = _cube_source_kwargs(cfg, real, tmp_path)
     assert kwargs["failure_dir"] == str(tmp_path / "localization_failures")
+
+
+def test_a_missed_grasp_tries_the_other_cameras_estimate(tmp_path, monkeypatch):
+    """Josh, 2026-10-15: when both ceiling cameras see the cube, grasp at the more
+    confident estimate first and, if that misses, at the other one, before giving up."""
+    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+
+    readings = iter([1.0, 0.49])  # fully closed on nothing, then closed on the cube
+    monkeypatch.setattr(tc, "_fake_reading", lambda _v, _r: next(readings))
+    monkeypatch.setattr(
+        ConstantTargetSource,
+        "alternates",
+        lambda self: [(self.get_target()[0] + 0.03, self.get_target()[1], 0.0)],
+        raising=False,
+    )
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true", **{"pick.top_down.max_attempts": 1}),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    tries = log["cycles"][0]["pick_attempts"]
+    assert [t["held"] for t in tries] == [False, True]
+    assert tries[1]["cube"]["x"] == pytest.approx(tries[0]["cube"]["x"] + 0.03)
+    assert tries[1]["target"] == "other camera"
