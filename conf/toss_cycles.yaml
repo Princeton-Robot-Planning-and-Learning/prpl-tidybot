@@ -68,10 +68,38 @@ pick:
     grasp_min: 0.2
     grasp_max: 0.9
     close_position: 1.0
-    # angular: hover/grasp/lift/carry under the arm's onboard position controller
-    # (Jimmy Wu's pick_object; lands on target). compliant: streamed through the
-    # torque loop, which settled 24 mm short of the cube on the robot (2026-10-14).
-    arm_controller: angular
+    # compliant: grasp moves streamed through the torque loop, each corrected onto its
+    # target (the loop alone settled 24 mm short of the cube, 2026-10-14 run 3).
+    # angular: the arm's onboard position controller (Jimmy Wu's pick_object).
+    # One controller per run; try each on its own.
+    arm_controller: compliant
+    # Compliant correction, up to correction_rounds re-aims after the arm settles:
+    # pointing-down moves re-aim the pinch point by the measured position error
+    # (within correction_tol_mm, at most correction_max_mm past the goal, never below
+    # the grasp height); the carry pose re-commands joints (correction_tol_deg,
+    # correction_max_deg).
+    correction_rounds: 3
+    correction_tol_mm: 2.0
+    correction_max_mm: 60.0
+    correction_tol_deg: 0.3
+    correction_max_deg: 8.0
+    # Align over the cube with the wrist camera at the hover before descending
+    # (prpl_tidybot.visual_servo.top_down_cube). x/y nudges at the hover height and
+    # a wrist turn to square the fingers; never moves the gripper down.
+    wrist_servo:
+      enabled: true
+      # Where the cube sits in the wrist image when the pinch point is above it: the
+      # mean over the 4 held picks of 2026-10-14 (spread +-7, +-14 px).
+      target_uv: [318, 280]
+      probe_step: 0.015
+      tolerance_px: 6.0
+      confirm_looks: 2
+      min_step: 0.002
+      max_step: 0.03
+      max_moves: 5
+      travel_limit: 0.08
+      align_yaw: true
+      settle_s: 0.3
     gripper_timeout_s: 4.0
     max_attempts: 3
     # Record the wrist camera during each pick attempt (real mode).
