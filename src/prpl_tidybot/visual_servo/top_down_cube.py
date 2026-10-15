@@ -129,7 +129,8 @@ class TopDownServoParams:
     max_turn: float = math.radians(10.0)
     align_yaw: bool = True
     max_missed_detections: int = 2
-    max_moves: int = 5
+    max_moves: int = 10
+    pushed_out_frac: float = 0.8
     travel_limit: float = 0.08
 
 
@@ -257,8 +258,11 @@ class TopDownCubeServo:
                     if not move(label, px, py, yaw):
                         return f"{label} move did not arrive"
                     seen = look(label)
+                    # A cut-off blob's area wobbles as it slides along the edge
+                    # (run 13 re-tried a sideways probe); only a clear shrink is out.
                     pushed_out = seen is None or (
-                        seen.clipped and seen.area < cube_before.area
+                        seen.clipped
+                        and seen.area < p.pushed_out_frac * cube_before.area
                     )
                     if not pushed_out:
                         break

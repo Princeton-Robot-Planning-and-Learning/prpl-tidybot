@@ -98,7 +98,8 @@ pick:
       min_step: 0.002
       max_step: 0.01
       max_area_change_frac: 0.3
-      max_moves: 5
+      # At 1 cm per nudge a cube ~6 cm off (the camera-overlap strip) needs 7-8.
+      max_moves: 10
       travel_limit: 0.08
       align_yaw: true
       settle_s: 0.3
