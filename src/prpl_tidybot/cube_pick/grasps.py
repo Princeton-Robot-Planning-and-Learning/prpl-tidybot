@@ -8,7 +8,7 @@ widen the search along the two axes that matter for a cube near a wall:
 * **Partial opening.** The fingers open only `opening_margins` wider than the cube
   rather than to 85 mm, so a finger between the cube and a wall needs a gap of roughly
   its own thickness plus the margin, not 30 mm.
-* **Tilted approaches.** The approach axis is tilted by up to 45 degrees about the
+* **Tilted approaches.** The approach axis is tilted by up to 30 degrees about the
   fingers' closing axis. Rotating about that axis keeps both pads parallel to the faces
   they squeeze, while swinging the wrist, camera and knuckles away from the wall on
   one side. With four face-aligned yaws and both tilt signs, the hand can lean away
@@ -92,7 +92,7 @@ class CubeGraspSampler:
     """
 
     cube_size: float
-    tilts_deg: tuple[float, ...] = (0.0, 10.0, 20.0, 30.0, 40.0, 45.0)
+    tilts_deg: tuple[float, ...] = (0.0, 10.0, 20.0, 30.0)
     opening_margins: tuple[float, ...] = (0.012, 0.008, 0.020)
     depths: tuple[float, ...] = (0.010, 0.016)
     tool_to_pinch: float = 0.0052

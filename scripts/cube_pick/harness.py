@@ -377,7 +377,17 @@ class TossingSim:
         )
         believed = state.copy()
         config = config or PickConfig(cube_size=size)
-        if generator != "analytic":
+        if generator == "analytic45":
+            from prpl_tidybot.cube_pick.grasps import (  # pylint: disable=import-outside-toplevel
+                AnalyticGraspGenerator,
+                CubeGraspSampler,
+            )
+
+            config.generator = AnalyticGraspGenerator(
+                CubeGraspSampler(cube_size=size, tilts_deg=(0.0, 10.0, 20.0, 30.0, 40.0, 45.0)),
+                name="analytic45",
+            )
+        elif generator != "analytic":
             config.generator = self.generator(generator, size)
         prior = CubePrior(
             position=prior_position, size=size, sigma=0.05, support_heights=self.support_heights(state)
