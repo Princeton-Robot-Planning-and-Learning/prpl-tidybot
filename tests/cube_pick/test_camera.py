@@ -7,15 +7,17 @@ from prpl_tidybot.cube_pick.camera import (
     KINOVA_WRIST_COLOR,
     KINOVA_WRIST_COLOR_FISHEYE,
     KINOVA_WRIST_DEPTH,
-    FisheyeIntrinsics,
     DepthNoiseModel,
+    FisheyeIntrinsics,
     PinholeIntrinsics,
     register_depth_to_color,
 )
 
 
 def test_intrinsics_from_diagonal_fov_reproduce_the_fov():
-    intr = PinholeIntrinsics.from_diagonal_fov(width=1280, height=720, diagonal_fov_deg=67)
+    intr = PinholeIntrinsics.from_diagonal_fov(
+        width=1280, height=720, diagonal_fov_deg=67
+    )
     half_diag = np.hypot(1280, 720) / 2
     assert np.degrees(2 * np.arctan(half_diag / intr.fx)) == pytest.approx(67)
     assert intr.fx == intr.fy
@@ -29,7 +31,9 @@ def test_kinova_specs_match_the_robot():
     assert KINOVA_WRIST_COLOR_FISHEYE is None
     assert (KINOVA_WRIST_COLOR.width, KINOVA_WRIST_COLOR.height) == (640, 480)
     half_diag = np.hypot(640, 480) / 2
-    assert np.degrees(2 * np.arctan(half_diag / KINOVA_WRIST_COLOR.fx)) == pytest.approx(67)
+    assert np.degrees(
+        2 * np.arctan(half_diag / KINOVA_WRIST_COLOR.fx)
+    ) == pytest.approx(67)
     assert (KINOVA_WRIST_DEPTH.width, KINOVA_WRIST_DEPTH.height) == (480, 270)
     half_diag = np.hypot(480, 270) / 2
     fov = np.degrees(2 * np.arctan(half_diag / KINOVA_WRIST_DEPTH.fx))
@@ -68,14 +72,22 @@ def test_noise_is_deterministic_per_seed():
 
 
 def test_noise_grows_with_range():
-    near = DepthNoiseModel(seed=0, dropout=0.0).apply(np.full((100, 100), 0.3, np.float32))
-    far = DepthNoiseModel(seed=0, dropout=0.0).apply(np.full((100, 100), 1.5, np.float32))
+    near = DepthNoiseModel(seed=0, dropout=0.0).apply(
+        np.full((100, 100), 0.3, np.float32)
+    )
+    far = DepthNoiseModel(seed=0, dropout=0.0).apply(
+        np.full((100, 100), 1.5, np.float32)
+    )
     assert np.std(far[far > 0]) > 2 * np.std(near[near > 0])
 
 
 def test_register_depth_to_color_with_identity_extrinsics_resamples():
-    depth_intr = PinholeIntrinsics.from_diagonal_fov(width=48, height=27, diagonal_fov_deg=72)
-    color_intr = PinholeIntrinsics.from_diagonal_fov(width=64, height=36, diagonal_fov_deg=72)
+    depth_intr = PinholeIntrinsics.from_diagonal_fov(
+        width=48, height=27, diagonal_fov_deg=72
+    )
+    color_intr = PinholeIntrinsics.from_diagonal_fov(
+        width=64, height=36, diagonal_fov_deg=72
+    )
     depth = np.full((27, 48), 0.5, dtype=np.float32)
     out = register_depth_to_color(
         depth=depth,
@@ -89,11 +101,15 @@ def test_register_depth_to_color_with_identity_extrinsics_resamples():
 
 
 def test_register_depth_to_color_shifts_with_baseline():
-    intr = PinholeIntrinsics.from_diagonal_fov(width=100, height=100, diagonal_fov_deg=60)
+    intr = PinholeIntrinsics.from_diagonal_fov(
+        width=100, height=100, diagonal_fov_deg=60
+    )
     depth = np.zeros((100, 100), dtype=np.float32)
     depth[50, 50] = 0.5
     color_from_depth = np.eye(4)
-    color_from_depth[0, 3] = 0.05  # the depth sensor sits 5 cm to the colour camera's right
+    color_from_depth[0, 3] = (
+        0.05  # the depth sensor sits 5 cm to the colour camera's right
+    )
     out = register_depth_to_color(
         depth=depth,
         depth_intrinsics=intr,
@@ -109,7 +125,13 @@ def test_register_depth_to_color_shifts_with_baseline():
 
 def test_fisheye_projection_matches_the_equidistant_model():
     fish = FisheyeIntrinsics(
-        width=640, height=480, fx=420, fy=420, cx=319.5, cy=239.5, distortion=(0.06, 0, 0, 0)
+        width=640,
+        height=480,
+        fx=420,
+        fy=420,
+        cx=319.5,
+        cy=239.5,
+        distortion=(0.06, 0, 0, 0),
     )
     point = np.array([[0.1, -0.05, 0.3]])
     theta = np.arctan2(np.hypot(0.1, 0.05), 0.3)
@@ -120,10 +142,20 @@ def test_fisheye_projection_matches_the_equidistant_model():
 
 def test_distort_then_undistort_round_trips_a_pinhole_image():
     fish = FisheyeIntrinsics(
-        width=320, height=240, fx=210, fy=210, cx=159.5, cy=119.5, distortion=(0.06, 0, 0, 0)
+        width=320,
+        height=240,
+        fx=210,
+        fy=210,
+        cx=159.5,
+        cy=119.5,
+        distortion=(0.06, 0, 0, 0),
     )
-    source = PinholeIntrinsics(width=640, height=480, fx=300, fy=300, cx=319.5, cy=239.5)
-    target = PinholeIntrinsics(width=320, height=240, fx=220, fy=220, cx=159.5, cy=119.5)
+    source = PinholeIntrinsics(
+        width=640, height=480, fx=300, fy=300, cx=319.5, cy=239.5
+    )
+    target = PinholeIntrinsics(
+        width=320, height=240, fx=220, fy=220, cx=159.5, cy=119.5
+    )
     # A smooth pattern rendered by the source pinhole camera on a plane at z = 1.
     v, u = np.mgrid[0:480, 0:640]
     x, y = (u - 319.5) / 300, (v - 239.5) / 300

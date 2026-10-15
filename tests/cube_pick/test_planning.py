@@ -1,4 +1,5 @@
-"""The arm model the pick plans with must have the same wrist the robot executes with."""
+"""The arm model the pick plans with must have the same wrist the robot executes
+with."""
 
 import xml.etree.ElementTree as ET
 
@@ -12,7 +13,9 @@ from prpl_tidybot.cube_pick.planning import planning_arm_urdf  # noqa: E402
 def _collision_meshes(link_name: str) -> list[str]:
     root = ET.parse(planning_arm_urdf()).getroot()
     (link,) = [link for link in root.iter("link") if link.get("name") == link_name]
-    return [m.get("filename", "") for c in link.iter("collision") for m in c.iter("mesh")]
+    return [
+        m.get("filename", "") for c in link.iter("collision") for m in c.iter("mesh")
+    ]
 
 
 def test_the_bracelet_collides_with_its_vision_module() -> None:

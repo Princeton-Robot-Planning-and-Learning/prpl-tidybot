@@ -125,16 +125,22 @@ def planning_arm_urdf() -> Path:
     source_dir = Path(pybullet_helpers.__file__).parent / "assets" / "urdf"
     text = (source_dir / "kortex_description" / "gen3_7dof.urdf").read_text()
     if PHANTOM_CAMERA_BOX not in text:
-        raise RuntimeError("pybullet_helpers' Kinova URDF changed: phantom camera box not found")
+        raise RuntimeError(
+            "pybullet_helpers' Kinova URDF changed: phantom camera box not found"
+        )
     out_dir = Path(tempfile.gettempdir()) / f"prpl_tidybot_urdf_{os.getuid()}"
     out_dir.mkdir(exist_ok=True)
     link = out_dir / "kortex_description"
     if not link.exists():
         link.symlink_to(source_dir / "kortex_description")
     if text.count(BARE_BRACELET_MESH) != 2:
-        raise RuntimeError("pybullet_helpers' Kinova URDF changed: bare bracelet mesh not found")
+        raise RuntimeError(
+            "pybullet_helpers' Kinova URDF changed: bare bracelet mesh not found"
+        )
     target = out_dir / "gen3_7dof_vision_bracelet.urdf"
-    stripped = text.replace(PHANTOM_CAMERA_BOX, "").replace(BARE_BRACELET_MESH, VISION_BRACELET_MESH)
+    stripped = text.replace(PHANTOM_CAMERA_BOX, "").replace(
+        BARE_BRACELET_MESH, VISION_BRACELET_MESH
+    )
     if not target.exists() or target.read_text() != stripped:
         target.write_text(stripped)
     return target
@@ -250,7 +256,9 @@ class PlanningScene:
         """The believed state the scene was last synchronized to."""
         return self._state
 
-    def set_robot(self, base: SE2Pose | tuple[float, float, float], arm: Sequence[float]) -> None:
+    def set_robot(
+        self, base: SE2Pose | tuple[float, float, float], arm: Sequence[float]
+    ) -> None:
         """Move the model robot to a base pose and arm configuration."""
         x, y, rot = (base.x, base.y, base.rot) if isinstance(base, SE2Pose) else base
         self._state.set(self._robot_obj, "pos_base_x", float(x))
@@ -273,14 +281,21 @@ class PlanningScene:
     def base_pose(self) -> tuple[float, float, float]:
         """Current model base pose."""
         s, r = self._state, self._robot_obj
-        return (s.get(r, "pos_base_x"), s.get(r, "pos_base_y"), s.get(r, "pos_base_rot"))
+        return (
+            s.get(r, "pos_base_x"),
+            s.get(r, "pos_base_y"),
+            s.get(r, "pos_base_rot"),
+        )
 
     def arm_joints(self) -> JointPositions:
         """Current model arm joints (7)."""
-        return [self._state.get(self._robot_obj, f"pos_arm_joint{i + 1}") for i in range(7)]
+        return [
+            self._state.get(self._robot_obj, f"pos_arm_joint{i + 1}") for i in range(7)
+        ]
 
     def obstacle_bodies(self, *, include_cube: bool) -> list[int]:
-        """Collision bodies: containers, static colliders, the floor, optionally the cube."""
+        """Collision bodies: containers, static colliders, the floor, optionally the
+        cube."""
         bodies = set(self._sim.get_collision_bodies())
         bodies.add(self._floor)
         if not include_cube:
@@ -293,7 +308,9 @@ class PlanningScene:
         """Forward kinematics of the tool frame at the current base."""
         return pose_to_matrix(self.robot.forward_kinematics(list(arm[:7]) + [0.0] * 6))
 
-    def ik(self, tool_pose: FloatArray, seed: Sequence[float] | None = None) -> JointPositions | None:
+    def ik(
+        self, tool_pose: FloatArray, seed: Sequence[float] | None = None
+    ) -> JointPositions | None:
         """Arm joints reaching `tool_pose` from the current base, nearest `seed`."""
         robot = self.robot
         if seed is not None:
@@ -341,7 +358,9 @@ class PlanningScene:
                         culprit = f"{self._names.get(body, str(body))} ({self._link_name(point[3])})"
         finally:
             self._sim.set_state(self._state)
-        return ClearanceReport(ok=bool(closest >= 0), closest=float(closest), culprit=culprit)
+        return ClearanceReport(
+            ok=bool(closest >= 0), closest=float(closest), culprit=culprit
+        )
 
     # Links rigidly attached beyond the last arm joint: the hand (bracelet, Robotiq base,
     # fingers). Where these are, given the tool pose, does not depend on the arm.
@@ -359,10 +378,9 @@ class PlanningScene:
         """Clearance of the hand alone with its tool frame at `tool_pose`.
 
         A second copy of the arm is kept at a fixed configuration and its base moved so
-        its tool frame lands on `tool_pose`; only its hand links are queried. No
-        inverse kinematics is needed, so a grasp the hand cannot fit is rejected before
-        any arm configuration is searched -- and that rejection holds for every base
-        placement.
+        its tool frame lands on `tool_pose`; only its hand links are queried. No inverse
+        kinematics is needed, so a grasp the hand cannot fit is rejected before any arm
+        configuration is searched -- and that rejection holds for every base placement.
         """
         if not hasattr(self, "_hand"):
             self._hand = type(self.robot)(
@@ -373,24 +391,46 @@ class PlanningScene:
             )
             self._hand_q0 = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
             self._hand.set_joints(self._hand_q0 + [0.0] * 6)
-            base_pose = pose_to_matrix(self._hand.get_base_pose()) if hasattr(self._hand, "get_base_pose") else np.eye(4)
-            tool = pose_to_matrix(self._hand.forward_kinematics(self._hand_q0 + [0.0] * 6))
+            base_pose = (
+                pose_to_matrix(self._hand.get_base_pose())
+                if hasattr(self._hand, "get_base_pose")
+                else np.eye(4)
+            )
+            tool = pose_to_matrix(
+                self._hand.forward_kinematics(self._hand_q0 + [0.0] * 6)
+            )
             self._base_from_tool = np.linalg.inv(base_pose) @ tool
             names = {
-                i: p.getJointInfo(self._hand.robot_id, i, physicsClientId=self._client)[12].decode()
-                for i in range(p.getNumJoints(self._hand.robot_id, physicsClientId=self._client))
+                i: p.getJointInfo(self._hand.robot_id, i, physicsClientId=self._client)[
+                    12
+                ].decode()
+                for i in range(
+                    p.getNumJoints(self._hand.robot_id, physicsClientId=self._client)
+                )
             }
-            self._hand_links = [i for i, n in names.items() if n.startswith(self.HAND_LINK_PREFIXES)]
+            self._hand_links = [
+                i for i, n in names.items() if n.startswith(self.HAND_LINK_PREFIXES)
+            ]
             self._hand_names = names
             # Park every link of the copy out of the way of the planning robot.
             for body in (self.robot.robot_id,):
-                for link in range(-1, p.getNumJoints(self._hand.robot_id, physicsClientId=self._client)):
+                for link in range(
+                    -1,
+                    p.getNumJoints(self._hand.robot_id, physicsClientId=self._client),
+                ):
                     p.setCollisionFilterPair(
-                        self._hand.robot_id, body, link, -1, 0, physicsClientId=self._client
+                        self._hand.robot_id,
+                        body,
+                        link,
+                        -1,
+                        0,
+                        physicsClientId=self._client,
                     )
         hand = self._hand
         hand.set_base(matrix_to_pose(tool_pose @ np.linalg.inv(self._base_from_tool)))
-        hand.set_joints(self._hand_q0 + hand.finger_state_to_joints(opening_to_driver(opening)))
+        hand.set_joints(
+            self._hand_q0 + hand.finger_state_to_joints(opening_to_driver(opening))
+        )
         closest = np.inf
         culprit = None
         for body in self.obstacle_bodies(include_cube=include_cube):
@@ -407,7 +447,9 @@ class PlanningScene:
                     if margin < closest:
                         closest = margin
                         culprit = f"{self._names.get(body, str(body))} ({self._hand_names[link]})"
-        return ClearanceReport(ok=bool(closest >= 0), closest=float(closest), culprit=culprit)
+        return ClearanceReport(
+            ok=bool(closest >= 0), closest=float(closest), culprit=culprit
+        )
 
     # The fingertips reach below the pads; KINDER's MuJoCo fingers sit a few millimetres
     # lower than the planning model's, so a grasp planned 1 mm off the floor touches it.
@@ -424,7 +466,9 @@ class PlanningScene:
         if not hasattr(self, "_link_names"):
             robot_id = self.robot.robot_id
             self._link_names = {
-                i: p.getJointInfo(robot_id, i, physicsClientId=self._client)[12].decode()
+                i: p.getJointInfo(robot_id, i, physicsClientId=self._client)[
+                    12
+                ].decode()
                 for i in range(p.getNumJoints(robot_id, physicsClientId=self._client))
             }
         return self._link_names.get(link, "base")
@@ -468,7 +512,9 @@ class PlanningScene:
             self._sim.set_state(self._state)
         if plan is None:
             return None
-        plan = remap_joint_position_plan_to_constant_distance(plan, robot, max_distance=0.2)
+        plan = remap_joint_position_plan_to_constant_distance(
+            plan, robot, max_distance=0.2
+        )
         return [[float(q) for q in conf[:7]] for conf in plan]
 
     def plan_cartesian(
@@ -484,12 +530,19 @@ class PlanningScene:
         start_pose = self.tool_pose(start)
         distance = float(np.linalg.norm(target_pose[:3, 3] - start_pose[:3, 3]))
         angle = float(
-            (Rotation.from_matrix(target_pose[:3, :3]) * Rotation.from_matrix(start_pose[:3, :3]).inv()).magnitude()
+            (
+                Rotation.from_matrix(target_pose[:3, :3])
+                * Rotation.from_matrix(start_pose[:3, :3]).inv()
+            ).magnitude()
         )
         steps = max(1, int(np.ceil(max(distance / step, angle / np.radians(3)))))
-        from scipy.spatial.transform import Slerp  # pylint: disable=import-outside-toplevel
+        from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
+            Slerp,
+        )
 
-        slerp = Slerp([0, 1], Rotation.from_matrix([start_pose[:3, :3], target_pose[:3, :3]]))
+        slerp = Slerp(
+            [0, 1], Rotation.from_matrix([start_pose[:3, :3], target_pose[:3, :3]])
+        )
         path = [list(start[:7])]
         for i in range(1, steps + 1):
             t = i / steps
@@ -525,7 +578,8 @@ class PlanningScene:
         )
 
     def base_pose_collides(self, target: tuple[float, float, float]) -> bool:
-        """Would the base footprint at `target` intersect an obstacle (overhead check)?"""
+        """Would the base footprint at `target` intersect an obstacle (overhead
+        check)?"""
         # pylint: disable=import-outside-toplevel
         from kinder.envs.dynamic3d.object_types import (
             MujocoDrawerObjectType,

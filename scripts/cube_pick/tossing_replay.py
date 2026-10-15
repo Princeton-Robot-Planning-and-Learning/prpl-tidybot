@@ -63,13 +63,19 @@ def main() -> None:
 
     rows = json.load(open(args.states))
     selected = harness.parse_rows(args.rows, len(rows))
-    video_rows = set(harness.parse_rows(args.video_rows, len(rows))) if args.video_rows else set()
+    video_rows = (
+        set(harness.parse_rows(args.video_rows, len(rows)))
+        if args.video_rows
+        else set()
+    )
     done = set()
     if os.path.exists(args.out):
         for line in open(args.out):
             rec = json.loads(line)
             done.add((rec["row"], rec["arm"]))
-    sim = harness.TossingSim(perception_port=args.perception_port, grasp_port=args.grasp_port)
+    sim = harness.TossingSim(
+        perception_port=args.perception_port, grasp_port=args.grasp_port
+    )
     with open(args.out, "a") as out:
         for index in selected:
             row = rows[index]

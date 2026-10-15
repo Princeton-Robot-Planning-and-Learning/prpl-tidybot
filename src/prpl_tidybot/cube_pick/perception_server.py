@@ -253,14 +253,18 @@ class PerceptionServer:
             return 0.0
         import torch
 
-        return torch.cuda.memory_allocated() / 2**20 if torch.cuda.is_available() else 0.0
+        return (
+            torch.cuda.memory_allocated() / 2**20 if torch.cuda.is_available() else 0.0
+        )
 
     def handle(self, req: Any) -> dict[str, Any]:
         if not isinstance(req, dict):
             raise ValueError("request must be a dict")
         op = req.get("op")
         if op == "ping":
-            loaded = [n for n, b in (("sam2", self.sam2), ("foundationpose", self.fp)) if b]
+            loaded = [
+                n for n, b in (("sam2", self.sam2), ("foundationpose", self.fp)) if b
+            ]
             return {"ok": True, "backends": list(self.enabled), "loaded": loaded}
         if op == "segment":
             return self._sam2().segment(req)

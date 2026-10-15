@@ -89,10 +89,10 @@ class GraspCandidate:
 class CubeGraspSampler:
     """Enumerate grasp candidates in preference order.
 
-    `tilts_deg` are tried smallest first (straight down is the most robust grasp when
-    it fits); each nonzero tilt in both directions. `opening_margins` are total extra
-    gap beyond the cube's width, narrowest first. `depths` place the pads' centre this
-    far above the cube centre (the tool frame sits `tool_to_pinch` behind the pads).
+    `tilts_deg` are tried smallest first (straight down is the most robust grasp when it
+    fits); each nonzero tilt in both directions. `opening_margins` are total extra gap
+    beyond the cube's width, narrowest first. `depths` place the pads' centre this far
+    above the cube centre (the tool frame sits `tool_to_pinch` behind the pads).
     """
 
     cube_size: float
@@ -122,7 +122,11 @@ class CubeGraspSampler:
         """All candidates, most preferred first."""
         out = []
         for tilt_deg in self.tilts_deg:
-            tilts = [0.0] if tilt_deg == 0 else [np.radians(tilt_deg), -np.radians(tilt_deg)]
+            tilts = (
+                [0.0]
+                if tilt_deg == 0
+                else [np.radians(tilt_deg), -np.radians(tilt_deg)]
+            )
             for margin in self.opening_margins:
                 opening = min(self.cube_size + margin, self.max_opening)
                 for depth in self.grasp_depths():
@@ -169,9 +173,9 @@ class GraspGenerator(Protocol):
     """Anything that proposes grasps for the perceived cube, best first.
 
     `cube_frame` is the cube's upright frame from perception (see
-    :func:`upright_cube_frame`); candidates are returned relative to it, so the pick
-    can re-target them when the visual servo refines the pose. `frame` is the wrist
-    RGB-D frame the estimate came from, for generators that work on depth.
+    :func:`upright_cube_frame`); candidates are returned relative to it, so the pick can
+    re-target them when the visual servo refines the pose. `frame` is the wrist RGB-D
+    frame the estimate came from, for generators that work on depth.
     """
 
     name: str

@@ -101,7 +101,9 @@ class CubePoseEstimator(Protocol):
 
     name: str
 
-    def estimate(self, frame: RGBDFrame, prior: CubePrior) -> CubeEstimate | PerceptionFailure:
+    def estimate(
+        self, frame: RGBDFrame, prior: CubePrior
+    ) -> CubeEstimate | PerceptionFailure:
         """The cube's pose, or why there is none."""
 
 
@@ -109,7 +111,10 @@ def prior_prompt(
     frame: RGBDFrame, prior: CubePrior
 ) -> tuple[FloatArray, FloatArray, float] | None:
     """The prior's projection: pixel centre, a box covering its uncertainty, and the
-    expected pixel area of the cube. None if it is behind the camera or out of view."""
+    expected pixel area of the cube.
+
+    None if it is behind the camera or out of view.
+    """
     uv, z = frame.project_world(prior.position[None])
     if z[0] <= 0.05:
         return None
@@ -117,16 +122,25 @@ def prior_prompt(
     centre = uv[0]
     radius_px = (prior.size * 0.9 + prior.sigma) * intr.fx / z[0]
     box = np.array(
-        [centre[0] - radius_px, centre[1] - radius_px, centre[0] + radius_px, centre[1] + radius_px]
+        [
+            centre[0] - radius_px,
+            centre[1] - radius_px,
+            centre[0] + radius_px,
+            centre[1] + radius_px,
+        ]
     )
-    box = np.clip(box, 0, [intr.width - 1, intr.height - 1, intr.width - 1, intr.height - 1])
+    box = np.clip(
+        box, 0, [intr.width - 1, intr.height - 1, intr.width - 1, intr.height - 1]
+    )
     if box[2] - box[0] < 4 or box[3] - box[1] < 4:
         return None
     area = (prior.size * intr.fx / z[0]) ** 2
     return centre, box, float(area)
 
 
-def depth_prompt(frame: RGBDFrame, prior: CubePrior) -> tuple[FloatArray, FloatArray] | None:
+def depth_prompt(
+    frame: RGBDFrame, prior: CubePrior
+) -> tuple[FloatArray, FloatArray] | None:
     """Where the cube is in the image, from depth alone: the compact blob, inside the
     prior's window, of points standing 0.3-1.3 cube edges above a known support.
 
@@ -160,16 +174,25 @@ def depth_prompt(frame: RGBDFrame, prior: CubePrior) -> tuple[FloatArray, FloatA
         w, h = stats[label, cv.CC_STAT_WIDTH], stats[label, cv.CC_STAT_HEIGHT]
         fill = pixels_in / max(w * h, 1)
         # Compact, cube-sized, near the prior.
-        score = fill - abs(np.log(pixels_in / area)) - np.linalg.norm(centroids[label] - centre_px) / max(np.sqrt(area), 1)
+        score = (
+            fill
+            - abs(np.log(pixels_in / area))
+            - np.linalg.norm(centroids[label] - centre_px) / max(np.sqrt(area), 1)
+        )
         if score > best_score:
             best, best_score = label, score
     if best is None:
         return None
-    x, y, w, h = (stats[best, k] for k in (cv.CC_STAT_LEFT, cv.CC_STAT_TOP, cv.CC_STAT_WIDTH, cv.CC_STAT_HEIGHT))
+    x, y, w, h = (
+        stats[best, k]
+        for k in (cv.CC_STAT_LEFT, cv.CC_STAT_TOP, cv.CC_STAT_WIDTH, cv.CC_STAT_HEIGHT)
+    )
     pad = 0.15 * max(w, h)
     box = np.array([x - pad, y - pad, x + w + pad, y + h + pad], dtype=float)
     intr = frame.intrinsics
-    box = np.clip(box, 0, [intr.width - 1, intr.height - 1, intr.width - 1, intr.height - 1])
+    box = np.clip(
+        box, 0, [intr.width - 1, intr.height - 1, intr.width - 1, intr.height - 1]
+    )
     ys, xs = np.nonzero(labels == best)
     # The blob pixel nearest its centroid, so the point prompt lands on the cube.
     i = int(np.argmin((xs - centroids[best][0]) ** 2 + (ys - centroids[best][1]) ** 2))
@@ -180,8 +203,8 @@ def depth_prompt(frame: RGBDFrame, prior: CubePrior) -> tuple[FloatArray, FloatA
 class ColourSegmenter:
     """Threshold the cube's known colour inside the prior's projected box.
 
-    A deliberately simple baseline (and a fallback when no GPU is reachable): it
-    needs the cube's colour, and it assumes nothing else of that colour sits near it.
+    A deliberately simple baseline (and a fallback when no GPU is reachable): it needs
+    the cube's colour, and it assumes nothing else of that colour sits near it.
     """
 
     hue_tolerance: float = 12.0
@@ -199,8 +222,10 @@ class ColourSegmenter:
         target_hue = float(cv.cvtColor(target, cv.COLOR_RGB2HSV)[0, 0, 0])
         hue = hsv[..., 0].astype(float)
         diff = np.minimum(np.abs(hue - target_hue), 180 - np.abs(hue - target_hue))
-        mask = (diff < self.hue_tolerance) & (hsv[..., 1] >= self.min_saturation) & (
-            hsv[..., 2] >= self.min_value
+        mask = (
+            (diff < self.hue_tolerance)
+            & (hsv[..., 1] >= self.min_saturation)
+            & (hsv[..., 2] >= self.min_value)
         )
         window = np.zeros_like(mask)
         x0, y0, x1, y1 = box.astype(int)
@@ -215,7 +240,9 @@ class ColourSegmenter:
 class PerceptionClient:
     """Socket client for `perception_server.py` (SAM 2 and FoundationPose)."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 50111, timeout: float = 120.0):
+    def __init__(
+        self, host: str = "127.0.0.1", port: int = 50111, timeout: float = 120.0
+    ):
         self._address = (host, port)
         self._timeout = timeout
         self._sock: socket.socket | None = None
@@ -242,8 +269,8 @@ class PerceptionClient:
 class Sam2Segmenter:
     """SAM 2 prompted with the prior's projection (a point and a box).
 
-    Of SAM 2's multimask outputs, the best-scoring mask whose area is within a factor
-    of `area_tolerance` of the expected projected cube area wins.
+    Of SAM 2's multimask outputs, the best-scoring mask whose area is within a factor of
+    `area_tolerance` of the expected projected cube area wins.
     """
 
     client: PerceptionClient
@@ -280,13 +307,16 @@ class Sam2Segmenter:
                 if component is not None:
                     plausible.append(component)
         if not plausible:
-            return PerceptionFailure("no sam2 mask of a plausible size", masks[0] if len(masks) else None)
+            return PerceptionFailure(
+                "no sam2 mask of a plausible size", masks[0] if len(masks) else None
+            )
         if len(plausible) == 1:
             return plausible[0]
         # SAM 2's best-scored mask is often one face of the cube, or the cube with a
         # patch of floor; keep the mask whose depth points look most like one cube.
         return max(
-            plausible, key=lambda m: _cube_likeness(frame, m, prior.size, prior.support_heights)
+            plausible,
+            key=lambda m: _cube_likeness(frame, m, prior.size, prior.support_heights),
         )
 
 
@@ -300,7 +330,9 @@ class DepthFitEstimator:
     min_inlier_fraction: float = 0.6
     name: str = "depthfit"
 
-    def estimate(self, frame: RGBDFrame, prior: CubePrior) -> CubeEstimate | PerceptionFailure:
+    def estimate(
+        self, frame: RGBDFrame, prior: CubePrior
+    ) -> CubeEstimate | PerceptionFailure:
         mask = self.segmenter.segment(frame, prior)
         if isinstance(mask, PerceptionFailure):
             return mask
@@ -325,7 +357,10 @@ class DepthFitEstimator:
             "inliers": fit.inlier_fraction,
             "points": float(fit.num_points),
         }
-        if fit.rms_residual > self.max_rms or fit.inlier_fraction < self.min_inlier_fraction:
+        if (
+            fit.rms_residual > self.max_rms
+            or fit.inlier_fraction < self.min_inlier_fraction
+        ):
             return PerceptionFailure(f"depth fit rejected: {quality}", mask)
         return _gate(
             CubeEstimate(
@@ -350,7 +385,9 @@ class FoundationPoseEstimator:
     iterations: int = 5
     name: str = "foundationpose"
 
-    def estimate(self, frame: RGBDFrame, prior: CubePrior) -> CubeEstimate | PerceptionFailure:
+    def estimate(
+        self, frame: RGBDFrame, prior: CubePrior
+    ) -> CubeEstimate | PerceptionFailure:
         mask = self.segmenter.segment(frame, prior)
         if isinstance(mask, PerceptionFailure):
             return mask
@@ -368,8 +405,12 @@ class FoundationPoseEstimator:
             }
         )
         if not reply.get("ok"):
-            return PerceptionFailure(f"foundationpose error: {reply.get('error')}", mask)
-        world_from_cube = frame.world_from_camera @ np.asarray(reply["pose"], dtype=float)
+            return PerceptionFailure(
+                f"foundationpose error: {reply.get('error')}", mask
+            )
+        world_from_cube = frame.world_from_camera @ np.asarray(
+            reply["pose"], dtype=float
+        )
         yaw, up = cube_yaw_and_up(world_from_cube[:3, :3])
         return _gate(
             CubeEstimate(
@@ -395,7 +436,10 @@ def _cube_likeness(
         return -1.0
     try:
         fit = fit_cube(
-            points=points, size=size, viewpoint=frame.world_from_camera[:3, 3], support_z=supports
+            points=points,
+            size=size,
+            viewpoint=frame.world_from_camera[:3, 3],
+            support_z=supports,
         )
     except CubeFitError:
         return -1.0
@@ -408,13 +452,17 @@ def _gate(estimate: CubeEstimate, prior: CubePrior) -> CubeEstimate | Perception
     """Reject an estimate implausibly far from the prior."""
     offset = float(np.linalg.norm(estimate.position - prior.position))
     if offset > 3 * prior.sigma + prior.size:
-        return PerceptionFailure(f"estimate {offset:.3f} m from the prior", estimate.mask)
+        return PerceptionFailure(
+            f"estimate {offset:.3f} m from the prior", estimate.mask
+        )
     return estimate
 
 
 def _largest_component(mask: Mask, centre: FloatArray) -> Mask | None:
     """The connected component containing (or nearest) `centre`."""
-    count, labels, stats, centroids = cv.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+    count, labels, stats, centroids = cv.connectedComponentsWithStats(
+        mask.astype(np.uint8), 8
+    )
     if count <= 1:
         return None
     u, v = int(round(centre[0])), int(round(centre[1]))

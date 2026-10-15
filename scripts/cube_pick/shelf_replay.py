@@ -48,9 +48,14 @@ class ShelfSim:
 
     def __init__(self, perception_port: int, grasp_port: int) -> None:
         self.env = harness.kinder.make(
-            "kinder/SweepOffShelf3D-o5-v0", render_mode="rgb_array", scene_bg=True, allow_state_access=True
+            "kinder/SweepOffShelf3D-o5-v0",
+            render_mode="rgb_array",
+            scene_bg=True,
+            allow_state_access=True,
         )
-        self.oc = self.env.unwrapped._object_centric_env  # pylint: disable=protected-access
+        self.oc = (
+            self.env.unwrapped._object_centric_env
+        )  # pylint: disable=protected-access
         self.env.reset(seed=0)
         self.sim = self.oc._robot_env.sim  # pylint: disable=protected-access
         self.model = self.sim.model.mj_model
@@ -61,7 +66,12 @@ class ShelfSim:
         self.tossing._clients = {}  # pylint: disable=protected-access
         self._pads = {
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, n)
-            for n in ("robot_left_pad1", "robot_left_pad2", "robot_right_pad1", "robot_right_pad2")
+            for n in (
+                "robot_left_pad1",
+                "robot_left_pad2",
+                "robot_right_pad1",
+                "robot_right_pad2",
+            )
         }
 
     def restore(self, row: dict[str, Any]) -> Any:
@@ -72,7 +82,9 @@ class ShelfSim:
         mujoco.mj_forward(self.model, self.data)
         # The object-centric env caches its state at each step; refresh it from the
         # restored MuJoCo data.
-        self.oc._current_state = self.oc._get_object_centric_state()  # pylint: disable=protected-access
+        self.oc._current_state = (
+            self.oc._get_object_centric_state()
+        )  # pylint: disable=protected-access
         return self.live()
 
     def live(self) -> Any:
@@ -88,7 +100,9 @@ class ShelfSim:
         for c in self.data.contact[: self.data.ncon]:
             pair = {int(c.geom1), int(c.geom2)}
             if pair & geoms and pair & self._pads:
-                name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, (pair & self._pads).pop())
+                name = mujoco.mj_id2name(
+                    self.model, mujoco.mjtObj.mjOBJ_GEOM, (pair & self._pads).pop()
+                )
                 left |= "left" in name
                 right |= "right" in name
         state = self.live()
@@ -101,17 +115,28 @@ class ShelfSim:
         }
 
     def box_spec(self, state: Any) -> Any:
-        from scipy.spatial.transform import Rotation  # pylint: disable=import-outside-toplevel
+        from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
+            Rotation,
+        )
 
         obj = state.get_object_from_name(BOX)
         pose = np.eye(4)
-        pose[:3, :3] = Rotation.from_quat([state.get(obj, k) for k in ("qx", "qy", "qz", "qw")]).as_matrix()
+        pose[:3, :3] = Rotation.from_quat(
+            [state.get(obj, k) for k in ("qx", "qy", "qz", "qw")]
+        ).as_matrix()
         pose[:3, 3] = [state.get(obj, k) for k in ("x", "y", "z")]
         d = BOX_DIMENSIONS
-        return harness.ContainerSpec(BOX, pose, d["length"], d["width"], d["height"], d["wall_thickness"]), pose
+        return (
+            harness.ContainerSpec(
+                BOX, pose, d["length"], d["width"], d["height"], d["wall_thickness"]
+            ),
+            pose,
+        )
 
     def support_heights(self, state: Any) -> tuple[Any, ...]:
-        from prpl_tidybot.cube_pick.cube_fit import SupportSurface  # pylint: disable=import-outside-toplevel
+        from prpl_tidybot.cube_pick.cube_fit import (  # pylint: disable=import-outside-toplevel
+            SupportSurface,
+        )
 
         spec, pose = self.box_spec(state)
         yaw = float(np.arctan2(pose[1, 0], pose[0, 0]))
@@ -120,7 +145,10 @@ class ShelfSim:
             SupportSurface(
                 z=float(pose[2, 3]) + spec.wall_thickness,
                 centre=(float(pose[0, 3]), float(pose[1, 3])),
-                half_extents=(spec.length / 2 - spec.wall_thickness, spec.width / 2 - spec.wall_thickness),
+                half_extents=(
+                    spec.length / 2 - spec.wall_thickness,
+                    spec.width / 2 - spec.wall_thickness,
+                ),
                 yaw=yaw,
             ),
         )
@@ -129,8 +157,12 @@ class ShelfSim:
         from kinder_models.dynamic3d.tossing.parameterized_skills import (  # pylint: disable=import-outside-toplevel
             PickCubeController,
         )
-        from kinder_models.dynamic3d.utils import PyBulletSim  # pylint: disable=import-outside-toplevel
-        from pybullet_helpers.geometry import Pose  # pylint: disable=import-outside-toplevel
+        from kinder_models.dynamic3d.utils import (  # pylint: disable=import-outside-toplevel
+            PyBulletSim,
+        )
+        from pybullet_helpers.geometry import (  # pylint: disable=import-outside-toplevel
+            Pose,
+        )
 
         state = self.restore(row)
         start_z = float(state.get(state.get_object_from_name(cube), "z"))
@@ -146,15 +178,24 @@ class ShelfSim:
         )
         robot = next(o for o in state if o.type.name == "mujoco_tidybot_robot")
         try:
-            pick = PickCubeController(objects=[robot, state.get_object_from_name(cube)], pybullet_sim=sim)
-            pick.HELD_OBJECT_COLLISION_THRESHOLD = pick.BIN_HELD_OBJECT_COLLISION_THRESHOLD
+            pick = PickCubeController(
+                objects=[robot, state.get_object_from_name(cube)], pybullet_sim=sim
+            )
+            pick.HELD_OBJECT_COLLISION_THRESHOLD = (
+                pick.BIN_HELD_OBJECT_COLLISION_THRESHOLD
+            )
             try:
                 pick.reset(state, np.zeros(0))
             except BaseException as exc:  # noqa: BLE001
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
                 stage = "filter" if "grasp" in str(exc).lower() else "plan"
-                return {"success": False, "stage": stage, "detail": f"{type(exc).__name__}: {exc}", "ticks": 0}
+                return {
+                    "success": False,
+                    "stage": stage,
+                    "detail": f"{type(exc).__name__}: {exc}",
+                    "ticks": 0,
+                }
             error = None
             ticks = 0
             for ticks in range(1, self.OLD_STEP_LIMIT + 1):
@@ -175,7 +216,11 @@ class ShelfSim:
                 stage = None
             elif error:
                 stage = "plan"
-            elif phase in ("OPEN_GRIPPER", "BASE_MOTION", "MOVE_ARM_TO_HOVER_OVER_CUBE"):
+            elif phase in (
+                "OPEN_GRIPPER",
+                "BASE_MOTION",
+                "MOVE_ARM_TO_HOVER_OVER_CUBE",
+            ):
                 stage = "plan"
             elif phase == "MOVE_ARM_DOWN_AROUND_CUBE":
                 stage = "approach"
@@ -183,12 +228,26 @@ class ShelfSim:
                 stage = "close"
             else:
                 stage = "lift"
-            return {"success": success, "stage": stage, "detail": error or f"ended in {phase}", "ticks": ticks, "holding": holding}
+            return {
+                "success": success,
+                "stage": stage,
+                "detail": error or f"ended in {phase}",
+                "ticks": ticks,
+                "holding": holding,
+            }
         finally:
             sim.close()
 
     def run_new(
-        self, row: dict[str, Any], cube: str, *, estimator: str, generator: str, prior_offset: np.ndarray, max_ticks: int, video: Path | None
+        self,
+        row: dict[str, Any],
+        cube: str,
+        *,
+        estimator: str,
+        generator: str,
+        prior_offset: np.ndarray,
+        max_ticks: int,
+        video: Path | None,
     ) -> dict[str, Any]:
         state = self.restore(row)
         obj = state.get_object_from_name(cube)
@@ -208,11 +267,19 @@ class ShelfSim:
             config.generator = self.tossing.generator(generator, size)
         est = self.tossing.estimator(estimator)
         if recorder is not None:
-            est = harness._RecordingEstimator(est, recorder)  # pylint: disable=protected-access
+            est = harness._RecordingEstimator(
+                est, recorder
+            )  # pylint: disable=protected-access
         spec, _ = self.box_spec(state)
-        cube_rgba = tuple(float(v) for v in self.model.geom_rgba[min(self.cube_geoms(cube))])
+        cube_rgba = tuple(
+            float(v) for v in self.model.geom_rgba[min(self.cube_geoms(cube))]
+        )
         prior = harness.CubePrior(
-            position=prior_position, size=size, sigma=0.05, rgba=cube_rgba, support_heights=self.support_heights(state)
+            position=prior_position,
+            size=size,
+            sigma=0.05,
+            rgba=cube_rgba,
+            support_heights=self.support_heights(state),
         )
         policy = harness.CubePickPolicy(
             robot=robot,
@@ -234,12 +301,19 @@ class ShelfSim:
         return {
             "success": success,
             "policy_success": result.success,
-            "stage": None if success else (result.stage or ("lift" if holding["both_pads"] else "close")),
+            "stage": (
+                None
+                if success
+                else (result.stage or ("lift" if holding["both_pads"] else "close"))
+            ),
             "detail": result.detail,
             "ticks": result.ticks,
             "frames": robot.frames_captured,
             "grasp": result.grasp.label if result.grasp else None,
-            "estimate_errors": [float(np.linalg.norm(e.position - true_position)) for e in result.estimates],
+            "estimate_errors": [
+                float(np.linalg.norm(e.position - true_position))
+                for e in result.estimates
+            ],
             "events": [(e.tick, e.stage, e.message) for e in result.events],
             "holding": holding,
         }
@@ -265,7 +339,10 @@ def main() -> None:
     for line in open(args.states):
         row = json.loads(line)
         for case in row["cases"]:
-            if case["skill"] in PICK_SKILLS and (row["state_id"], case["cube"]) not in seen:
+            if (
+                case["skill"] in PICK_SKILLS
+                and (row["state_id"], case["cube"]) not in seen
+            ):
                 seen.add((row["state_id"], case["cube"]))
                 cases.append((row, case))
     k, n = (int(v) for v in args.shard.split("/"))
@@ -284,7 +361,11 @@ def main() -> None:
                 if (cid, arm) in done:
                     continue
                 start = time.time()
-                video = Path(args.video_dir) / f"{row['state_id']}_{arm}" if cid in video_ids and args.video_dir else None
+                video = (
+                    Path(args.video_dir) / f"{row['state_id']}_{arm}"
+                    if cid in video_ids and args.video_dir
+                    else None
+                )
                 try:
                     if arm == "old":
                         record = sim.run_old(row, case["cube"])
@@ -318,7 +399,10 @@ def main() -> None:
                 )
                 out.write(json.dumps(record) + "\n")
                 out.flush()
-                print(f"{cid} {arm}: {'OK ' if record['success'] else 'FAIL'} {record.get('stage')} {str(record.get('detail'))[:120]} ({record['seconds']} s)", flush=True)
+                print(
+                    f"{cid} {arm}: {'OK ' if record['success'] else 'FAIL'} {record.get('stage')} {str(record.get('detail'))[:120]} ({record['seconds']} s)",
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":

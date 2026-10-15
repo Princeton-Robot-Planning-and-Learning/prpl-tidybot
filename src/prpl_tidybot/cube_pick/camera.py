@@ -1,15 +1,15 @@
 """The wrist RGB-D camera, as the pick pipeline sees it on the robot and in simulation.
 
-The Kinova Gen3 vision module carries two sensors: a colour camera, which on our
-robot streams 640x480 through a fisheye lens attachment, and an Intel RealSense depth
-module (480x270, 72 deg diagonal, nothing usable closer than ~20 cm). The pipeline consumes one
+The Kinova Gen3 vision module carries two sensors: a colour camera, which on our robot
+streams 640x480 through a fisheye lens attachment, and an Intel RealSense depth module
+(480x270, 72 deg diagonal, nothing usable closer than ~20 cm). The pipeline consumes one
 :class:`RGBDFrame`: colour, depth already registered onto the colour pixel grid, the
 colour intrinsics, and the colour camera's pose in the world, which the robot knows from
 its own kinematics (forward kinematics plus the hand-eye calibration), not from looking
 at anything.
 
-Everything here is pure numpy so the real robot and the simulator run the same code;
-the simulator only differs in where the raw colour and depth images come from (see
+Everything here is pure numpy so the real robot and the simulator run the same code; the
+simulator only differs in where the raw colour and depth images come from (see
 :mod:`prpl_tidybot.cube_pick.kinder_sim`), and it passes its renders through
 :class:`DepthNoiseModel` so the depth it hands over looks like the sensor's.
 
@@ -89,7 +89,10 @@ class PinholeIntrinsics:
         points = np.asarray(points, dtype=float).reshape(-1, 3)
         z = points[:, 2]
         uv = np.stack(
-            [self.fx * points[:, 0] / z + self.cx, self.fy * points[:, 1] / z + self.cy],
+            [
+                self.fx * points[:, 0] / z + self.cx,
+                self.fy * points[:, 1] / z + self.cy,
+            ],
             axis=1,
         )
         return uv, z
@@ -153,7 +156,10 @@ class FisheyeIntrinsics:
         return uv.reshape(-1, 2)  # type: ignore[no-any-return]
 
     def undistort(
-        self, image: NDArray, pinhole: PinholeIntrinsics, interpolation: int | None = None
+        self,
+        image: NDArray,
+        pinhole: PinholeIntrinsics,
+        interpolation: int | None = None,
     ) -> NDArray:
         """Resample a fisheye image into the virtual pinhole camera `pinhole`."""
         import cv2 as cv  # pylint: disable=import-outside-toplevel
@@ -167,17 +173,24 @@ class FisheyeIntrinsics:
             cv.CV_32FC1,
         )
         return cv.remap(  # type: ignore[no-any-return]
-            image, map1, map2, cv.INTER_LINEAR if interpolation is None else interpolation
+            image,
+            map1,
+            map2,
+            cv.INTER_LINEAR if interpolation is None else interpolation,
         )
 
-    def distort_from_pinhole(self, image: NDArray, source: PinholeIntrinsics) -> NDArray:
+    def distort_from_pinhole(
+        self, image: NDArray, source: PinholeIntrinsics
+    ) -> NDArray:
         """What this fisheye camera sees, resampled from a pinhole render `source` taken
         from the same centre (the simulator renders pinhole images only)."""
         import cv2 as cv  # pylint: disable=import-outside-toplevel
 
         v, u = np.mgrid[0 : self.height, 0 : self.width].astype(np.float64)
         pixels = np.stack([u.ravel(), v.ravel()], axis=1).reshape(-1, 1, 2)
-        rays = cv.fisheye.undistortPoints(pixels, self.matrix, self.coefficients).reshape(-1, 2)
+        rays = cv.fisheye.undistortPoints(
+            pixels, self.matrix, self.coefficients
+        ).reshape(-1, 2)
         map_x = (rays[:, 0] * source.fx + source.cx).reshape(self.height, self.width)
         map_y = (rays[:, 1] * source.fy + source.cy).reshape(self.height, self.width)
         return cv.remap(  # type: ignore[no-any-return]
@@ -225,7 +238,8 @@ class RGBDFrame:
     def points_world(
         self, mask: NDArray[np.bool_] | None = None
     ) -> tuple[FloatArray, NDArray[np.intp]]:
-        """World-frame points of the valid (and masked) depth pixels, and their pixels."""
+        """World-frame points of the valid (and masked) depth pixels, and their
+        pixels."""
         points, pixels = self.intrinsics.depth_to_points(self.depth, mask)
         return transform_points(self.world_from_camera, points), pixels
 
@@ -239,7 +253,9 @@ class RGBDFrame:
         import cv2 as cv  # pylint: disable=import-outside-toplevel
 
         intr = self.intrinsics.scaled(factor)
-        rgb = cv.resize(self.rgb, (intr.width, intr.height), interpolation=cv.INTER_AREA)
+        rgb = cv.resize(
+            self.rgb, (intr.width, intr.height), interpolation=cv.INTER_AREA
+        )
         depth = cv.resize(
             self.depth, (intr.width, intr.height), interpolation=cv.INTER_NEAREST
         )
@@ -251,8 +267,8 @@ class WristCalibration:
     """Everything needed to turn the two raw wrist streams into one RGBDFrame.
 
     On the robot these come from calibration (fisheye intrinsics from a checkerboard,
-    depth intrinsics from the Kortex VisionConfig, the depth-to-colour extrinsics from
-    a joint calibration); in simulation they are the values the renderer used.
+    depth intrinsics from the Kortex VisionConfig, the depth-to-colour extrinsics from a
+    joint calibration); in simulation they are the values the renderer used.
     """
 
     color_fisheye: FisheyeIntrinsics | None
@@ -274,7 +290,9 @@ def assemble_wrist_frame(
     if calibration.color_fisheye is None:
         rgb = color_fisheye_image
     else:
-        rgb = calibration.color_fisheye.undistort(color_fisheye_image, calibration.output)
+        rgb = calibration.color_fisheye.undistort(
+            color_fisheye_image, calibration.output
+        )
     registered = register_depth_to_color(
         depth=depth_image,
         depth_intrinsics=calibration.depth,
@@ -375,7 +393,9 @@ class DepthNoiseModel:
         noisy = depth + self._rng.normal(size=depth.shape) * sigma
         if self.quantization > 0:
             noisy = np.round(noisy / self.quantization) * self.quantization
-        invalid = (depth < self.min_range) | (depth > self.max_range) | ~np.isfinite(depth)
+        invalid = (
+            (depth < self.min_range) | (depth > self.max_range) | ~np.isfinite(depth)
+        )
         invalid |= self._rng.random(depth.shape) < self.dropout
         if self.edge_dropout > 0:
             grad = np.zeros_like(depth)

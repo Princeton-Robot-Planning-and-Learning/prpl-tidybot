@@ -1,11 +1,11 @@
 """A numpy-version-independent message format for the perception server.
 
-The pick pipeline and the perception models run in different Python environments
-(the models need a recent torch and numpy 2; the planner side is pinned to numpy 1),
-so arrays cannot cross the boundary as pickled ``ndarray`` objects: a numpy 2 pickle
-references ``numpy._core``, which numpy 1 cannot import. Messages are therefore
-plain dicts of builtins, with each array replaced by its dtype, shape and raw bytes,
-framed as a 8-byte big-endian length followed by a pickle of that dict.
+The pick pipeline and the perception models run in different Python environments (the
+models need a recent torch and numpy 2; the planner side is pinned to numpy 1), so
+arrays cannot cross the boundary as pickled ``ndarray`` objects: a numpy 2 pickle
+references ``numpy._core``, which numpy 1 cannot import. Messages are therefore plain
+dicts of builtins, with each array replaced by its dtype, shape and raw bytes, framed as
+a 8-byte big-endian length followed by a pickle of that dict.
 """
 
 from __future__ import annotations

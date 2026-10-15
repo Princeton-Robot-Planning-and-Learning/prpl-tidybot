@@ -35,8 +35,8 @@ MIN_POINTS = 30
 
 @dataclass(frozen=True)
 class SupportSurface:
-    """A horizontal surface the cube may rest on, from the robot's map: the floor
-    (no footprint: everywhere) or a container's floor (an oriented rectangle)."""
+    """A horizontal surface the cube may rest on, from the robot's map: the floor (no
+    footprint: everywhere) or a container's floor (an oriented rectangle)."""
 
     z: float
     centre: tuple[float, float] | None = None
@@ -52,7 +52,9 @@ class SupportSurface:
         d = xy - np.asarray(self.centre)
         local_x = c * d[:, 0] + s * d[:, 1]
         local_y = -s * d[:, 0] + c * d[:, 1]
-        return (np.abs(local_x) <= self.half_extents[0]) & (np.abs(local_y) <= self.half_extents[1])
+        return (np.abs(local_x) <= self.half_extents[0]) & (
+            np.abs(local_y) <= self.half_extents[1]
+        )
 
 
 def as_supports(supports: object) -> list[SupportSurface]:
@@ -64,7 +66,9 @@ def as_supports(supports: object) -> list[SupportSurface]:
     return [s if isinstance(s, SupportSurface) else SupportSurface(float(s)) for s in supports]  # type: ignore[union-attr]
 
 
-def height_above_supports(points: FloatArray, supports: Sequence[SupportSurface]) -> FloatArray:
+def height_above_supports(
+    points: FloatArray, supports: Sequence[SupportSurface]
+) -> FloatArray:
     """Each point's height above the highest support under it that it is not below."""
     points = np.asarray(points, dtype=float).reshape(-1, 3)
     above = np.full(len(points), np.inf)
@@ -130,16 +134,18 @@ def fit_cube(
 ) -> CubeFit:
     """Fit a cube of edge `size` to world-frame `points` seen from `viewpoint`.
 
-    `support_z` gives the heights of known horizontal support surfaces (the floor,
-    a container's floor), from the robot's map: points lying on one are dropped as
-    mask leakage, and a fit whose centre sinks below the highest support under it is
-    rejected (a cube "under" the floor explains floor points as well as a real one).
+    `support_z` gives the heights of known horizontal support surfaces (the floor, a
+    container's floor), from the robot's map: points lying on one are dropped as mask
+    leakage, and a fit whose centre sinks below the highest support under it is rejected
+    (a cube "under" the floor explains floor points as well as a real one).
     """
     points = np.asarray(points, dtype=float).reshape(-1, 3)
     points = points[np.all(np.isfinite(points), axis=1)]
     supports = as_supports(support_z)
     for support in supports:
-        on = support.contains(points[:, :2]) & (np.abs(points[:, 2] - support.z) <= 0.004)
+        on = support.contains(points[:, :2]) & (
+            np.abs(points[:, 2] - support.z) <= 0.004
+        )
         points = points[~on]
     if len(points) < MIN_POINTS:
         raise CubeFitError(f"only {len(points)} depth points on the cube")
@@ -154,7 +160,9 @@ def fit_cube(
     rotation, position = _refine(cluster, size, init)
     median_z = float(np.median(cluster[:, 2]))
     below = [
-        sup.z for sup in supports if sup.z < median_z and sup.contains(position[None, :2])[0]
+        sup.z
+        for sup in supports
+        if sup.z < median_z and sup.contains(position[None, :2])[0]
     ]
     if below and position[2] < max(below) + size / 2 - 0.01:
         raise CubeFitError(
@@ -168,9 +176,11 @@ def fit_cube(
         rotation=rotation,
         yaw=yaw,
         up_alignment=alignment,
-        rms_residual=float(np.sqrt(np.mean(residuals[inliers] ** 2)))
-        if inliers.any()
-        else float("inf"),
+        rms_residual=(
+            float(np.sqrt(np.mean(residuals[inliers] ** 2)))
+            if inliers.any()
+            else float("inf")
+        ),
         inlier_fraction=float(inliers.mean()),
         num_points=int(len(cluster)),
     )
@@ -226,7 +236,11 @@ def _refine(
         return _surface_distance(points, rotation, position0 + params[3:], size)
 
     result = least_squares(
-        residual, np.zeros(6), loss="soft_l1", f_scale=0.002, x_scale=[0.1] * 3 + [0.01] * 3
+        residual,
+        np.zeros(6),
+        loss="soft_l1",
+        f_scale=0.002,
+        x_scale=[0.1] * 3 + [0.01] * 3,
     )
     rotation = Rotation.from_rotvec(result.x[:3]).as_matrix() @ rotation0
     return rotation, position0 + result.x[3:]

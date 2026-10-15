@@ -58,7 +58,9 @@ class LearnedGraspGenerator:
         """The detector's name."""
         return self.model
 
-    def candidates(self, *, cube_frame: FloatArray, frame: Any, mask: Any) -> list[GraspCandidate]:
+    def candidates(
+        self, *, cube_frame: FloatArray, frame: Any, mask: Any
+    ) -> list[GraspCandidate]:
         if frame is None:
             return []
         segmap = np.zeros(frame.depth.shape, np.int32)
@@ -90,13 +92,19 @@ class LearnedGraspGenerator:
             approach = world_tool[:3, 2]
             tilt = float(np.arccos(np.clip(-approach[2], -1.0, 1.0)))
             opening = float(
-                np.clip(max(width, self.cube_size) + self.opening_margin, 0.0, self.max_opening)
+                np.clip(
+                    max(width, self.cube_size) + self.opening_margin,
+                    0.0,
+                    self.max_opening,
+                )
             )
             pads = cube_from_tool[:3, 3] + cube_from_tool[:3, 2] * TOOL_TO_PADS
             out.append(
                 GraspCandidate(
                     cube_from_tool=cube_from_tool,
-                    yaw_offset=float(np.arctan2(cube_from_tool[1, 0], cube_from_tool[0, 0])),
+                    yaw_offset=float(
+                        np.arctan2(cube_from_tool[1, 0], cube_from_tool[0, 0])
+                    ),
                     tilt=tilt,
                     opening=opening,
                     depth=float(pads[2]),

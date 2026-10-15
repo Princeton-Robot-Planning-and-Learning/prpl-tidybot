@@ -14,10 +14,14 @@ def _looking_down(height: float) -> np.ndarray:
 
 
 def test_depth_prompt_finds_the_cube_when_the_prior_is_off():
-    intr = PinholeIntrinsics.from_diagonal_fov(width=320, height=240, diagonal_fov_deg=67)
+    intr = PinholeIntrinsics.from_diagonal_fov(
+        width=320, height=240, diagonal_fov_deg=67
+    )
     depth = np.full((240, 320), 0.40, np.float32)
     # A 5 cm cube centred at world (0.03, 0.0): its top face 5 cm nearer the camera.
-    frame = RGBDFrame(np.zeros((240, 320, 3), np.uint8), depth, intr, _looking_down(0.40))
+    frame = RGBDFrame(
+        np.zeros((240, 320, 3), np.uint8), depth, intr, _looking_down(0.40)
+    )
     uv, _ = frame.project_world(np.array([[0.005, -0.025, 0.05], [0.055, 0.025, 0.05]]))
     u0, u1 = sorted(uv[:, 0].astype(int))
     v0, v1 = sorted(uv[:, 1].astype(int))
@@ -29,8 +33,12 @@ def test_depth_prompt_finds_the_cube_when_the_prior_is_off():
 
 
 def test_depth_prompt_gives_up_on_a_flat_view():
-    intr = PinholeIntrinsics.from_diagonal_fov(width=320, height=240, diagonal_fov_deg=67)
+    intr = PinholeIntrinsics.from_diagonal_fov(
+        width=320, height=240, diagonal_fov_deg=67
+    )
     depth = np.full((240, 320), 0.40, np.float32)
-    frame = RGBDFrame(np.zeros((240, 320, 3), np.uint8), depth, intr, _looking_down(0.40))
+    frame = RGBDFrame(
+        np.zeros((240, 320, 3), np.uint8), depth, intr, _looking_down(0.40)
+    )
     prior = CubePrior(position=np.array([0.0, 0.0, 0.025]), size=0.05)
     assert depth_prompt(frame, prior) is None

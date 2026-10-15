@@ -68,7 +68,9 @@ class KinderWristCamera:
             self.render = (
                 self.color
                 if self.fisheye is None
-                else PinholeIntrinsics(width=1280, height=960, fx=600.0, fy=600.0, cx=639.5, cy=479.5)
+                else PinholeIntrinsics(
+                    width=1280, height=960, fx=600.0, fy=600.0, cx=639.5, cy=479.5
+                )
             )
         self._model = self.sim.model.mj_model
         self._data = self.sim.data.mj_data
@@ -94,13 +96,17 @@ class KinderWristCamera:
         world_from_color = self.world_from_camera()
         # Sites are annotations (goal regions drawn as translucent boxes), not things
         # a real camera would see.
-        vopt = self.sim._render_context_offscreen.vopt  # pylint: disable=protected-access
+        vopt = (
+            self.sim._render_context_offscreen.vopt
+        )  # pylint: disable=protected-access
         sitegroup0 = np.array(vopt.sitegroup).copy()
         vopt.sitegroup[:] = 0
         try:
             model.cam_fovy[cam] = self.render.vertical_fov_deg
             rgb = self.sim.render(
-                width=self.render.width, height=self.render.height, camera_name=f"{self.robot_name}_wrist"
+                width=self.render.width,
+                height=self.render.height,
+                camera_name=f"{self.robot_name}_wrist",
             )
             # Move the camera to the depth sensor (its offset is given in the colour
             # camera's OpenCV frame; cam_pos is in the parent body's frame).
@@ -134,7 +140,9 @@ class KinderWristCamera:
         fisheye_rgb = (
             np.ascontiguousarray(rgb)
             if self.fisheye is None
-            else self.fisheye.distort_from_pinhole(np.ascontiguousarray(rgb), self.render)
+            else self.fisheye.distort_from_pinhole(
+                np.ascontiguousarray(rgb), self.render
+            )
         )
         frame = assemble_wrist_frame(
             color_fisheye_image=fisheye_rgb,
@@ -198,7 +206,11 @@ class KinderPickRobot:
         r = self._robot
         driver = float(self.sim.data.mj_data.qpos[self._driver_qpos])
         return Proprio(
-            base=(state.get(r, "pos_base_x"), state.get(r, "pos_base_y"), state.get(r, "pos_base_rot")),
+            base=(
+                state.get(r, "pos_base_x"),
+                state.get(r, "pos_base_y"),
+                state.get(r, "pos_base_rot"),
+            ),
             arm=tuple(state.get(r, f"pos_arm_joint{i + 1}") for i in range(7)),
             gripper_opening=driver_to_opening(driver),
         )
@@ -214,7 +226,9 @@ class KinderPickRobot:
             dx = cmd.base[0] - current.base[0]
             dy = cmd.base[1] - current.base[1]
             drot = (cmd.base[2] - current.base[2] + np.pi) % (2 * np.pi) - np.pi
-            action[0:3] = np.clip([dx, dy, drot], -self.MAX_BASE_STEP, self.MAX_BASE_STEP)
+            action[0:3] = np.clip(
+                [dx, dy, drot], -self.MAX_BASE_STEP, self.MAX_BASE_STEP
+            )
         if cmd.arm is not None:
             error = np.asarray(cmd.arm[:7], dtype=float) - np.asarray(current.arm)
             for i in (0, 2, 4, 6):
@@ -222,7 +236,9 @@ class KinderPickRobot:
             action[3:10] = self.ARM_GAIN * error
         if cmd.gripper is not None:
             self._last_gripper_command = (
-                1.0 if cmd.gripper == GRIPPER_CLOSE else opening_to_command(float(cmd.gripper))
+                1.0
+                if cmd.gripper == GRIPPER_CLOSE
+                else opening_to_command(float(cmd.gripper))
             )
         action[10] = self._last_gripper_command
         self._env.step(action)

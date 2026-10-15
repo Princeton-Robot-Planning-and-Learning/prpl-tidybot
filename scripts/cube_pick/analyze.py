@@ -1,7 +1,8 @@
 """Paired before/after analysis of replayed picks: success/total per state class, exact
 McNemar tests between arms on the shared states, failures by step, and figures.
 
-usage: analyze.py --tossing <jsonl...> --shelf <jsonl...> --out-dir <dir> [--arms a,b,...]
+usage: analyze.py --tossing <jsonl...> --shelf <jsonl...> --out-dir <dir> [--arms
+a,b,...]
 
 An "arm" is (estimator, generator) for the new pipeline, or "old". Rows are paired by
 state id; a test between two arms uses only the states both ran.
@@ -59,7 +60,9 @@ def load(paths: list[str], domain: str) -> list[dict]:
                 rec["group"] = TOSSING_CLASSES.get(rec["d4"], "other")
             else:
                 rec["key"] = rec["id"]
-                rec["cls"] = "box" if rec["skill"] == "ReturnCubeToShelfFromBox" else "floor"
+                rec["cls"] = (
+                    "box" if rec["skill"] == "ReturnCubeToShelfFromBox" else "floor"
+                )
                 rec["group"] = rec["cls"]
             rec["armname"] = arm_name(rec)
             out.append(rec)
@@ -94,7 +97,9 @@ def main() -> None:
                     cell = table[cls][arm]
                     cell[0] += int(bool(rec["success"]))
                     cell[1] += 1
-        report["tables"][domain] = {c: {a: v for a, v in t.items()} for c, t in table.items()}
+        report["tables"][domain] = {
+            c: {a: v for a, v in t.items()} for c, t in table.items()
+        }
         lines.append(f"\n## {domain}\n")
         lines.append("| class | " + " | ".join(arms) + " |")
         lines.append("|---|" + "---|" * len(arms))
@@ -105,23 +110,45 @@ def main() -> None:
                 cells.append(f"{s}/{n}" if n else "-")
             lines.append(f"| {cls} | " + " | ".join(cells) + " |")
         # Paired tests.
-        for group in ("[all]", *sorted({by[k][a]["group"] for k in keys for a in by[k]})):
+        for group in (
+            "[all]",
+            *sorted({by[k][a]["group"] for k in keys for a in by[k]}),
+        ):
             for i, a in enumerate(arms):
                 for b_arm in arms[i + 1 :]:
                     both = [
                         k
                         for k in keys
-                        if a in by[k] and b_arm in by[k] and (group == "[all]" or by[k][a]["group"] == group)
+                        if a in by[k]
+                        and b_arm in by[k]
+                        and (group == "[all]" or by[k][a]["group"] == group)
                     ]
                     if not both:
                         continue
                     sa = sum(by[k][a]["success"] for k in both)
                     sb = sum(by[k][b_arm]["success"] for k in both)
-                    b = sum(by[k][a]["success"] and not by[k][b_arm]["success"] for k in both)
-                    c = sum(by[k][b_arm]["success"] and not by[k][a]["success"] for k in both)
+                    b = sum(
+                        by[k][a]["success"] and not by[k][b_arm]["success"]
+                        for k in both
+                    )
+                    c = sum(
+                        by[k][b_arm]["success"] and not by[k][a]["success"]
+                        for k in both
+                    )
                     p = mcnemar_exact(b, c)
                     report["tests"].append(
-                        {"domain": domain, "group": group, "a": a, "b": b_arm, "n": len(both), "a_success": sa, "b_success": sb, "a_only": b, "b_only": c, "p": p}
+                        {
+                            "domain": domain,
+                            "group": group,
+                            "a": a,
+                            "b": b_arm,
+                            "n": len(both),
+                            "a_success": sa,
+                            "b_success": sb,
+                            "a_only": b,
+                            "b_only": c,
+                            "p": p,
+                        }
                     )
                     lines.append(
                         f"- {domain} {group}: {a} {sa}/{len(both)} vs {b_arm} {sb}/{len(both)}; discordant {b} vs {c}; exact McNemar p = {p:.3g}"
@@ -129,19 +156,30 @@ def main() -> None:
         # Failures by step.
         for arm in arms:
             stages = collections.Counter(
-                by[k][arm]["stage"] for k in keys if arm in by[k] and not by[k][arm]["success"]
+                by[k][arm]["stage"]
+                for k in keys
+                if arm in by[k] and not by[k][arm]["success"]
             )
             report["stages"][f"{domain}/{arm}"] = dict(stages)
             lines.append(f"- {domain} {arm} failures by step: {dict(stages)}")
     (out_dir / f"{args.prefix}-summary.md").write_text("\n".join(lines) + "\n")
     (out_dir / f"{args.prefix}-summary.json").write_text(json.dumps(report, indent=1))
     print("\n".join(lines))
-    for domain, title in (("tossing", "Tossing3D: replayed pick-controller refusals"), ("shelf", "SweepOffShelf3D: replayed cube picks")):
+    for domain, title in (
+        ("tossing", "Tossing3D: replayed pick-controller refusals"),
+        ("shelf", "SweepOffShelf3D: replayed cube picks"),
+    ):
         table = report["tables"].get(domain)
         if not table:
             continue
-        classes = [c for c in sorted(table, key=lambda c: (c.startswith("["), c)) if not c.startswith("[") or c == "[all]"]
-        fig, ax = plt.subplots(figsize=(max(7, 1.6 * len(classes) * max(1, len(arms)) / 2), 4.2))
+        classes = [
+            c
+            for c in sorted(table, key=lambda c: (c.startswith("["), c))
+            if not c.startswith("[") or c == "[all]"
+        ]
+        fig, ax = plt.subplots(
+            figsize=(max(7, 1.6 * len(classes) * max(1, len(arms)) / 2), 4.2)
+        )
         width = 0.8 / len(arms)
         for j, arm in enumerate(arms):
             colour = COLOURS.get(arm, PALETTE[(j - 1) % len(PALETTE)])
@@ -153,7 +191,9 @@ def main() -> None:
                 labels.append(f"{s}/{n}" if n else "")
             ax.bar(xs, ys, width=width * 0.95, color=colour, label=arm)
             for x, y, lab in zip(xs, ys, labels):
-                ax.text(x, y + 0.01, lab, ha="center", va="bottom", fontsize=7, rotation=90)
+                ax.text(
+                    x, y + 0.01, lab, ha="center", va="bottom", fontsize=7, rotation=90
+                )
         ax.set_xticks(range(len(classes)))
         ax.set_xticklabels([c.strip("[]") for c in classes], fontsize=8)
         ax.set_ylabel("picks holding the cube (fraction of states)")

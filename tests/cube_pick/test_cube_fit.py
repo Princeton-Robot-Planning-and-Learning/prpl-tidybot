@@ -16,13 +16,17 @@ SIZE = 0.05
 
 def _pose(x, y, z, yaw_deg, tilt_deg=0.0):
     pose = np.eye(4)
-    pose[:3, :3] = Rotation.from_euler("zx", [yaw_deg, tilt_deg], degrees=True).as_matrix()
+    pose[:3, :3] = Rotation.from_euler(
+        "zx", [yaw_deg, tilt_deg], degrees=True
+    ).as_matrix()
     pose[:3, 3] = [x, y, z]
     return pose
 
 
 def test_yaw_error_mod_90():
-    assert yaw_error_mod_90(np.radians(89), np.radians(1)) == pytest.approx(np.radians(2))
+    assert yaw_error_mod_90(np.radians(89), np.radians(1)) == pytest.approx(
+        np.radians(2)
+    )
     assert yaw_error_mod_90(np.radians(45), np.radians(-45)) == pytest.approx(0.0)
 
 
@@ -114,5 +118,7 @@ def test_a_container_floor_does_not_reject_a_cube_beside_the_container():
         cube_pose=truth, size=SIZE, viewpoint=camera, spacing=0.002, rng=rng
     )
     bin_floor = SupportSurface(z=0.02, centre=(0.5, 0.0), half_extents=(0.13, 0.13))
-    fit = fit_cube(points=points, size=SIZE, viewpoint=camera, support_z=[0.0, bin_floor])
+    fit = fit_cube(
+        points=points, size=SIZE, viewpoint=camera, support_z=[0.0, bin_floor]
+    )
     assert np.linalg.norm(fit.position - truth[:3, 3]) < 0.004

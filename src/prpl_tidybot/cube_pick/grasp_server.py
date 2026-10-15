@@ -129,7 +129,9 @@ class RequestValidator:
         T = req.get("T_world_cam")
         if isinstance(T, str):
             if T != "fit_plane":
-                raise ValueError(f"T_world_cam must be a 4x4 array or 'fit_plane': {T!r}")
+                raise ValueError(
+                    f"T_world_cam must be a 4x4 array or 'fit_plane': {T!r}"
+                )
         elif T is not None:
             T = np.asarray(T, dtype=np.float64)
             if T.shape != (4, 4):
@@ -159,10 +161,20 @@ class Worker:
         parent, child = socket.socketpair()
         python = args.cgn_python if model == "contact_graspnet" else args.m2t2_python
         cmd = [
-            python, os.path.abspath(__file__), "--worker", model,
-            "--worker-fd", str(child.fileno()),
-            "--m2t2-dir", args.m2t2_dir, "--m2t2-ckpt", args.m2t2_ckpt,
-            "--cgn-dir", args.cgn_dir, "--cgn-ckpt-dir", args.cgn_ckpt_dir,
+            python,
+            os.path.abspath(__file__),
+            "--worker",
+            model,
+            "--worker-fd",
+            str(child.fileno()),
+            "--m2t2-dir",
+            args.m2t2_dir,
+            "--m2t2-ckpt",
+            args.m2t2_ckpt,
+            "--cgn-dir",
+            args.cgn_dir,
+            "--cgn-ckpt-dir",
+            args.cgn_ckpt_dir,
         ]
         env = dict(os.environ)
         if model == "contact_graspnet":
@@ -172,7 +184,9 @@ class Worker:
             # TF 2.20 wheels carry no sm_120 code for their MLIR-generated elementwise
             # kernels (cuLaunchKernel -> CUDA_ERROR_INVALID_HANDLE on the RTX 5090), so
             # every op XLA can take is compiled by XLA, which targets sm_120 itself.
-            env.setdefault("TF_XLA_FLAGS", "--tf_xla_auto_jit=2 --tf_xla_min_cluster_size=1")
+            env.setdefault(
+                "TF_XLA_FLAGS", "--tf_xla_auto_jit=2 --tf_xla_min_cluster_size=1"
+            )
             # The PointNet++ custom ops launch on the legacy default stream, not TF's
             # stream; without serialised launches the second inference reads
             # unfinished buffers and every score comes back NaN.
@@ -211,9 +225,15 @@ class Worker:
 def _gpu_mem_mib(pid: int) -> int | None:
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,used_memory",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10, check=True,
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
         ).stdout
     except Exception:  # noqa: BLE001  (memory reporting is best effort)
         return None
@@ -257,7 +277,8 @@ class GraspServer:
                 "models": list(MODELS),
                 "workers": {
                     m: {"pid": w.proc.pid, "gpu_mem_mib": _gpu_mem_mib(w.proc.pid)}
-                    for m, w in self.workers.items() if w.alive()
+                    for m, w in self.workers.items()
+                    if w.alive()
                 },
             }
         if op == "release":
@@ -287,7 +308,10 @@ class GraspServer:
         contacts = contacts[order] if len(contacts) == len(scores) else contacts[:0]
         out = dict(reply)
         out.update(
-            poses=poses, scores=scores[order], widths=widths, contacts=contacts,
+            poses=poses,
+            scores=scores[order],
+            widths=widths,
+            contacts=contacts,
             num_raw=int(len(scores)),
         )
         return out
@@ -318,10 +342,14 @@ class GraspServer:
                 except ConnectionError:
                     _log("client disconnected")
                     return False
-                except Exception as exc:  # noqa: BLE001  (unreadable frame: resync impossible)
+                except (
+                    Exception
+                ) as exc:  # noqa: BLE001  (unreadable frame: resync impossible)
                     _log(f"bad frame, dropping connection: {exc!r}")
                     try:
-                        wire.send_message(conn, {"ok": False, "error": f"bad frame: {exc!r}"})
+                        wire.send_message(
+                            conn, {"ok": False, "error": f"bad frame: {exc!r}"}
+                        )
                     except OSError:
                         pass
                     return False
@@ -360,9 +388,9 @@ class DepthCloud:
     """Back-projection shared by both backends (OpenCV camera axes)."""
 
     @staticmethod
-    def points(*, depth: np.ndarray, K: np.ndarray, z_range: list[float]) -> tuple[
-        np.ndarray, np.ndarray
-    ]:
+    def points(
+        *, depth: np.ndarray, K: np.ndarray, z_range: list[float]
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Returns (Nx3 camera-frame points, N flat pixel indices)."""
         v, u = np.nonzero((depth > z_range[0]) & (depth < z_range[1]))
         z = depth[v, u].astype(np.float64)
@@ -388,7 +416,8 @@ class ContactGraspNetBackend:
             tf.config.experimental.set_memory_growth(gpu, True)
         sys.path.insert(0, os.path.join(repo, "contact_graspnet"))
         import config_utils  # type: ignore[import-not-found]
-        from contact_grasp_estimator import GraspEstimator  # type: ignore[import-not-found]
+        from contact_grasp_estimator import (
+            GraspEstimator,)  # type: ignore[import-not-found]
 
         self.tf = tf
         self.cfg = config_utils.load_config(ckpt_dir, batch_size=1)
@@ -408,14 +437,21 @@ class ContactGraspNetBackend:
         use_seg = segmap is not None
         depth = np.array(req["depth"], dtype=np.float32)
         pc_full, pc_segments, _ = self.estimator.extract_point_clouds(
-            depth, req["K"], segmap=segmap, segmap_id=target if use_seg else 0,
+            depth,
+            req["K"],
+            segmap=segmap,
+            segmap_id=target if use_seg else 0,
             z_range=req["z_range"],
         )
         if use_seg and len(pc_segments.get(target, [])) == 0:
             raise ValueError("target segment has no points inside z_range")
         poses, scores, contacts, widths = self.estimator.predict_scene_grasps(
-            self.sess, pc_full, pc_segments=pc_segments, local_regions=use_seg,
-            filter_grasps=use_seg, forward_passes=req["forward_passes"],
+            self.sess,
+            pc_full,
+            pc_segments=pc_segments,
+            local_regions=use_seg,
+            filter_grasps=use_seg,
+            forward_passes=req["forward_passes"],
         )
         key = target if use_seg else -1
         return {
@@ -443,12 +479,17 @@ class M2T2Backend:
 
         sys.path.insert(0, repo)
         from m2t2.dataset import collate  # type: ignore[import-not-found]
-        from m2t2.dataset_utils import normalize_rgb, sample_points  # type: ignore[import-not-found]  # noqa: E501
+        from m2t2.dataset_utils import (  # type: ignore[import-not-found]  # noqa: E501
+            normalize_rgb,
+            sample_points,
+        )
         from m2t2.m2t2 import M2T2  # type: ignore[import-not-found]
 
         self.torch = torch
         self.collate, self.normalize_rgb, self.sample_points = (
-            collate, normalize_rgb, sample_points,
+            collate,
+            normalize_rgb,
+            sample_points,
         )
         self.cfg = OmegaConf.load(os.path.join(repo, "config.yaml"))
         model = M2T2.from_config(self.cfg.m2t2)
@@ -479,7 +520,11 @@ class M2T2Backend:
         if d < 0:  # orient the normal toward the camera (the camera is at the origin)
             n, d = -n, -d
         x = np.array([0.0, 0.0, 1.0]) - n * n[2]
-        x = x / np.linalg.norm(x) if np.linalg.norm(x) > 1e-6 else np.cross(n, [1, 0, 0])
+        x = (
+            x / np.linalg.norm(x)
+            if np.linalg.norm(x) > 1e-6
+            else np.cross(n, [1, 0, 0])
+        )
         y = np.cross(n, x)
         R_cw = np.stack([x, y, n])  # rows: world axes in camera coordinates
         T = np.eye(4)
@@ -489,7 +534,9 @@ class M2T2Backend:
 
     def grasps(self, req: dict[str, Any]) -> dict[str, Any]:
         torch = self.torch
-        pts_cam, pix = DepthCloud.points(depth=req["depth"], K=req["K"], z_range=req["z_range"])
+        pts_cam, pix = DepthCloud.points(
+            depth=req["depth"], K=req["K"], z_range=req["z_range"]
+        )
         T_wc = req["T_world_cam"]
         frame = "given"
         if isinstance(T_wc, str):
@@ -500,7 +547,9 @@ class M2T2Backend:
             xyz[np.abs(xyz[:, 2]) < req["surface_range"], 2] = 0
         xyz_t = torch.from_numpy(xyz).float()
         if req["rgb"] is not None:
-            rgb_img = self.normalize_rgb(np.ascontiguousarray(req["rgb"])).permute(1, 2, 0)
+            rgb_img = self.normalize_rgb(np.ascontiguousarray(req["rgb"])).permute(
+                1, 2, 0
+            )
             rgb = rgb_img.reshape(-1, 3)[torch.from_numpy(pix)]
         else:
             rgb = torch.zeros(len(xyz), 3)
@@ -514,10 +563,15 @@ class M2T2Backend:
         for _ in range(req["forward_passes"]):
             idx = self.sample_points(xyz_t, self.cfg.data.num_points)
             data = {
-                "inputs": inputs[idx], "points": xyz_t[idx], "seg": torch.zeros(len(idx)),
+                "inputs": inputs[idx],
+                "points": xyz_t[idx],
+                "seg": torch.zeros(len(idx)),
                 "object_inputs": torch.rand(self.cfg.data.num_object_points, 6),
-                "ee_pose": torch.eye(4), "bottom_center": torch.zeros(3),
-                "object_center": torch.zeros(3), "cam_pose": torch.eye(4), "task": "pick",
+                "ee_pose": torch.eye(4),
+                "bottom_center": torch.zeros(3),
+                "object_center": torch.zeros(3),
+                "cam_pose": torch.eye(4),
+                "task": "pick",
             }
             batch = self.collate([data])
             for k, v in batch.items():
@@ -525,9 +579,13 @@ class M2T2Backend:
                     batch[k] = v.cuda()
             with torch.no_grad():
                 out = self.model.infer(batch, eval_cfg)
-            for i, (g, c, p) in enumerate(zip(
-                out["grasps"][0], out["grasp_confidence"][0], out["grasp_contacts"][0]
-            )):
+            for i, (g, c, p) in enumerate(
+                zip(
+                    out["grasps"][0],
+                    out["grasp_confidence"][0],
+                    out["grasp_contacts"][0],
+                )
+            ):
                 g_all.append(g.double().cpu().numpy())
                 c_all.append(c.double().cpu().numpy())
                 p_all.append(p.double().cpu().numpy())
@@ -552,12 +610,20 @@ class M2T2Backend:
         # predicted opening is recoverable exactly as 2 * x . (origin - contact).
         widths = 2 * np.einsum("ni,ni->n", poses[:, :3, 0], poses[:, :3, 3] - contacts)
         return {
-            "ok": True, "poses": poses, "scores": scores, "widths": widths,
-            "contacts": contacts, "convention": dict(_PANDA),
+            "ok": True,
+            "poses": poses,
+            "scores": scores,
+            "widths": widths,
+            "contacts": contacts,
+            "convention": dict(_PANDA),
             "info": {
-                "implementation": "NVlabs/M2T2 (PyTorch)", "checkpoint": self.ckpt,
-                "frame": frame, "T_world_cam": T_wc, "object_query": objects,
-                "mask_thresh": req["mask_thresh"], "uses_rgb": bool(self.cfg.m2t2.scene_encoder.use_rgb),  # noqa: E501
+                "implementation": "NVlabs/M2T2 (PyTorch)",
+                "checkpoint": self.ckpt,
+                "frame": frame,
+                "T_world_cam": T_wc,
+                "object_query": objects,
+                "mask_thresh": req["mask_thresh"],
+                "uses_rgb": bool(self.cfg.m2t2.scene_encoder.use_rgb),  # noqa: E501
             },
         }
 
@@ -567,7 +633,9 @@ def run_worker(args: argparse.Namespace) -> None:
     t0 = time.perf_counter()
     try:
         if args.worker == "contact_graspnet":
-            backend: Any = ContactGraspNetBackend(repo=args.cgn_dir, ckpt_dir=args.cgn_ckpt_dir)
+            backend: Any = ContactGraspNetBackend(
+                repo=args.cgn_dir, ckpt_dir=args.cgn_ckpt_dir
+            )
         else:
             backend = M2T2Backend(repo=args.m2t2_dir, ckpt=args.m2t2_ckpt)
     except Exception as exc:  # noqa: BLE001  (reported to the parent, then exit)
@@ -600,8 +668,12 @@ def main() -> None:
     p.add_argument("--m2t2-ckpt", default=_DEFAULTS["m2t2_ckpt"])
     p.add_argument("--cgn-dir", default=_DEFAULTS["cgn_dir"])
     p.add_argument("--cgn-ckpt-dir", default=_DEFAULTS["cgn_ckpt_dir"])
-    p.add_argument("--worker-timeout", type=float, default=900.0,
-                   help="seconds to wait for a worker to load or answer")
+    p.add_argument(
+        "--worker-timeout",
+        type=float,
+        default=900.0,
+        help="seconds to wait for a worker to load or answer",
+    )
     p.add_argument("--worker", choices=MODELS, help=argparse.SUPPRESS)
     p.add_argument("--worker-fd", type=int, help=argparse.SUPPRESS)
     args = p.parse_args()

@@ -1,8 +1,8 @@
 """Shared simulation harness for the cube-pick evaluations (Tossing3D scene).
 
-Owns one live KINDER `Tossing3D-o1` env, restores recorded states into it, runs the
-old KINDER pick or the new pipeline, scores the result on ground truth, and
-optionally records a lab2 video with the wrist view beside it.
+Owns one live KINDER `Tossing3D-o1` env, restores recorded states into it, runs the old
+KINDER pick or the new pipeline, scores the result on ground truth, and optionally
+records a lab2 video with the wrist view beside it.
 """
 
 from __future__ import annotations
@@ -43,7 +43,14 @@ from prpl_tidybot.cube_pick.policy import CubePickPolicy, PickConfig  # noqa: E4
 
 CUBE = "cube_0"
 # Failures before anything is executed: the record and a still, no video.
-PLAN_TIME_STAGES = ("look", "perceive", "propose", "filter", "plan", "no_grasp_candidate")
+PLAN_TIME_STAGES = (
+    "look",
+    "perceive",
+    "propose",
+    "filter",
+    "plan",
+    "no_grasp_candidate",
+)
 BIN = "bin_0"
 BARRIER = "cuboid_barrier"
 
@@ -61,7 +68,9 @@ def parse_rows(spec: str, n: int) -> list[int]:
 class VideoRecorder:
     """Scene (free camera following the gripper) | wrist view, written with libx264."""
 
-    def __init__(self, sim: Any, out_dir: Path, robot_name: str = "robot", every: int = 2) -> None:
+    def __init__(
+        self, sim: Any, out_dir: Path, robot_name: str = "robot", every: int = 2
+    ) -> None:
         self.sim = sim
         self.out_dir = out_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -71,7 +80,9 @@ class VideoRecorder:
         self.every = every
         self.count = 0
         model = sim.model.mj_model
-        self._site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{robot_name}_pinch_site")
+        self._site = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_SITE, f"{robot_name}_pinch_site"
+        )
         self._wrist = f"{robot_name}_wrist"
         self.overlay: dict[str, Any] = {}
         self._lookat: np.ndarray | None = None
@@ -81,7 +92,9 @@ class VideoRecorder:
         data = self.sim.data.mj_data
         target = np.array(data.site_xpos[self._site])
         target[2] = max(0.05, target[2] * 0.5)
-        self._lookat = target if self._lookat is None else 0.8 * self._lookat + 0.2 * target
+        self._lookat = (
+            target if self._lookat is None else 0.8 * self._lookat + 0.2 * target
+        )
         ctx.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
         ctx.cam.lookat[:] = self._lookat
         ctx.cam.distance = 1.6
@@ -97,7 +110,9 @@ class VideoRecorder:
         cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, self._wrist)
         fovy0 = float(model.cam_fovy[cid])
         model.cam_fovy[cid] = cam.color.vertical_fov_deg  # undistorted view, for video
-        vopt = self.sim._render_context_offscreen.vopt  # pylint: disable=protected-access
+        vopt = (
+            self.sim._render_context_offscreen.vopt
+        )  # pylint: disable=protected-access
         sitegroup0 = np.array(vopt.sitegroup).copy()
         vopt.sitegroup[:] = 0
         try:
@@ -106,8 +121,15 @@ class VideoRecorder:
             vopt.sitegroup[:] = sitegroup0
             model.cam_fovy[cid] = fovy0
         intr = cam.color
-        frame = RGBDFrame(rgb.copy(), np.zeros((480, 640), np.float32), intr, cam.world_from_camera())
-        return draw_overlay(frame, self.overlay.get("estimate"), self.overlay.get("mask_frame"), self.overlay.get("text", ""))
+        frame = RGBDFrame(
+            rgb.copy(), np.zeros((480, 640), np.float32), intr, cam.world_from_camera()
+        )
+        return draw_overlay(
+            frame,
+            self.overlay.get("estimate"),
+            self.overlay.get("mask_frame"),
+            self.overlay.get("text", ""),
+        )
 
     def __call__(self, robot: KinderPickRobot) -> None:
         self.count += 1
@@ -118,23 +140,41 @@ class VideoRecorder:
         frame = np.concatenate([scene, wrist], axis=1)
         text = self.overlay.get("caption", "")
         if text:
-            cv.putText(frame, text, (10, 470), cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv.LINE_AA)
+            cv.putText(
+                frame,
+                text,
+                (10, 470),
+                cv.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv.LINE_AA,
+            )
         if self._writer is None:
             import imageio.v2 as imageio  # pylint: disable=import-outside-toplevel
 
             self._writer = imageio.get_writer(
-                self.out_dir / "video.mp4", fps=20, codec="libx264", quality=7, macro_block_size=8
+                self.out_dir / "video.mp4",
+                fps=20,
+                codec="libx264",
+                quality=7,
+                macro_block_size=8,
             )
         self._writer.append_data(frame)
         self.count_written += 1
-        self.frames = [frame]  # keep only the latest, so `if recorder.frames` still works
+        self.frames = [
+            frame
+        ]  # keep only the latest, so `if recorder.frames` still works
 
     def write(self, name: str = "video", fps: int = 20) -> Path:
-        """Close the stream (frames were written as they came); keep the last frame
-        as still.png."""
+        """Close the stream (frames were written as they came); keep the last frame as
+        still.png."""
         del name, fps
         if self.frames:
-            cv.imwrite(str(self.out_dir / "still.png"), cv.cvtColor(self.frames[-1], cv.COLOR_RGB2BGR))
+            cv.imwrite(
+                str(self.out_dir / "still.png"),
+                cv.cvtColor(self.frames[-1], cv.COLOR_RGB2BGR),
+            )
         if self._writer is not None:
             self._writer.close()
             self._writer = None
@@ -151,15 +191,26 @@ def draw_overlay(
     img = np.ascontiguousarray(frame.rgb.copy())
     if mask_frame is not None:
         mframe, mask = mask_frame
-        if mask is not None and mask.shape == img.shape[:2] and np.allclose(
-            mframe.world_from_camera, frame.world_from_camera, atol=1e-4
+        if (
+            mask is not None
+            and mask.shape == img.shape[:2]
+            and np.allclose(
+                mframe.world_from_camera, frame.world_from_camera, atol=1e-4
+            )
         ):
-            contours, _ = cv.findContours(mask.astype(np.uint8), cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
+            contours, _ = cv.findContours(
+                mask.astype(np.uint8), cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE
+            )
             cv.drawContours(img, contours, -1, (255, 0, 255), 2)
     if estimate is not None:
         s = estimate.size / 2
-        corners = np.array([[x, y, z] for x in (-s, s) for y in (-s, s) for z in (-s, s)])
-        world = corners @ estimate.world_from_cube[:3, :3].T + estimate.world_from_cube[:3, 3]
+        corners = np.array(
+            [[x, y, z] for x in (-s, s) for y in (-s, s) for z in (-s, s)]
+        )
+        world = (
+            corners @ estimate.world_from_cube[:3, :3].T
+            + estimate.world_from_cube[:3, 3]
+        )
         uv, z = frame.project_world(world)
         if np.all(z > 0.02):
             for i in range(8):
@@ -169,7 +220,16 @@ def draw_overlay(
                         p1 = tuple(int(v) for v in uv[j])
                         cv.line(img, p0, p1, (0, 255, 255), 2, cv.LINE_AA)
     if text:
-        cv.putText(img, text, (8, 20), cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv.LINE_AA)
+        cv.putText(
+            img,
+            text,
+            (8, 20),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+            cv.LINE_AA,
+        )
     return img
 
 
@@ -179,12 +239,19 @@ class TossingSim:
     OLD_STEP_LIMIT = 400  # hitl-pmp's KinderBackend.pick_step_limit
 
     def __init__(
-        self, env_id: str = "kinder/Tossing3D-o1-v0", perception_port: int = 50111, grasp_port: int = 50112
+        self,
+        env_id: str = "kinder/Tossing3D-o1-v0",
+        perception_port: int = 50111,
+        grasp_port: int = 50112,
     ) -> None:
         self.perception_port = perception_port
         self.grasp_port = grasp_port
-        self.env = kinder.make(env_id, render_mode="rgb_array", scene_bg=True, allow_state_access=True)
-        self.oc = self.env.unwrapped._object_centric_env  # pylint: disable=protected-access
+        self.env = kinder.make(
+            env_id, render_mode="rgb_array", scene_bg=True, allow_state_access=True
+        )
+        self.oc = (
+            self.env.unwrapped._object_centric_env
+        )  # pylint: disable=protected-access
         from kinder_models.dynamic3d.tossing.state_abstractions import (  # pylint: disable=import-outside-toplevel
             Tossing3DStateAbstractor,
         )
@@ -193,19 +260,29 @@ class TossingSim:
         self.abstractor = Tossing3DStateAbstractor(self.oc)
         obs, _ = self.env.reset(seed=0)
         self.template = self.env.observation_space.devectorize(obs)
-        self.robot_obj = next(o for o in self.template if o.type.name == "mujoco_tidybot_robot")
+        self.robot_obj = next(
+            o for o in self.template if o.type.name == "mujoco_tidybot_robot"
+        )
         bin_object = self.oc.get_object(BIN)
-        self.bin_dims = (bin_object.length, bin_object.width, bin_object.height, bin_object.wall_thickness)
+        self.bin_dims = (
+            bin_object.length,
+            bin_object.width,
+            bin_object.height,
+            bin_object.wall_thickness,
+        )
         self.sim = self.oc._robot_env.sim  # pylint: disable=protected-access
         self._clients: dict[str, PerceptionClient] = {}
 
     # --- state --------------------------------------------------------------------------
 
     def restore(self, plain: dict[str, list[float]]) -> Any:
-        """Put the scene into a recorded state (float64, colliders from the live model)."""
+        """Put the scene into a recorded state (float64, colliders from the live
+        model)."""
         template = self.template
         by_name = {o.name: o for o in template}
-        data = {o: template[o].copy() for o in template if o.name.startswith("collider:")}
+        data = {
+            o: template[o].copy() for o in template if o.name.startswith("collider:")
+        }
         for name, values in plain.items():
             if name.startswith("collider:") or name not in by_name:
                 continue
@@ -228,7 +305,9 @@ class TossingSim:
 
     def support_heights(self, state: Any) -> tuple[Any, ...]:
         """The floor and, when the bin stands upright, its inner floor (the map)."""
-        from prpl_tidybot.cube_pick.cube_fit import SupportSurface  # pylint: disable=import-outside-toplevel
+        from prpl_tidybot.cube_pick.cube_fit import (  # pylint: disable=import-outside-toplevel
+            SupportSurface,
+        )
 
         obj = state.get_object_from_name(BIN)
         qw, qx, qy, qz = (state.get(obj, k) for k in ("qw", "qx", "qy", "qz"))
@@ -249,23 +328,33 @@ class TossingSim:
 
     def containers(self, state: Any) -> list[ContainerSpec]:
         obj = state.get_object_from_name(BIN)
-        from scipy.spatial.transform import Rotation  # pylint: disable=import-outside-toplevel
+        from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
+            Rotation,
+        )
 
         pose = np.eye(4)
-        pose[:3, :3] = Rotation.from_quat([state.get(obj, k) for k in ("qx", "qy", "qz", "qw")]).as_matrix()
+        pose[:3, :3] = Rotation.from_quat(
+            [state.get(obj, k) for k in ("qx", "qy", "qz", "qw")]
+        ).as_matrix()
         pose[:3, 3] = [state.get(obj, k) for k in ("x", "y", "z")]
         length, width, height, wall = self.bin_dims
         return [ContainerSpec(BIN, pose, length, width, height, wall)]
 
     # --- arms ---------------------------------------------------------------------------
 
-    def run_old(self, plain: dict[str, list[float]], video: Path | None = None) -> dict[str, Any]:
+    def run_old(
+        self, plain: dict[str, list[float]], video: Path | None = None
+    ) -> dict[str, Any]:
         """KINDER's pick, dispatched as hitl-pmp's KinderBackend.run_pick_cube does."""
         from kinder_models.dynamic3d.tossing.parameterized_skills import (  # pylint: disable=import-outside-toplevel
             create_lifted_controllers,
         )
-        from kinder_models.dynamic3d.utils import PyBulletSim  # pylint: disable=import-outside-toplevel
-        from pybullet_helpers.geometry import Pose  # pylint: disable=import-outside-toplevel
+        from kinder_models.dynamic3d.utils import (  # pylint: disable=import-outside-toplevel
+            PyBulletSim,
+        )
+        from pybullet_helpers.geometry import (  # pylint: disable=import-outside-toplevel
+            Pose,
+        )
 
         state = self.restore(plain)
         obs_state = self._observed()
@@ -287,24 +376,36 @@ class TossingSim:
         robot_view = KinderPickRobot(self.env) if recorder else None
         try:
             lifted = create_lifted_controllers(
-                self.env.action_space, pybullet_sim=pybullet_sim, init_constant_state=obs_state
+                self.env.action_space,
+                pybullet_sim=pybullet_sim,
+                init_constant_state=obs_state,
             )
             objects = tuple(
-                obs_state.get_object_from_name(n) for n in (self.robot_obj.name, CUBE, BARRIER)
+                obs_state.get_object_from_name(n)
+                for n in (self.robot_obj.name, CUBE, BARRIER)
             )
             controller = lifted["pick_cube"].ground(objects)
             try:
                 controller.reset(obs_state, None)
-            except BaseException as exc:  # noqa: BLE001  (TrajectorySamplingFailure is not an Exception)
+            except (
+                BaseException
+            ) as exc:  # noqa: BLE001  (TrajectorySamplingFailure is not an Exception)
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
                 stage = "filter" if "grasp" in str(exc).lower() else "plan"
                 if recorder is not None:
                     # A refusal moves nothing: two seconds of the state it refused.
-                    recorder.overlay["caption"] = f"old KINDER pick: refused ({type(exc).__name__}: {exc})"[:110]
+                    recorder.overlay["caption"] = (
+                        f"old KINDER pick: refused ({type(exc).__name__}: {exc})"[:110]
+                    )
                     for _ in range(20):
                         recorder(robot_view)
-                return {"success": False, "stage": stage, "detail": f"{type(exc).__name__}: {exc}", "ticks": 0}
+                return {
+                    "success": False,
+                    "stage": stage,
+                    "detail": f"{type(exc).__name__}: {exc}",
+                    "ticks": 0,
+                }
             ticks = 0
             error = None
             for ticks in range(1, self.OLD_STEP_LIMIT + 1):
@@ -317,7 +418,9 @@ class TossingSim:
                     error = f"{type(exc).__name__}: {exc}"
                     break
                 if recorder is not None:
-                    recorder.overlay["caption"] = f"old KINDER pick  phase {controller.current_phase.name}"
+                    recorder.overlay["caption"] = (
+                        f"old KINDER pick  phase {controller.current_phase.name}"
+                    )
                     recorder(robot_view)
                 controller.observe(self.env.observation_space.devectorize(obs))
                 if controller.terminated():
@@ -329,9 +432,16 @@ class TossingSim:
                 stage = None
             elif error is not None:
                 stage = "plan" if "grasp" not in error.lower() else "no_grasp_candidate"
-            elif phase in ("OPEN_GRIPPER", "BASE_MOTION", "MOVE_ARM_TO_HOVER_OVER_CUBE", "MOVE_ARM_DOWN_AROUND_CUBE"):
+            elif phase in (
+                "OPEN_GRIPPER",
+                "BASE_MOTION",
+                "MOVE_ARM_TO_HOVER_OVER_CUBE",
+                "MOVE_ARM_DOWN_AROUND_CUBE",
+            ):
                 stage = "plan"
-            elif phase == "CLOSE_GRIPPER_TO_GRASP_CUBE" or not holding["finger_contact"]:
+            elif (
+                phase == "CLOSE_GRIPPER_TO_GRASP_CUBE" or not holding["finger_contact"]
+            ):
                 stage = "closure"
             else:
                 stage = "lift"
@@ -361,7 +471,9 @@ class TossingSim:
         if name == "sam2":
             return DepthFitEstimator(sam2)
         if name == "foundationpose":
-            return FoundationPoseEstimator(sam2, self._client("perception", self.perception_port))
+            return FoundationPoseEstimator(
+                sam2, self._client("perception", self.perception_port)
+            )
         raise ValueError(name)
 
     def _client(self, key: str, port: int) -> PerceptionClient:
@@ -402,13 +514,18 @@ class TossingSim:
             )
 
             config.generator = AnalyticGraspGenerator(
-                CubeGraspSampler(cube_size=size, tilts_deg=(0.0, 10.0, 20.0, 30.0, 40.0, 45.0)),
+                CubeGraspSampler(
+                    cube_size=size, tilts_deg=(0.0, 10.0, 20.0, 30.0, 40.0, 45.0)
+                ),
                 name="analytic45",
             )
         elif generator != "analytic":
             config.generator = self.generator(generator, size)
         prior = CubePrior(
-            position=prior_position, size=size, sigma=0.05, support_heights=self.support_heights(state)
+            position=prior_position,
+            size=size,
+            sigma=0.05,
+            support_heights=self.support_heights(state),
         )
         est = self.estimator(estimator)
         if recorder is not None:
@@ -436,7 +553,11 @@ class TossingSim:
         for e in result.estimates:
             errors.append(float(np.linalg.norm(e.position - true_position)))
         success = bool(holding["contact_holding"])
-        stage = None if success else (result.stage or ("lift" if holding["finger_contact"] else "closure"))
+        stage = (
+            None
+            if success
+            else (result.stage or ("lift" if holding["finger_contact"] else "closure"))
+        )
         if recorder is not None and recorder.frames:
             recorder.write("video")
         return {
@@ -454,7 +575,9 @@ class TossingSim:
         }
 
     def generator(self, name: str, size: float) -> Any:
-        from prpl_tidybot.cube_pick import learned_grasps  # pylint: disable=import-outside-toplevel
+        from prpl_tidybot.cube_pick import (  # pylint: disable=import-outside-toplevel
+            learned_grasps,
+        )
 
         return learned_grasps.LearnedGraspGenerator(
             client=self._client("grasps", self.grasp_port), model=name, cube_size=size
@@ -462,7 +585,9 @@ class TossingSim:
 
 
 def _hold(robot: KinderPickRobot) -> Any:
-    from prpl_tidybot.cube_pick.robot import RobotCommand  # pylint: disable=import-outside-toplevel
+    from prpl_tidybot.cube_pick.robot import (  # pylint: disable=import-outside-toplevel
+        RobotCommand,
+    )
 
     return RobotCommand(arm=robot.proprio().arm)
 
@@ -479,14 +604,21 @@ class _RecordingEstimator:
         result = self.inner.estimate(frame, prior)
         self.count = getattr(self, "count", 0) + 1
         est = result if isinstance(result, CubeEstimate) else None
-        img = draw_overlay(frame, est, (frame, result.mask), getattr(result, "backend", getattr(result, "reason", ""))[:70])
+        img = draw_overlay(
+            frame,
+            est,
+            (frame, result.mask),
+            getattr(result, "backend", getattr(result, "reason", ""))[:70],
+        )
         depth = frame.depth.copy()
         vis = np.zeros_like(img)
         valid = depth > 0
         if valid.any():
             lo, hi = np.percentile(depth[valid], [2, 98])
             vis[valid] = cv.applyColorMap(
-                np.clip(255 * (depth[valid] - lo) / max(hi - lo, 1e-3), 0, 255).astype(np.uint8)[:, None],
+                np.clip(255 * (depth[valid] - lo) / max(hi - lo, 1e-3), 0, 255).astype(
+                    np.uint8
+                )[:, None],
                 cv.COLORMAP_TURBO,
             )[:, 0, ::-1]
         cv.imwrite(
@@ -496,7 +628,9 @@ class _RecordingEstimator:
         if isinstance(result, CubeEstimate):
             self.recorder.overlay["estimate"] = result
             self.recorder.overlay["mask_frame"] = (frame, result.mask)
-            self.recorder.overlay["text"] = f"{result.backend}: {np.round(result.position, 3)}"
+            self.recorder.overlay["text"] = (
+                f"{result.backend}: {np.round(result.position, 3)}"
+            )
         elif isinstance(result, PerceptionFailure):
             self.recorder.overlay["mask_frame"] = (frame, result.mask)
             self.recorder.overlay["text"] = f"perception failed: {result.reason[:60]}"
