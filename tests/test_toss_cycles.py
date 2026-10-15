@@ -584,3 +584,15 @@ def test_the_real_cube_source_searches_the_graspable_range():
         "_target_": "prpl_tidybot.real_sim.perceivers.target_source.ConstantTargetSource"
     }
     assert not _cube_source_kwargs(cfg, fake)
+
+
+def test_the_real_cube_source_saves_failed_localizations_in_the_run_log(tmp_path):
+    """A missed localization lands beside the run's own logs."""
+    from prpl_tidybot.toss_cycles import (  # pylint: disable=import-outside-toplevel
+        _cube_source_kwargs,
+    )
+
+    cfg = _compose()
+    real = {"_target_": "prpl_tidybot.cube_localizer.CeilingCubeTargetSource"}
+    kwargs = _cube_source_kwargs(cfg, real, tmp_path)
+    assert kwargs["failure_dir"] == str(tmp_path / "localization_failures")

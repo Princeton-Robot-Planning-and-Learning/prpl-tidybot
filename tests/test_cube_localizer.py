@@ -1,6 +1,7 @@
 """Tests for the ceiling-camera cube localizer (no markers: colour + 3D silhouette
 fit)."""
 
+import json
 import math
 
 import cv2 as cv
@@ -245,3 +246,48 @@ def test_target_source_raises_when_no_cube_is_visible(cameras):
     )
     with pytest.raises(RuntimeError, match="no cube"):
         source.get_target()
+
+
+def test_a_failed_localization_saves_its_frames_and_inputs(cameras, tmp_path):
+    """When no cube is found, every attempt (the first and its one retry) leaves the
+    exact frames it fitted and the inputs it used, so the miss can be replayed."""
+    frames = [_render(cameras, [], seed=s) for s in range(2)]
+    source = CeilingCubeTargetSource(
+        serials=SERIALS,
+        image_client=_FakeImages(frames),
+        marker_client=_FakeMarkers((0.49, -0.49, math.pi)),
+        num_frames=2,
+        frame_period_s=0.0,
+        failure_dir=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match="no cube"):
+        source.get_target()
+    attempts = sorted(p for p in tmp_path.iterdir() if p.is_dir())
+    assert len(attempts) == 2
+    for attempt in attempts:
+        saved = sorted(attempt.glob("frame_*.png"))
+        assert len(saved) == 2
+        assert np.array_equal(cv.imread(str(saved[0])), frames[0])
+        info = json.loads((attempt / "localization.json").read_text())
+        assert info["exclusions"] == [[0.49, -0.49, 0.45]]
+        assert info["floor_bounds"] == list(FLOOR_BOUNDS)
+        assert info["min_iou"] == pytest.approx(0.6)
+        assert "candidates" in info
+
+
+def test_a_failed_localization_is_retried_once(cameras, tmp_path):
+    """A miss is retried once with fresh frames before the source gives up."""
+    pose = (-0.5, 0.8, 0.1)
+    empty = [_render(cameras, [], seed=s) for s in range(2)]
+    cube = [_render(cameras, [pose], seed=s) for s in range(2)]
+    source = CeilingCubeTargetSource(
+        serials=SERIALS,
+        image_client=_FakeImages(empty + cube),
+        marker_client=_FakeMarkers((0.49, -0.49, math.pi)),
+        num_frames=2,
+        frame_period_s=0.0,
+        failure_dir=tmp_path,
+    )
+    x, y, _ = source.get_target()
+    assert math.hypot(x - pose[0], y - pose[1]) < 0.006
+    assert len([p for p in tmp_path.iterdir() if p.is_dir()]) == 1
