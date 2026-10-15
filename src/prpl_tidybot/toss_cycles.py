@@ -339,22 +339,9 @@ def _move_arm(
 
 
 def _retract(cfg: DictConfig, arm: ArmInterface) -> None:
-    """Fold the arm to its retract pose, under the onboard controller when the pick
-    uses it (it lands on the pose; the compliant loop waits out its timeout)."""
-    goal = list(RETRACT_ARM_CONF)
-    if cfg.pick.get("top_down", {}).get("arm_controller", "angular") != "angular":
-        _move_arm(arm, goal, arm.get_gripper_state(), cfg.arm_home)
-        return
-    arm.release()
-    aborted = False
-    try:
-        arm.move_angular(goal)
-    except ArmMotionAborted:
-        aborted = True
-        raise
-    finally:
-        if not aborted:
-            arm.resume()
+    """Fold the arm to its retract pose under the compliant loop: it needs no
+    precision, and only the grasp itself runs under the stiff onboard controller."""
+    _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
 
 
 def _logged_move(  # pylint: disable=too-many-arguments,too-many-positional-arguments
