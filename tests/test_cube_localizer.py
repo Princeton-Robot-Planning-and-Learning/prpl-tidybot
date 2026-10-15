@@ -187,6 +187,58 @@ def test_candidates_are_found_near_the_cube(cameras):
     assert any(math.hypot(x - 0.3, y - 0.9) < 0.04 for x, y in cands)
 
 
+def _with_clutter(frame):
+    """Cube-coloured clutter seen on the robot: a slab of shelf, a thin strip of tape,
+    and specks; none is the size and shape a cube would make at its spot."""
+    out = frame.copy()
+    cv.rectangle(out, (900, 150), (1000, 165), CUBE_BGR, -1)  # strip, 100x15
+    cv.rectangle(out, (200, 900), (260, 960), CUBE_BGR, -1)  # slab, 4x a cube
+    for u, v in [(400, 300), (420, 310), (1100, 1200)]:
+        cv.circle(out, (u, v), 3, CUBE_BGR, -1)  # specks
+    return out
+
+
+def test_only_cube_sized_cube_shaped_blobs_are_candidates(cameras):
+    """Each candidate costs a full pose fit, so clutter that cannot be the cube (wrong
+    size for where it lies on the floor, or a thin strip) is not one."""
+    pose = (0.3, 0.9, 0.2)
+    frame = _with_clutter(_render(cameras, [pose]))
+    cands = find_cube_candidates(frame, cameras, (-1.85, 2.05, -1.85, 1.85), side=SIDE)
+    assert cands
+    assert all(math.hypot(x - pose[0], y - pose[1]) < 0.04 for x, y in cands)
+
+
+def test_blobs_cut_by_the_outer_image_border_are_not_candidates(cameras):
+    """The vignetted image border passes the colour test in cube-sized pieces (seen on
+    the robot 2026-10-15: a 'cube' at (-1.86, +1.43) with IoU 0.93). A cube there is
+    only partly in view of every camera, so it is not a candidate."""
+    frame = _render(cameras, [])
+    cv.rectangle(frame, (0, 200), (12, 230), CUBE_BGR, -1)
+    cands = find_cube_candidates(frame, cameras, (-3.0, 3.0, -3.0, 3.0), side=SIDE)
+    assert not cands
+
+
+def test_a_decoy_that_wins_the_quick_screen_does_not_hide_the_cube(cameras):
+    """A blob that looks perfect in the last few frames but is gone from the rest (a
+    flicker) wins the quick screen and then fails the full refit; the localizer moves
+    on to the next candidate instead of giving up (run 16, 2026-10-15)."""
+    cube = (0.3, 0.9, 0.2)
+    decoy = (-0.9, -0.6, 0.0)
+    frames = [_render(cameras, [], seed=s) for s in range(20)]
+    for k, frame in enumerate(frames):
+        for i, cam in enumerate(cameras):
+            half = frame[i * H : (i + 1) * H]
+            # the real cube reads smaller than a perfect silhouette, as on the robot
+            poly = cube_silhouette(cam, *cube, SIDE * 0.8).astype(np.int32)
+            cv.fillConvexPoly(half, poly, CUBE_BGR, lineType=cv.LINE_AA)
+            if k >= 17:  # the decoy is only in the last three frames
+                poly = cube_silhouette(cam, *decoy, SIDE).astype(np.int32)
+                cv.fillConvexPoly(half, poly, CUBE_BGR)
+    fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE)
+    assert fit is not None
+    assert math.hypot(fit.x - cube[0], fit.y - cube[1]) < 0.02
+
+
 class _FakeImages:
     """Serves a fixed list of stitched frames, cycling."""
 
