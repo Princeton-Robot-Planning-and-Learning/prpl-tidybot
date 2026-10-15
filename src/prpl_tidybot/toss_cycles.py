@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import cv2 as cv
 import hydra
 import kinder
 import numpy as np
@@ -144,8 +145,10 @@ def run_toss_cycles(
         cfg.mode == "real" and bool(cfg.pick.top_down.get("record_wrist", True)),
         resolved_log_dir,
     )
+    ceiling = _CeilingRecorder(cfg, resolved_log_dir)
 
     def confirm(question: str) -> None:
+        ceiling.label = question
         if not interactive:
             return
         answer = prompt_fn(f"\n{question} [y/N]: ")
@@ -253,6 +256,7 @@ def run_toss_cycles(
                 encoding="utf-8",
             )
         wrist.close()
+        ceiling.close()
         cube_source.close()
         if not aborted:
             real_env.close()
@@ -736,6 +740,80 @@ def _set_gripper(arm: ArmInterface, position: float, td: Any) -> None:
         if abs(now - last) < 0.005:
             return
         last = now
+
+
+class _CeilingRecorder:
+    """Films the whole run from the ceiling cameras into <log_dir>/ceiling.mp4,
+    stamping each frame with the time and the step last asked about. Frames are
+    encoded as they arrive (H.264), so a long run costs no memory."""
+
+    def __init__(self, cfg: DictConfig, log_dir: Path | None) -> None:
+        video_cfg = cfg.get("ceiling_video")
+        self.label = "start"
+        self._running = False
+        if log_dir is None or video_cfg is None or not video_cfg.enabled:
+            return
+        import threading  # pylint: disable=import-outside-toplevel
+
+        from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
+            CeilingImageClient,
+            FakeCeilingImageClient,
+        )
+
+        self._client: Any = (
+            CeilingImageClient(str(video_cfg.host))
+            if cfg.mode == "real"
+            else FakeCeilingImageClient()
+        )
+        self._fps = int(video_cfg.fps)
+        self._scale = float(video_cfg.scale)
+        self._path = log_dir / "ceiling.mp4"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._writer: Any = None
+        self._t0 = time.monotonic()
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        import imageio_ffmpeg  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
+
+        period = 1.0 / self._fps
+        while self._running:
+            start = time.monotonic()
+            try:
+                img = self._client.get_image()
+            except Exception:  # pylint: disable=broad-except
+                break  # the publisher went away; keep what was recorded
+            if img is not None:
+                frame = cv.resize(img, None, fx=self._scale, fy=self._scale)
+                frame = frame[: frame.shape[0] // 2 * 2, : frame.shape[1] // 2 * 2]
+                text = f"{start - self._t0:6.1f}s  {self.label.strip()[:90]}"
+                cv.rectangle(frame, (0, 0), (frame.shape[1], 30), (0, 0, 0), -1)
+                cv.putText(frame, text, (8, 22), 0, 0.6, (255, 255, 255), 1)
+                if self._writer is None:
+                    self._writer = imageio_ffmpeg.write_frames(
+                        str(self._path),
+                        (frame.shape[1], frame.shape[0]),
+                        fps=self._fps,
+                        codec="libx264",
+                        pix_fmt_out="yuv420p",
+                        output_params=["-movflags", "+faststart"],
+                        ffmpeg_log_level="error",
+                    )
+                    self._writer.send(None)
+                self._writer.send(np.ascontiguousarray(frame[:, :, ::-1]))
+            time.sleep(max(0.0, period - (time.monotonic() - start)))
+
+    def close(self) -> None:
+        """Stop recording and finish the file."""
+        if not self._running:
+            return
+        self._running = False
+        self._thread.join(timeout=5)
+        if self._writer is not None:
+            self._writer.close()
+        self._client.close()
 
 
 class _WristRecorder:
