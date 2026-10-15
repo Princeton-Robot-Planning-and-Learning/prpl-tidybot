@@ -129,7 +129,7 @@ def _down_quat(closing_yaw: float) -> NDArray[np.float64]:
     return np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
 
 
-def _closing_yaw(cube_yaw_rel: float, geom: TopDownPickGeometry) -> float:
+def cube_closing_yaw(cube_yaw_rel: float, geom: TopDownPickGeometry) -> float:
     """The cube is 90-degree symmetric: pick the equivalent yaw nearest straight
     ahead, so the wrist turns as little as possible."""
     yaw = cube_yaw_rel + geom.wrist_yaw_offset
@@ -172,27 +172,37 @@ def top_down_joint_targets(
 
     Raises if the IK does not converge to within 5 mm and 2 degrees of either pose.
     """
-    quat = _down_quat(_closing_yaw(cube_yaw_rel, geom))
-    targets = []
+    closing = cube_closing_yaw(cube_yaw_rel, geom)
+    hover = pointing_down_joints(
+        (ax, ay, geom.floor_z + geom.grasp_height + geom.hover_height),
+        closing,
+        geom,
+        seed,
+    )
+    grasp = pointing_down_joints(
+        (ax, ay, geom.floor_z + geom.grasp_height), closing, geom, hover
+    )
+    return hover, grasp
+
+
+def pointing_down_joints(
+    position: Sequence[float],
+    closing_yaw: float,
+    geom: TopDownPickGeometry,
+    seed: Sequence[float] | None = None,
+) -> list[float]:
+    """Joints putting the pinch point at `position` (arm frame), tool pointing straight
+    down, fingers closing along `closing_yaw`. Raises if the IK does not get within 5
+    mm and 2 degrees."""
+    quat = _down_quat(closing_yaw)
     q = np.asarray(seed if seed is not None else RETRACT_ARM_CONF, float)
-    for z in (
-        geom.floor_z + geom.grasp_height + geom.hover_height,
-        geom.floor_z + geom.grasp_height,
-    ):
-        goal = np.array([ax, ay, z])
-        for _ in range(
-            10
-        ):  # the solver takes 20 steps per call; restart from its result
-            q = _solver(geom).solve(goal, quat, q)  # type: ignore[no-untyped-call]
-            pos, approach, _ = forward_kinematics(q, geom)
-            if np.linalg.norm(pos - goal) < 0.005 and approach[2] < -0.9994:
-                break
-        else:
-            raise ValueError(
-                f"IK did not reach {goal.round(3).tolist()} pointing down."
-            )
-        targets.append([float(v) for v in q])
-    return targets[0], targets[1]
+    goal = np.asarray(position, float)
+    for _ in range(10):  # the solver takes 20 steps per call; restart from its result
+        q = _solver(geom).solve(goal, quat, q)  # type: ignore[no-untyped-call]
+        pos, approach, _ = forward_kinematics(q, geom)
+        if np.linalg.norm(pos - goal) < 0.005 and approach[2] < -0.9994:
+            return [float(v) for v in q]
+    raise ValueError(f"IK did not reach {goal.round(3).tolist()} pointing down.")
 
 
 def grasp_succeeded(gripper_position: float, geom: TopDownPickGeometry) -> bool:

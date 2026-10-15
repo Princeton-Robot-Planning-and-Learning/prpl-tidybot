@@ -7,6 +7,7 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 from hydra import compose, initialize_config_dir
 
@@ -17,6 +18,7 @@ from prpl_tidybot.top_down_pick import (
     CARRY_ARM_CONF,
     TopDownPickGeometry,
     forward_kinematics,
+    pointing_down_joints,
 )
 from prpl_tidybot.toss_cycles import run_toss_cycles
 
@@ -216,11 +218,15 @@ def test_each_pick_move_logs_planned_and_measured_joints(tmp_path):
     )
 
 
-def test_the_pick_runs_under_the_onboard_controller_by_default(tmp_path, arm_log):
-    """Hover, grasp, lift and carry are onboard-controller moves (the compliant loop
-    settled 24 mm short on the robot), with the torque loop released around them."""
+def test_the_onboard_controller_pick_is_selectable(tmp_path, arm_log):
+    """arm_controller=angular: hover, grasp, lift and carry are onboard-controller
+    moves, with the torque loop released around them."""
     run_toss_cycles(
-        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+        _compose(
+            cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "angular"}
+        ),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
     )
     angular = [e for e in arm_log if e[0] == "angular"]
     assert len(angular) == 4
@@ -229,14 +235,10 @@ def test_the_pick_runs_under_the_onboard_controller_by_default(tmp_path, arm_log
     assert all(m["controller"] == "angular" for m in moves)
 
 
-def test_the_compliant_pick_is_still_selectable(tmp_path, arm_log):
-    """pick.top_down.arm_controller=compliant streams the moves as before."""
+def test_the_pick_runs_under_the_compliant_loop_by_default(tmp_path, arm_log):
+    """The default streams every grasp move through the compliant torque loop."""
     run_toss_cycles(
-        _compose(
-            cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "compliant"}
-        ),
-        log_dir=tmp_path,
-        prompt_fn=_Operator(),
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
     )
     assert not [e for e in arm_log if e[0] == "angular"]
     log = json.loads((tmp_path / "cycles.json").read_text())
@@ -256,7 +258,11 @@ def test_an_angular_move_that_does_not_arrive_is_not_closed_on(
         return logged(self, goal)
 
     monkeypatch.setattr(FakeArmInterface, "move_angular", short)
-    cfg = _compose(cycles=1, skip_toss="true", **{"pick.top_down.max_attempts": 1})
+    cfg = _compose(
+        cycles=1,
+        skip_toss="true",
+        **{"pick.top_down.max_attempts": 1, "pick.top_down.arm_controller": "angular"},
+    )
     result = run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=_Operator())
     assert "pick failed" in result.finish_reason
     log = json.loads((tmp_path / "cycles.json").read_text())
@@ -281,7 +287,11 @@ def test_ctrl_c_during_a_pick_move_stops_without_further_motion(tmp_path, monkey
     monkeypatch.setattr(FakeArmInterface, "resume", lambda self: resumes.append(1))
     operator = _Operator()
     result = run_toss_cycles(
-        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=operator
+        _compose(
+            cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "angular"}
+        ),
+        log_dir=tmp_path,
+        prompt_fn=operator,
     )
     assert "aborted" in result.finish_reason
     assert operator.asked("Reset") == 0
@@ -351,6 +361,60 @@ def test_each_toss_waits_for_the_cube_to_settle_before_it_is_localized(
     settles = [i for i, e in enumerate(events) if e == "sleep 5.0"]
     assert len(settles) == 2
     assert all("localize" in events[i + 1 :] for i in settles[:1])
+
+
+def test_a_compliant_move_that_sags_is_corrected_onto_its_target(tmp_path, monkeypatch):
+    """The compliant loop settles a few degrees short under unmodelled torque (24 mm at
+    the gripper on the robot); each grasp move is re-aimed past its target by the
+    measured error until the pinch point is within 2 mm (the carry pose: every joint
+    within 0.3 deg)."""
+    # The joint errors the real arm settled with at the hover in run 3 (42 mm short).
+    sag = np.radians([-0.13, 1.29, 1.86, -1.28, -5.09, -3.24, -3.26])
+
+    def sagging(self, arm_goal, gripper_goal):
+        self.arm_state = list(np.array(arm_goal) + sag)
+        self.gripper_state = gripper_goal
+
+    monkeypatch.setattr(FakeArmInterface, "execute_action", sagging)
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    moves = {m["name"]: m for m in log["cycles"][0]["pick_attempts"][0]["moves"]}
+    for name in ("hover", "grasp", "lift"):
+        assert moves[name]["reached"] and moves[name]["pinch_error_mm"] < 3.0, name
+    err = np.array(moves["carry"]["measured_deg"]) - moves["carry"]["planned_deg"]
+    assert np.abs((err + 180) % 360 - 180).max() < 0.3
+
+
+def test_the_correction_never_aims_the_grasp_below_its_planned_height(
+    tmp_path, monkeypatch
+):
+    """An arm held 8 mm up (the floor, the cube) at the grasp is not pushed down: no
+    command puts the pinch point below the grasp height measured for the 2F-85 pads."""
+    geom = TopDownPickGeometry()
+    grasp_z = geom.floor_z + geom.grasp_height
+    commanded_z: list[float] = []
+
+    def blocked(self, arm_goal, gripper_goal):
+        pos, approach, closing = forward_kinematics(arm_goal, geom)
+        commanded_z.append(float(pos[2]))
+        state = list(arm_goal)
+        if approach[2] < -0.99 and pos[2] < grasp_z + 0.008:
+            state = pointing_down_joints(
+                (pos[0], pos[1], grasp_z + 0.008),
+                math.atan2(closing[1], closing[0]),
+                geom,
+                seed=arm_goal,
+            )
+        self.arm_state = state
+        self.gripper_state = gripper_goal
+
+    monkeypatch.setattr(FakeArmInterface, "execute_action", blocked)
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    assert min(commanded_z) > grasp_z - 0.001
 
 
 def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
