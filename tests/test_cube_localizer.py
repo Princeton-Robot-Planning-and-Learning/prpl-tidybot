@@ -12,6 +12,7 @@ from prpl_tidybot.cube_localizer import (
     CeilingCubeTargetSource,
     cube_silhouette,
     find_cube_candidates,
+    fit_cube_pose,
     in_calibrated_region,
     load_ceiling_cameras,
     localize_cube,
@@ -123,6 +124,20 @@ def test_inconsistent_cameras_pick_one_view_instead_of_blending(cameras):
     assert fit.camera_disagreement_m == pytest.approx(0.0269, abs=0.006)
 
 
+def test_a_cube_one_camera_sees_well_passes_the_screen(cameras):
+    """The quick screen keeps the better camera's fit rather than averaging both: on
+    the robot (run 17) the top camera fit the cube at 0.84 and the bottom one at 0.52,
+    the average 0.54 fell under the threshold, and the cube was never found."""
+    top_pose, bottom_pose = (-0.184, 0.10, 0.1), (-0.15, 0.065, 0.5)
+    frames = [
+        _render_inconsistent(cameras, top_pose, bottom_pose, seed=s) for s in range(3)
+    ]
+    assert fit_cube_pose(frames, cameras, top_pose[:2], SIDE).iou < 0.6
+    fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE)
+    assert fit is not None
+    assert fit.iou > 0.8
+
+
 def test_prefers_the_camera_whose_calibrated_region_holds_the_cube(cameras):
     """Outside a camera's calibrated region its extrinsics are least trustworthy, so
     when only one camera's calibrated region contains the cube that camera wins, even
@@ -137,6 +152,29 @@ def test_prefers_the_camera_whose_calibrated_region_holds_the_cube(cameras):
     fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE, serials=SERIALS)
     assert fit is not None
     assert fit.camera == inside.index(True)
+
+
+def test_a_calibrated_camera_that_fits_badly_does_not_veto_a_good_one(cameras):
+    """The calibrated-region preference applies among fits that pass the threshold:
+    in run 17 the calibrated camera fit the cube at 0.53 and the other at 0.84, the
+    calibrated one was chosen, failed the threshold, and no cube was reported."""
+    pose = (-0.18, 0.105, 0.0)
+    inside = [
+        in_calibrated_region(c, i, pose[0], pose[1], SERIALS)
+        for i, c in enumerate(cameras)
+    ]
+    good = inside.index(False)
+    frames = []
+    for s in range(3):
+        frame = _render(cameras, [], seed=s)
+        for i, cam in enumerate(cameras):
+            side = SIDE if i == good else SIDE * 0.6  # a poor view of the cube
+            poly = cube_silhouette(cam, *pose, side).astype(np.int32)
+            cv.fillConvexPoly(frame[i * H : (i + 1) * H], poly, CUBE_BGR)
+        frames.append(frame)
+    fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE, serials=SERIALS)
+    assert fit is not None
+    assert fit.camera == good
 
 
 def test_consistent_cameras_agree(cameras):

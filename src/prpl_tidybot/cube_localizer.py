@@ -341,7 +341,14 @@ def localize_cube(
         diagnostics["candidates"] = screened
     passed: list[CubeFit] = []
     for guess in find_cube_candidates(frames[-1], cameras, floor_bounds, side, exclude):
-        fit = fit_cube_pose(frames[-3:], cameras, guess, side)  # quick screen
+        # Quick screen on the last frames, each camera on its own: in the overlap the
+        # cameras' calibrations disagree by ~3 cm, so a fused score can fail a cube one
+        # camera sees perfectly well.
+        fits = [
+            fit_cube_pose(frames[-3:], cameras, guess, side, only=[i])
+            for i in range(len(cameras))
+        ]
+        fit = max((f for f in fits if f is not None), key=lambda f: f.iou, default=None)
         screened.append({"guess": list(guess), "iou": None if fit is None else fit.iou})
         if fit is not None and fit.iou >= min_iou:
             passed.append(fit)
@@ -388,14 +395,18 @@ def _refine(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         # Prefer cameras whose calibrated region contains the cube (their extrinsics
         # were fitted there); among those, the best fit, a near tie going to the
         # camera that sees the cube more directly from above.
-        pool = singles
+        # Only cameras that see the cube well enough compete: a calibrated camera
+        # with a poor view must not veto a good one.
+        pool = [(i, f) for i, f in singles if f.iou >= min_iou]
+        if not pool:
+            return None
         if serials is not None:
             calibrated = [
                 (i, f)
-                for i, f in singles
+                for i, f in pool
                 if in_calibrated_region(cameras[i], i, f.x, f.y, serials)
             ]
-            pool = calibrated or singles
+            pool = calibrated or pool
         top_iou = max(f.iou for _, f in pool)
         near = [(i, f) for i, f in pool if f.iou >= top_iou - 0.03]
         cam_i, chosen = min(
