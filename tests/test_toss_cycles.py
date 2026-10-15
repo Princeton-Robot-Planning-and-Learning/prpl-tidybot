@@ -35,6 +35,7 @@ def _no_control_period_sleep(monkeypatch):
 
 def _compose(**extra):
     overrides = ["mode=fake", "seed=0", "interactive=true", "settle_after_toss_s=0"]
+    overrides.append("confirm=each")
     overrides.extend(f"{k}={v}" for k, v in extra.items())
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
         return compose(config_name="toss_cycles", overrides=overrides)
@@ -463,6 +464,35 @@ def test_the_correction_never_aims_the_grasp_below_its_planned_height(
         prompt_fn=_Operator(),
     )
     assert min(commanded_z) > grasp_z - 0.001
+
+
+def test_confirm_once_asks_a_single_question_for_the_whole_run(tmp_path, arm_log):
+    """confirm=once: one prompt before the first action; the picks, tosses, retracts
+    and the reset then run without asking."""
+    operator = _Operator()
+    result = run_toss_cycles(
+        _compose(confirm="once"), log_dir=tmp_path, prompt_fn=operator
+    )
+    assert result.completed == 2
+    assert len(operator.prompts) == 1
+    assert len([e for e in arm_log if e[0] == "toss"]) == 2
+
+
+def test_by_default_a_miss_retracts_returns_to_the_toss_pose_and_ends(
+    tmp_path, arm_log
+):
+    """One attempt: a miss is not retried; the arm retracts and the base returns to
+    the toss pose."""
+    cfg = _compose(
+        confirm="once",
+        **{"pick.top_down.fake_grasp_reading": 0.996},
+    )
+    result = run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=_Operator())
+    assert "pick failed after 1 attempts" in result.finish_reason
+    assert not [e for e in arm_log if e[0] == "toss"]
+    last = [e for e in arm_log if e[0] in ("arm", "angular")][-1]
+    assert last[1] == pytest.approx(list(RETRACT_ARM_CONF))
+    assert result.final_base_pose[:2] == pytest.approx(TOSS_POSE[:2], abs=0.02)
 
 
 def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
