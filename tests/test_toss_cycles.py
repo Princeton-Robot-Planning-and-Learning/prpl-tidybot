@@ -1,5 +1,5 @@
 """Tests for `prpl_tidybot.toss_cycles.run_toss_cycles` (scripts/toss_cycles.py) in fake
-mode: pick -> arm home -> drive to the toss pose -> toss, repeated, with a confirmation
+mode: pick -> drive to the toss pose -> toss -> retract, repeated, with a confirmation
 before every action and a reset (retract, back to the toss pose) whenever the run
 stops."""
 
@@ -13,7 +13,11 @@ from hydra import compose, initialize_config_dir
 from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
 from prpl_tidybot.real_sim.perceivers.target_source import ConstantTargetSource
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
-from prpl_tidybot.top_down_pick import TopDownPickGeometry, forward_kinematics
+from prpl_tidybot.top_down_pick import (
+    CARRY_ARM_CONF,
+    TopDownPickGeometry,
+    forward_kinematics,
+)
 from prpl_tidybot.toss_cycles import run_toss_cycles
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
@@ -79,10 +83,11 @@ def test_two_cycles_pick_home_drive_toss_then_reset(tmp_path, arm_log):
     assert result.finish_reason == "completed 2/2 cycles"
     tosses = [e[1] for e in arm_log if e[0] == "toss"]
     assert tosses == [{"heading": 0.0, "max_vel": 140.0, "gripper_release_ms": 600}] * 2
-    for word in ("pick", "home", "Drive to the toss pose", "Toss?"):
+    for word in ("pick", "Drive to the toss pose", "Toss?", "retract the arm"):
         assert operator.asked(word) >= 2, word
+    assert operator.asked("home") == 0
     assert operator.asked("Reset") == 1
-    last_arm = [e for e in arm_log if e[0] == "arm"][-1]
+    last_arm = [e for e in arm_log if e[0] in ("arm", "angular")][-1]
     assert last_arm[1] == pytest.approx(list(RETRACT_ARM_CONF))
     x, y, theta = result.final_base_pose
     assert (x, y) == pytest.approx(TOSS_POSE[:2], abs=0.02)
@@ -93,13 +98,24 @@ def test_two_cycles_pick_home_drive_toss_then_reset(tmp_path, arm_log):
     assert log["toss_pose"] == pytest.approx(list(TOSS_POSE))
 
 
-def test_arm_goes_home_holding_the_cube_before_the_drive(tmp_path, arm_log):
-    """After the pick the arm is sent to its home joints with the gripper still closed,
-    and the toss comes after."""
+def test_the_base_drives_to_the_toss_pose_with_the_cube_in_the_carry_pose(
+    tmp_path, arm_log
+):
+    """No separate home step: the pick ends in the carry pose and the arm does not move
+    again until the toss."""
     run_toss_cycles(_compose(cycles=1), log_dir=tmp_path, prompt_fn=_Operator())
     toss_at = next(i for i, e in enumerate(arm_log) if e[0] == "toss")
-    holding = [e for e in arm_log[:toss_at] if e[0] == "arm" and e[2] > 0.5]
-    assert holding, "the arm should move with the gripper closed before the toss"
+    moves = [e for e in arm_log[:toss_at] if e[0] in ("arm", "angular")]
+    assert moves[-1][1] == pytest.approx(list(CARRY_ARM_CONF))
+
+
+def test_the_arm_retracts_after_each_toss_before_the_next_pick(tmp_path, arm_log):
+    """The toss leaves the arm raised in its release pose; it is retracted before the
+    base drives off for the next pick (run 7 drove to cycle 2 with the arm up)."""
+    run_toss_cycles(_compose(cycles=2), log_dir=tmp_path, prompt_fn=_Operator())
+    first_toss = next(i for i, e in enumerate(arm_log) if e[0] == "toss")
+    after = [e for e in arm_log[first_toss + 1 :] if e[0] in ("arm", "angular")]
+    assert after[0][1] == pytest.approx(list(RETRACT_ARM_CONF))
 
 
 def test_declining_the_drive_stops_without_tossing_and_resets(tmp_path, arm_log):
@@ -191,7 +207,8 @@ def test_the_pick_runs_under_the_onboard_controller_by_default(tmp_path, arm_log
         _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
     )
     angular = [e for e in arm_log if e[0] == "angular"]
-    assert len(angular) == 4
+    retract = list(RETRACT_ARM_CONF)
+    assert len([e for e in angular if e[1] != pytest.approx(retract)]) == 4
     log = json.loads((tmp_path / "cycles.json").read_text())
     moves = log["cycles"][0]["pick_attempts"][0]["moves"]
     assert all(m["controller"] == "angular" for m in moves)
