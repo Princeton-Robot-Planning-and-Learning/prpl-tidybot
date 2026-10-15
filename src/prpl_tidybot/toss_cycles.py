@@ -566,7 +566,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         wrist.start(f"cycle_{cycle:02d}_pick_{attempt}")
         # The fake gripper closes on nothing; pretend it read fake_grasp_reading.
         fake = float(td.get("fake_grasp_reading", 0.49))
-        read = (lambda _: fake) if cfg.mode == "fake" else (lambda r: r)
+        read = (lambda _, v=fake: v) if cfg.mode == "fake" else (lambda r: r)
         if td.get("arm_controller", "angular") == "angular":
             held, reading, note = _grasp_angular(
                 arm, td, geom, hover, grasp, moves, read
