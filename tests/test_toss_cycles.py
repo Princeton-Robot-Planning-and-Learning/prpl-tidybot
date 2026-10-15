@@ -567,3 +567,20 @@ def test_the_kinder_pick_is_still_selectable(tmp_path):
         prompt_fn=_Operator(),
     )
     assert result.completed == 1
+
+
+def test_the_real_cube_source_searches_the_graspable_range():
+    """The ceiling cube localizer is built with the graspable search box, not the
+    drivable box; other target sources (fake mode) are built unchanged."""
+    from prpl_tidybot.toss_cycles import (  # pylint: disable=import-outside-toplevel
+        _cube_source_kwargs,
+    )
+
+    cfg = _compose()
+    real = {"_target_": "prpl_tidybot.cube_localizer.CeilingCubeTargetSource"}
+    bounds = _cube_source_kwargs(cfg, real)["floor_bounds"]
+    assert bounds[3] > 1.84 and bounds[0] < cfg.preview.floor_bounds[0]
+    fake = {
+        "_target_": "prpl_tidybot.real_sim.perceivers.target_source.ConstantTargetSource"
+    }
+    assert _cube_source_kwargs(cfg, fake) == {}

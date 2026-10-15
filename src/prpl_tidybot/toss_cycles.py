@@ -51,6 +51,7 @@ from prpl_tidybot.top_down_pick import (
     cube_closing_yaw,
     forward_kinematics,
     geometry_from_config,
+    grasp_search_bounds,
     grasp_succeeded,
     pointing_down_joints,
     standoff_pose,
@@ -143,10 +144,12 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
         ),
     )
     arm: ArmInterface = real_env.interface.arm_interface
-    cube_source = hydra.utils.instantiate(
-        pipeline.perceiver.target_source, _convert_="all"
-    )
     geom = geometry_from_config(cfg.pick.get("top_down"))
+    cube_source = hydra.utils.instantiate(
+        pipeline.perceiver.target_source,
+        _convert_="all",
+        **_cube_source_kwargs(cfg, pipeline.perceiver.target_source),
+    )
     source: ImageSource | None = None
     if wrist_camera is not None:
         source = wrist_camera(arm)
@@ -375,6 +378,17 @@ def _move_arm(
         "Arm did not reach its goal within %d ticks.", int(arm_cfg.max_ticks)
     )
     return False
+
+
+def _cube_source_kwargs(cfg: DictConfig, target_cfg: Any) -> dict[str, Any]:
+    """The ceiling localizer searches everywhere the arm can grasp from inside the
+    drivable box, not just the box itself (a bin just past its edge)."""
+    if not str(target_cfg["_target_"]).endswith("CeilingCubeTargetSource"):
+        return {}
+    bounds = grasp_search_bounds(
+        tuple(cfg.preview.floor_bounds), geometry_from_config(cfg.pick.get("top_down"))
+    )
+    return {"floor_bounds": list(bounds)}
 
 
 def _retract(cfg: DictConfig, arm: ArmInterface) -> None:
