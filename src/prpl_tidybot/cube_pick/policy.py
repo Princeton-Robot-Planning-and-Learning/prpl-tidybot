@@ -291,6 +291,15 @@ class CubePickPolicy:
             _wrap_angle(target[2] - proprio.base[2])
         ) < 0.02:
             return
+        # Tuck the arm before driving: KINDER's base planner checks only the base's
+        # footprint, so an arm left reaching out sweeps whatever the base passes.
+        if _joint_error(proprio.arm, HOME_ARM) > self.config.arm_waypoint_tolerance:
+            tuck = self.scene.plan_arm(proprio.arm, HOME_ARM, opening=0.085, include_cube=True)
+            if tuck is None:
+                raise PickFailed("look", "cannot tuck the arm before driving")
+            self._follow_arm(tuck, opening=None, tolerance=self.config.arm_waypoint_tolerance, stage="look")
+            proprio = self.robot.proprio()
+            self.scene.set_robot(proprio.base, proprio.arm)
         path = self.scene.plan_base(target)
         if path is None:
             raise PickFailed("look", f"no base path to {np.round(target, 3)}")
