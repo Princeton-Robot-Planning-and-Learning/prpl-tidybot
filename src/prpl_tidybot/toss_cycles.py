@@ -630,8 +630,9 @@ class _Mover:
     def end(self) -> None:
         """Hand the arm back to the compliant loop, holding where it is."""
 
-    def move(self, name: str, goal: list[float]) -> bool:
-        """Move to `goal`; record it; return whether it arrived."""
+    def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
+        """Move to `goal`; record it; return whether it arrived. `correct` asks a
+        controller that can settle short of its goal to correct onto it."""
         raise NotImplementedError
 
     def gripper(self, position: float) -> float:
@@ -683,7 +684,7 @@ class _AngularMover(_Mover):
         if not self._aborted:
             self.arm.resume()
 
-    def move(self, name: str, goal: list[float]) -> bool:
+    def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
         try:
             measured = self.arm.move_angular(goal)
         except ArmMotionAborted:
@@ -702,14 +703,16 @@ class _AngularMover(_Mover):
 
 
 class _CompliantMover(_Mover):
-    """The compliant torque loop, with each move corrected onto its target.
+    """The compliant torque loop.
 
-    The loop settles a few degrees short wherever its gravity and friction models
-    miss (24 mm at the gripper in run 3), so after it settles the command is pushed
-    past the goal by the measured error, up to `correction_rounds` times, until every
-    joint is within `correction_tol_deg`. No command may put the pinch point below
-    the move's own planned height (when that is near the floor, i.e. the grasp): an
-    arm held up by the floor or the cube is never pushed down into it.
+    As in Tom Silver's cylinder servo, a move streams its joint target and waits for
+    the arm to arrive (or stop): the loop settles a few degrees short wherever its
+    gravity and friction models miss (24 mm at the gripper in run 3), and for the
+    hover and the servo's nudges that does not matter, because the wrist camera
+    measures the cube from wherever the gripper really is. Only the descent, which
+    the camera cannot watch, is corrected (`correct=True`): after the arm settles the
+    pinch point is re-aimed past the goal by the measured error, never below the
+    grasp height, so an arm held up by the floor or the cube is not pushed into it.
     """
 
     name = "compliant"
@@ -727,11 +730,15 @@ class _CompliantMover(_Mover):
         self.command = list(arm.get_arm_state())
         self.grip = arm.get_gripper_state()
 
-    def move(self, name: str, goal: list[float]) -> bool:
+    def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
         goal_pos, approach, closing = forward_kinematics(goal, self.geom)
-        if approach[2] < -0.99:
+        if correct and approach[2] < -0.99:
             return self._move_down(name, goal, goal_pos, closing)
-        return self._move_joints(name, goal)
+        if correct:
+            return self._move_joints(name, goal)
+        settled = self._settle(list(goal))
+        self._record(name, goal, list(self.arm.get_arm_state()), settled=settled)
+        return settled
 
     def _move_down(
         self,
@@ -808,19 +815,29 @@ class _CompliantMover(_Mover):
             )["reached"]
         )
 
-    def _settle(self, command: list[float]) -> None:
-        """Stream `command` until the joints stop moving (or max_ticks)."""
+    def _settle(self, command: list[float]) -> bool:
+        """Stream `command` until the arm is within `arrive_deg` of it, or has moved
+        and stopped (it can settle short of the command), or `max_ticks` pass. The
+        first quiet ticks after a new command are before the arm starts to move, so
+        stillness only counts once it has moved or been streamed for a while."""
         self.command = command
-        last = np.array(self.arm.get_arm_state())
+        arrive = math.radians(float(self.td.get("arrive_deg", 1.0)))
+        start = np.array(self.arm.get_arm_state())
+        last = start
         still = 0
-        for _ in range(int(self.arm_cfg.max_ticks)):
+        for tick in range(int(self.arm_cfg.max_ticks)):
             self.arm.execute_action(command, self.grip)
             now = np.array(self.arm.get_arm_state())
-            still = still + 1 if np.all(np.abs(_wrap(now - last)) < 1e-3) else 0
+            if np.all(np.abs(_wrap(now - np.array(command))) < arrive):
+                return True
+            moving = np.any(np.abs(_wrap(now - last)) > math.radians(0.05))
+            still = 0 if moving else still + 1
             last = now
-            if still >= 3:
-                return
+            started = np.any(np.abs(_wrap(now - start)) > math.radians(0.5))
+            if still >= 5 and (started or tick >= 15):
+                return True
             time.sleep(POLICY_CONTROL_PERIOD)
+        return False
 
     def gripper(self, position: float) -> float:
         self.grip = position
@@ -891,7 +908,7 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
             if not result.aligned:
                 mover.move("retreat", hover)
                 return False, mover.arm.get_gripper_state(), result.note, servo_log
-        if not mover.move("grasp", grasp):
+        if not mover.move("grasp", grasp, correct=True):
             mover.move("retreat", hover)
             return (
                 False,

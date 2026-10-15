@@ -26,6 +26,13 @@ _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
 TOSS_POSE = (1.326, -0.493, -3.132)
 
 
+@pytest.fixture(autouse=True)
+def _no_control_period_sleep(monkeypatch):
+    """The fake arm needs no real-time ticks; a lagging or sagging fake would
+    otherwise sleep through every settle."""
+    monkeypatch.setattr("prpl_tidybot.toss_cycles.POLICY_CONTROL_PERIOD", 0.0)
+
+
 def _compose(**extra):
     overrides = ["mode=fake", "seed=0", "interactive=true", "settle_after_toss_s=0"]
     overrides.extend(f"{k}={v}" for k, v in extra.items())
@@ -365,9 +372,9 @@ def test_each_toss_waits_for_the_cube_to_settle_before_it_is_localized(
 
 def test_a_compliant_move_that_sags_is_corrected_onto_its_target(tmp_path, monkeypatch):
     """The compliant loop settles a few degrees short under unmodelled torque (24 mm at
-    the gripper on the robot); each grasp move is re-aimed past its target by the
-    measured error until the pinch point is within 2 mm (the carry pose: every joint
-    within 0.3 deg)."""
+    the gripper on the robot); the descent, which the wrist camera cannot watch, is
+    re-aimed past its target by the measured error until the pinch point is within
+    2 mm."""
     # The joint errors the real arm settled with at the hover in run 3 (42 mm short).
     sag = np.radians([-0.13, 1.29, 1.86, -1.28, -5.09, -3.24, -3.26])
 
@@ -381,10 +388,34 @@ def test_a_compliant_move_that_sags_is_corrected_onto_its_target(tmp_path, monke
     )
     log = json.loads((tmp_path / "cycles.json").read_text())
     moves = {m["name"]: m for m in log["cycles"][0]["pick_attempts"][0]["moves"]}
-    for name in ("hover", "grasp", "lift"):
-        assert moves[name]["reached"] and moves[name]["pinch_error_mm"] < 3.0, name
-    err = np.array(moves["carry"]["measured_deg"]) - moves["carry"]["planned_deg"]
-    assert np.abs((err + 180) % 360 - 180).max() < 0.3
+    assert moves["grasp"]["reached"] and moves["grasp"]["pinch_error_mm"] < 3.0
+
+
+class _LaggingArm(FakeArmInterface):
+    """Moves a fraction of the way to each command per tick, the short way round,
+    like a real arm (and like the lagging arm in the cylinder-servo tests)."""
+
+    def execute_action(self, arm_goal, gripper_goal):
+        here = np.array(self.arm_state)
+        gap = (np.array(arm_goal) - here + np.pi) % (2 * np.pi) - np.pi
+        self.arm_state = list(here + 0.3 * gap)
+        self.gripper_state = gripper_goal
+
+
+def test_a_compliant_move_waits_for_a_lagging_arm_to_arrive(tmp_path, monkeypatch):
+    """A move is not over until the arm gets there (run 8: the first quiet ticks
+    were taken for arrival, the hover was 'corrected' from the start pose and ended
+    14 mm off). Hover and lift end within 1 deg; the corrected descent within 2 mm."""
+    monkeypatch.setattr(FakeArmInterface, "execute_action", _LaggingArm.execute_action)
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    moves = {m["name"]: m for m in log["cycles"][0]["pick_attempts"][0]["moves"]}
+    for name in ("hover", "lift"):
+        err = np.array(moves[name]["measured_deg"]) - moves[name]["planned_deg"]
+        assert np.abs((err + 180) % 360 - 180).max() < 1.0, name
+    assert moves["grasp"]["reached"] and moves["grasp"]["pinch_error_mm"] < 3.0
 
 
 def test_the_correction_never_aims_the_grasp_below_its_planned_height(
