@@ -582,6 +582,22 @@ class CeilingCubeTargetSource(TargetSource):
         assert self.last_fit is not None
         return self.last_fit.yaw
 
+    def alternates(self) -> list[tuple[float, float, float]]:
+        """The other cameras' estimates of the cube from the last localization, most
+        confident first, where they differ from the chosen one by over 1 cm (the
+        cameras disagree by ~3 cm in their overlap)."""
+        fit = self.last_fit
+        if fit is None:
+            return []
+        others = sorted(
+            (p for p in fit.per_camera if p[0] != fit.camera), key=lambda p: -p[4]
+        )
+        return [
+            (x, y, yaw)
+            for _, x, y, yaw, _ in others
+            if math.hypot(x - fit.x, y - fit.y) > 0.01
+        ]
+
     def close(self) -> None:
         self._images.close()
         self._markers.close()

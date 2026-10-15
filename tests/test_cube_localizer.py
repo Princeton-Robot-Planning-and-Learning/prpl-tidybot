@@ -381,3 +381,39 @@ def test_a_failed_localization_is_retried_once(cameras, tmp_path):
     x, y, _ = source.get_target()
     assert math.hypot(x - pose[0], y - pose[1]) < 0.006
     assert len([p for p in tmp_path.iterdir() if p.is_dir()]) == 1
+
+
+def test_the_other_cameras_estimate_is_offered_as_a_fallback(cameras):
+    """When the cameras disagree on the cube, the less confident camera's estimate is
+    kept as a fallback target for a missed grasp; when they agree there is none."""
+    top_pose, bottom_pose = (-0.184, 0.10, 0.1), (-0.15, 0.065, 0.1)
+    source = CeilingCubeTargetSource(
+        serials=SERIALS,
+        image_client=_FakeImages(
+            [
+                _render_inconsistent(cameras, top_pose, bottom_pose, seed=s)
+                for s in range(2)
+            ]
+        ),
+        marker_client=_FakeMarkers((0.49, -0.49, math.pi)),
+        num_frames=2,
+        frame_period_s=0.0,
+    )
+    x, y, _ = source.get_target()
+    ((ax, ay, _),) = source.alternates()
+    _, other = sorted(
+        (top_pose, bottom_pose), key=lambda p: math.hypot(x - p[0], y - p[1])
+    )
+    assert math.hypot(ax - other[0], ay - other[1]) < 0.01
+
+    agree = CeilingCubeTargetSource(
+        serials=SERIALS,
+        image_client=_FakeImages(
+            [_render(cameras, [top_pose], seed=s) for s in range(2)]
+        ),
+        marker_client=_FakeMarkers((0.49, -0.49, math.pi)),
+        num_frames=2,
+        frame_period_s=0.0,
+    )
+    agree.get_target()
+    assert not agree.alternates()
