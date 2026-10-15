@@ -180,7 +180,7 @@ def test_converges_when_the_arm_covers_only_part_of_each_commanded_move():
     world = _World((0.568, -0.014), 0.1, start[:2], start[2])
     commanded = {"xy": np.array(start[:2])}
 
-    def half_way(label, ax, ay, yaw):
+    def half_way(_label, ax, ay, yaw):
         target = np.array([ax, ay])
         step = target - commanded["xy"]
         commanded["xy"] = target
@@ -203,7 +203,7 @@ def test_a_sudden_change_in_blob_size_is_a_miss_not_a_target():
     real_image = world.get_image
     looks = {"n": 0}
 
-    def with_a_stray(self=None):
+    def with_a_stray():
         looks["n"] += 1
         image = real_image()
         if looks["n"] == 6:  # the first look after the probes
