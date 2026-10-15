@@ -205,11 +205,13 @@ class TopDownCubeServo:
             cube = None if image is None else detect_wrist_cube(image)
             # As in the cylinder servo, a blob whose size jumps from the recent median
             # is a stray detection, not the cube: a miss, not a step target.
-            if cube is not None and areas:
+            # A blob cut off by the image border changes size legitimately as it
+            # moves, so only whole blobs are checked and remembered.
+            if cube is not None and not cube.clipped and areas:
                 median = float(np.median(areas[-p.area_history :]))
                 if abs(cube.area - median) > p.max_area_change_frac * median:
                     label, cube = f"{label}_outlier", None
-            if cube is not None:
+            if cube is not None and not cube.clipped:
                 areas.append(cube.area)
             error = (
                 None
@@ -238,12 +240,26 @@ class TopDownCubeServo:
         pixel_moves, tool_moves = [], []
         for label, axis in (("probe_x", x_axis), ("probe_y", y_axis)):
             before, cube_before = where(), result.trace[-1].cube
-            px, py = ax + p.probe_step * axis[0], ay + p.probe_step * axis[1]
-            if not move(label, px, py, yaw):
-                return fail(f"{label} move did not arrive")
-            seen = look(label)
-            if seen is None or cube_before is None:
-                return fail(f"cube lost during {label}")
+            if cube_before is None:
+                return fail(f"cube lost before {label}")
+            seen = None
+            # As the cylinder servo walks a cut-off object into view: if a probe
+            # pushes the cube out of (or further off) the image, probe the other way.
+            for sign in (1.0, -1.0):
+                step = sign * p.probe_step
+                px, py = ax + step * axis[0], ay + step * axis[1]
+                if not move(label, px, py, yaw):
+                    return fail(f"{label} move did not arrive")
+                seen = look(label)
+                pushed_out = seen is None or (
+                    seen.clipped and seen.area < cube_before.area
+                )
+                if not pushed_out:
+                    break
+                if sign > 0 and not move("probe_back", ax, ay, yaw):
+                    return fail("probe return did not arrive")
+            if seen is None:
+                return fail(f"cube lost during {label} both ways")
             moved = (
                 where() - before
                 if measured_xy is not None

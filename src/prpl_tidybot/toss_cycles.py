@@ -176,6 +176,7 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
     def confirm(question: str) -> None:
         ceiling.label = question
         if not asking():
+            _logger.info("Step: %s", question.rstrip("?"))
             return
         if once:
             question = (

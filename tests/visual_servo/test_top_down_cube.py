@@ -217,3 +217,23 @@ def test_a_sudden_change_in_blob_size_is_a_miss_not_a_target():
     )
     assert any(t.label.endswith("_outlier") for t in result.trace)
     assert result.aligned, result.note
+
+
+def test_a_cube_cut_off_by_the_image_edge_is_walked_into_view():
+    """As in the cylinder servo: the hover can leave the cube half out of the image
+    (run 11: v=457 of 480, the ceiling cameras 6 cm off). A probe that pushes it
+    further out is retried the other way, a cut-off blob is not an outlier, and the
+    nudges bring the cube in and onto the target."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.55, 0.0), 0.0, start[:2], start[2])
+    world.k = np.array([[2000.0, 0.0], [0.0, -2000.0]])
+    # 7 cm against tool y puts the cube centre at v = 320 + 140 = 460: cut off, and
+    # the +y probe pushes it further out (as in run 11).
+    _, y_axis = _tool_axes(0.0)
+    world.cube = np.array(start[:2]) - 0.07 * y_axis
+    result = TopDownCubeServo(
+        world, TopDownServoParams(target_uv=TARGET, max_moves=12, travel_limit=0.12)
+    ).align(start, world.move, _tool_axes, measured_xy=lambda: tuple(world.pinch))
+    assert result.aligned, result.note
+    assert math.hypot(*(world.pinch - world.cube)) < 0.004
+    assert result.trace[0].cube is not None and result.trace[0].cube.clipped
