@@ -1,5 +1,5 @@
 # Config for scripts/toss_cycles.py: repeat, `cycles` times,
-#   pick the cube -> arm to home -> drive to toss_pose -> toss,
+#   pick the cube (ends in the carry pose) -> drive to toss_pose -> toss -> retract,
 # confirming each action on stdin in mode=real, and whenever the run stops (done,
 # declined, cube not found, failure) retract the arm and drive back to toss_pose.
 #
@@ -39,10 +39,8 @@ ceiling_video:
   host: ${lab.marker_detector_host}
 
 arm_home:
-  # The hardware tests' home pose: gripper ~46 cm in front of the base, facing forward.
-  position: [0.456, 0.0, 0.434]
-  quat_xyzw: [0.5, 0.5, 0.5, 0.5]
-  # Joint-space tolerance (rad, wrapped) and the most policy ticks to wait for it.
+  # Compliant-loop moves: joint-space tolerance (rad, wrapped) and the most policy
+  # ticks to wait for it.
   tolerance: 0.05
   max_ticks: 100
 

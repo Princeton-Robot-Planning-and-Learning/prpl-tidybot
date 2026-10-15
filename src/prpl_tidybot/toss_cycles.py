@@ -41,7 +41,6 @@ from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
 from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExecutor
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD, RETRACT_ARM_CONF
-from prpl_tidybot.third_party.ik_solver import IKSolver
 from prpl_tidybot.top_down_pick import (
     CARRY_ARM_CONF,
     TopDownPickGeometry,
@@ -128,15 +127,6 @@ def run_toss_cycles(
             cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
         ),
     )
-    home_joints = (
-        IKSolver()  # type: ignore[no-untyped-call]
-        .solve(  # type: ignore[no-untyped-call]
-            np.array(cfg.arm_home.position),
-            np.array(cfg.arm_home.quat_xyzw),
-            RETRACT_ARM_CONF,
-        )
-        .tolist()
-    )
     arm: ArmInterface = real_env.interface.arm_interface
     cube_source = hydra.utils.instantiate(
         pipeline.perceiver.target_source, _convert_="all"
@@ -203,9 +193,6 @@ def run_toss_cycles(
                 finish_reason = "picked (toss skipped)"
                 break
 
-            confirm(f"Cycle {cycle}: move the arm to home, holding the cube?")
-            _move_arm(arm, home_joints, arm.get_gripper_state(), cfg.arm_home)
-
             confirm(
                 f"Cycle {cycle}: Drive to the toss pose ({toss_pose[0]:+.3f}, "
                 f"{toss_pose[1]:+.3f}, {math.degrees(toss_pose[2]):+.0f} deg)?"
@@ -220,6 +207,9 @@ def run_toss_cycles(
                 raise _Declined(reason)
             record["tossed"] = True
             completed += 1
+            # The toss leaves the arm raised in its release pose.
+            confirm(f"Cycle {cycle}: retract the arm after the toss?")
+            _retract(cfg, arm)
             settle = float(cfg.get("settle_after_toss_s", 5.0))
             if settle > 0:
                 _logger.info("Waiting %.1f s for the cube to settle.", settle)
@@ -348,6 +338,25 @@ def _move_arm(
     return False
 
 
+def _retract(cfg: DictConfig, arm: ArmInterface) -> None:
+    """Fold the arm to its retract pose, under the onboard controller when the pick
+    uses it (it lands on the pose; the compliant loop waits out its timeout)."""
+    goal = list(RETRACT_ARM_CONF)
+    if cfg.pick.get("top_down", {}).get("arm_controller", "angular") != "angular":
+        _move_arm(arm, goal, arm.get_gripper_state(), cfg.arm_home)
+        return
+    arm.release()
+    aborted = False
+    try:
+        arm.move_angular(goal)
+    except ArmMotionAborted:
+        aborted = True
+        raise
+    finally:
+        if not aborted:
+            arm.resume()
+
+
 def _logged_move(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     arm: ArmInterface,
     name: str,
@@ -442,7 +451,7 @@ def _reset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         if answer.strip().lower() not in ("y", "yes"):
             _logger.info("Reset declined; leaving the robot where it is.")
             return None
-    _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
+    _retract(cfg, arm)
     reached = _drive_to(real_env, toss_pose)
     if records and records[-1].get("tossed") and "landing" not in records[-1]:
         try:
@@ -599,7 +608,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 f"Cycle {cycle}: Missed. Retract the arm and drive back to the toss "
                 "pose to re-localize the cube?"
             )
-            _move_arm(arm, list(RETRACT_ARM_CONF), 0.0, cfg.arm_home)
+            _retract(cfg, arm)
             _drive_to(real_env, list(toss_pose))
     return (
         f"pick failed after {attempts} attempts (gripper never closed on the cube); "
