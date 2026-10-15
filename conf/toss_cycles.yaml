@@ -83,3 +83,8 @@ pick:
 
 # Stop after the pick, holding the cube (then the reset prompt).
 skip_toss: false
+
+# Seconds to wait after each toss before anything looks for the cube. Localizing right
+# after the swing caught the cube mid-flight and mid-slide (at rest ~1.6 s after
+# release) and rejected it.
+settle_after_toss_s: 5.0

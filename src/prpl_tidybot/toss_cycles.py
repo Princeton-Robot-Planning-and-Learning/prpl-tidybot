@@ -220,6 +220,10 @@ def run_toss_cycles(
                 raise _Declined(reason)
             record["tossed"] = True
             completed += 1
+            settle = float(cfg.get("settle_after_toss_s", 5.0))
+            if settle > 0:
+                _logger.info("Waiting %.1f s for the cube to settle.", settle)
+                time.sleep(settle)
         else:
             finish_reason = f"completed {completed}/{requested} cycles"
     except _Declined as e:
