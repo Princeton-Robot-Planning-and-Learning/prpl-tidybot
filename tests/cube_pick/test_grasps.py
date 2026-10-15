@@ -16,8 +16,9 @@ def test_straight_down_candidates_come_first_and_point_down():
     assert first.tilt == 0.0
     tool = first.tool_pose(upright_cube_frame(np.array([1.0, 2.0, 0.045]), 0.0))
     assert np.allclose(tool[:3, 2], [0, 0, -1])
-    # Pads' centre 1 cm above the cube centre; the tool frame 5.2 mm behind it.
-    assert tool[2, 3] == pytest.approx(0.045 + 0.010 + 0.0052)
+    # Deepest grasp first: pads 25 mm down the cube's side, the tool frame 5.2 mm
+    # behind their centre.
+    assert tool[2, 3] == pytest.approx(0.045 + 0.025 + 0.0094 - 0.025 + 0.0052)
     assert np.allclose(tool[:2, 3], [1.0, 2.0])
 
 
@@ -38,7 +39,8 @@ def test_tilted_candidates_keep_the_pads_at_the_same_point():
     for cand in sampler.candidates():
         pinch = cand.cube_from_tool[:3, 3] + cand.cube_from_tool[:3, 2] * 0.0052
         pinches.add(tuple(np.round(pinch, 9)))
-    assert pinches == {(0.0, 0.0, 0.01), (0.0, 0.0, 0.016)}
+    depths = sampler.grasp_depths()
+    assert pinches == {(0.0, 0.0, d) for d in depths}
 
 
 def test_openings_are_partial_and_ordered():
@@ -83,3 +85,11 @@ def test_panda_grasps_map_to_the_same_pads_centre_and_axes():
     pads_panda = panda[:3, 3] + panda[:3, 2] * 0.1034
     pads_tool = tool[:3, 3] + tool[:3, 2] * 0.0052
     assert np.allclose(pads_panda, pads_tool)
+
+
+def test_small_cubes_get_shallow_grasps_with_at_least_5mm_of_pad():
+    sampler = CubeGraspSampler(cube_size=0.02)
+    for depth in sampler.grasp_depths():
+        pad_bottom = depth - 0.0094
+        overlap = 0.01 - pad_bottom
+        assert overlap >= 0.005 - 1e-9

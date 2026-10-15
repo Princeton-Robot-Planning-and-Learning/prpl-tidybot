@@ -95,7 +95,9 @@ class PickConfig:
     tilt_penalty_per_rad: float = 0.01
     max_attempts: int = 3
     max_looks_per_base: int = 4
+    max_filter_bases: int = 10
     lift_check_height: float = 0.05
+    rim_clearance: float = 0.04
     lift_height: float = 0.25
     min_camera_range: float = 0.20
     closed_gap_fraction: float = 0.5
@@ -166,6 +168,7 @@ class CubePickPolicy:
             extra_obstacle_names=extra_obstacle_names,
         )
         self.scene.set_cube_estimate(upright_cube_frame(prior.position, 0.0))
+        self.containers = list(containers)
         self.events: list[PickEvent] = []
         self.estimates: list[CubeEstimate] = []
         self.frames: list[tuple[RGBDFrame, CubeEstimate | PerceptionFailure]] = []
@@ -239,26 +242,53 @@ class CubePickPolicy:
         raise failure
 
     def _look_and_choose(self, excluded: set[str]) -> CubeEstimate:
-        """Steps 1-4 over base placements until one gives an estimate and a grasp."""
+        """Steps 1-4. Look from the first base placement that gives an estimate; then
+        evaluate grasps at candidate base placements *in the planning scene* (no
+        driving), and drive only to the first placement where one fits."""
         cfg = self.config
-        last = PickFailed("look", "no collision-free base placement to look from")
-        for base in self._base_pose_candidates()[: cfg.max_base_poses]:
-            self.grasp = None
+        bases = self._base_pose_candidates()
+        if not bases:
+            raise PickFailed("look", "no collision-free base placement to look from")
+        estimate: CubeEstimate | None = None
+        last: PickFailed = PickFailed("perceive", "no view gave an estimate")
+        for base in bases[: cfg.max_base_poses]:
             try:
                 self._go_to_base(base)
                 estimate = self._observe_from_above()
-                self.prior = CubePrior(
-                    position=estimate.position,
-                    size=self.prior.size,
-                    sigma=0.02,
-                    rgba=self.prior.rgba,
-                    support_heights=self.prior.support_heights,
-                )
-                self._choose_grasp(estimate, excluded)
-                return estimate
+                break
             except PickFailed as failure:
                 last = failure
-                self._log(failure.stage, f"base {np.round(base, 3)} abandoned: {failure.detail}")
+                self._log(failure.stage, f"no estimate from base {np.round(base, 3)}: {failure.detail}")
+        if estimate is None:
+            raise last
+        self.prior = CubePrior(
+            position=estimate.position,
+            size=self.prior.size,
+            sigma=0.02,
+            rgba=self.prior.rgba,
+            support_heights=self.prior.support_heights,
+        )
+        here = self.robot.proprio()
+        options = [here.base] + [b for b in bases if not self._base_close(b, here.base, 0.03, 0.05)]
+        self._hand_blocked: set[tuple] = set()
+        last = PickFailed("filter", "no grasp fits from any base placement")
+        for base in options[: cfg.max_filter_bases]:
+            self.scene.set_robot(base, here.arm)
+            try:
+                self._choose_grasp(estimate, excluded, base_heading=base[2])
+            except PickFailed as failure:
+                last = failure
+                self._log("filter", f"no grasp from base {np.round(base, 3)}: {failure.detail}")
+                if getattr(failure, "hand_blocked", False):
+                    break  # the hand itself does not fit: no base placement can help
+                continue
+            if base is not here.base:
+                self.scene.set_robot(here.base, here.arm)
+                self._go_to_base(base)
+                # Re-check at the placement actually reached.
+                self._choose_grasp(estimate, excluded, base_heading=base[2])
+            return estimate
+        self.scene.set_robot(here.base, here.arm)
         raise last
 
     # --- stage helpers ---------------------------------------------------------------------
@@ -296,8 +326,9 @@ class CubePickPolicy:
         if _joint_error(proprio.arm, HOME_ARM) > self.config.arm_waypoint_tolerance:
             tuck = self.scene.plan_arm(proprio.arm, HOME_ARM, opening=0.085, include_cube=True)
             if tuck is None:
-                raise PickFailed("look", "cannot tuck the arm before driving")
-            self._follow_arm(tuck, opening=None, tolerance=self.config.arm_waypoint_tolerance, stage="look")
+                self._log("look", "no planned path to tuck the arm; driving as it is")
+            else:
+                self._follow_arm(tuck, opening=None, tolerance=self.config.arm_waypoint_tolerance, stage="look")
             proprio = self.robot.proprio()
             self.scene.set_robot(proprio.base, proprio.arm)
         path = self.scene.plan_base(target)
@@ -406,11 +437,16 @@ class CubePickPolicy:
         return result
 
     def _choose_grasp(
-        self, estimate: CubeEstimate, excluded: set[str] | None = None
+        self,
+        estimate: CubeEstimate,
+        excluded: set[str] | None = None,
+        base_heading: float | None = None,
     ) -> tuple[GraspCandidate, list[float], list[float]]:
         cfg = self.config
         proprio = self.robot.proprio()
-        frame = self._grasp_frame(estimate)
+        frame = self._grasp_frame(estimate, base_heading)
+        blocked = getattr(self, "_hand_blocked", set())
+        hand_only = True
         counts: dict[str, int] = {}
         last_frame = self._last_frame
         mask = estimate.mask
@@ -421,10 +457,19 @@ class CubePickPolicy:
         for rank, candidate in enumerate(candidates):
             if excluded and candidate.label in excluded:
                 continue
+            key = _grasp_key(candidate.tool_pose(frame), candidate.opening)
+            if key in blocked:
+                counts["hand blocked (cached)"] = counts.get("hand blocked (cached)", 0) + 1
+                continue
             verdict = self._check_candidate(candidate, frame, proprio.arm)
             if isinstance(verdict, str):
                 counts[verdict] = counts.get(verdict, 0) + 1
+                if _is_hand_collision(verdict):
+                    blocked.add(key)
+                else:
+                    hand_only = False
                 continue
+            hand_only = False
             grasp_joints, standoff_joints, margin = verdict
             feasible.append((margin, rank, candidate, grasp_joints, standoff_joints))
             # Among the first few that fit, prefer near-vertical and well clear: an
@@ -434,7 +479,9 @@ class CubePickPolicy:
             ):
                 break
         if not feasible:
-            raise PickFailed("filter", f"every candidate rejected: {counts}")
+            failure = PickFailed("filter", f"every candidate rejected: {counts}")
+            failure.hand_blocked = hand_only  # type: ignore[attr-defined]
+            raise failure
         margin, _, candidate, grasp_joints, standoff_joints = max(
             feasible,
             key=lambda f: (
@@ -451,6 +498,26 @@ class CubePickPolicy:
             {"rejections": counts},
         )
         return candidate, grasp_joints, standoff_joints
+
+    def _standoff_distance(self, grasp_pose: FloatArray) -> float:
+        """How far back along the approach the standoff sits: `standoff`, or far enough
+        that the standoff is above the rim of a container around the grasp, so the
+        coarse joint-space path never enters the container and everything inside it is
+        the straight, finely tracked approach."""
+        cfg = self.config
+        distance = cfg.standoff
+        xy = grasp_pose[:2, 3]
+        approach = grasp_pose[:3, 2]
+        for spec in self.containers:
+            local = np.linalg.inv(spec.pose) @ np.append(grasp_pose[:3, 3], 1.0)
+            if abs(local[0]) > spec.length / 2 + 0.15 or abs(local[1]) > spec.width / 2 + 0.15:
+                continue
+            rim = float((spec.pose @ np.array([0.0, 0.0, spec.height, 1.0]))[2])
+            rise = rim + cfg.rim_clearance - grasp_pose[2, 3]
+            down = max(-approach[2], 0.5)
+            distance = max(distance, rise / down)
+        del xy
+        return float(distance)
 
     def _grasp_frame(self, estimate: CubeEstimate, reference_yaw: float | None = None) -> FloatArray:
         """The cube's upright frame, its yaw the symmetric equivalent nearest
@@ -475,11 +542,24 @@ class CubePickPolicy:
         clearance = cfg.approach_clearance if approach_clearance is None else approach_clearance
         margin = np.inf
         grasp_pose = candidate.tool_pose(frame)
-        standoff_pose = candidate.standoff_pose(frame, cfg.standoff)
+        standoff = self._standoff_distance(grasp_pose)
+        standoff_pose = candidate.standoff_pose(frame, standoff)
         # The camera must be able to see the cube from the standoff.
-        camera = standoff_pose @ TOOL_FROM_CAMERA
-        if np.linalg.norm(camera[:3, 3] - frame[:3, 3]) < cfg.min_camera_range + cfg.cube_size / 2:
-            return "camera too close"
+        # The hand alone first, at the grasp and along the approach: cheap, and
+        # independent of the base placement and the arm.
+        report = scene.hand_check(
+            grasp_pose, opening=candidate.opening, clearance=clearance, include_cube=True
+        )
+        if not report.ok:
+            return f"grasp hits {report.culprit}"
+        for t in (0.25, 0.5, 0.75, 1.0):
+            pose = grasp_pose.copy()
+            pose[:3, 3] = grasp_pose[:3, 3] - grasp_pose[:3, 2] * standoff * t
+            report = scene.hand_check(
+                pose, opening=candidate.opening, clearance=clearance, include_cube=True
+            )
+            if not report.ok:
+                return f"approach hits {report.culprit}"
         standoff_joints = scene.ik(standoff_pose, seed=seed)
         if standoff_joints is None:
             return "ik standoff"
@@ -608,7 +688,7 @@ class CubePickPolicy:
             for _ in range(cfg.gripper_ticks):
                 self._tick(RobotCommand(arm=proprio.arm, gripper=opening))
             here = self.scene.tool_pose(proprio.arm)
-            for distance in (cfg.standoff, cfg.standoff / 2):
+            for distance in (self._standoff_distance(here), cfg.standoff, cfg.standoff / 2):
                 back = here.copy()
                 back[:3, 3] -= here[:3, 2] * distance
                 path = self.scene.plan_cartesian(list(proprio.arm), back, step=0.02)
@@ -726,6 +806,22 @@ class CubePickPolicy:
     def _log(self, stage: str, message: str, data: dict[str, Any] | None = None) -> None:
         self.events.append(PickEvent(self._ticks, stage, message, data or {}))
         _logger.info("[%s t=%d] %s", stage, self._ticks, message)
+
+
+_HAND_LINKS = ("robotiq", "finger", "knuckle", "pad", "bracelet")
+
+
+def _is_hand_collision(verdict: str) -> bool:
+    """Whether a rejection is the hand itself colliding at the grasp or on the
+    approach -- which no other base placement or arm configuration can change."""
+    if not verdict.startswith(("grasp hits", "approach hits")) or "(" not in verdict:
+        return False
+    link = verdict.rsplit("(", 1)[1]
+    return any(name in link for name in _HAND_LINKS)
+
+
+def _grasp_key(tool_pose: FloatArray, opening: float) -> tuple:
+    return (*np.round(tool_pose[:3, :].ravel(), 3).tolist(), round(opening, 4))
 
 
 def _upright(estimate: CubeEstimate) -> FloatArray:

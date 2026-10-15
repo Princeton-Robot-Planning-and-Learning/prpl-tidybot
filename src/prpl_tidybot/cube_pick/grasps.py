@@ -38,6 +38,10 @@ FloatArray = NDArray[np.float64]
 # Tool frame of a straight-down grasp, as columns in the cube's upright frame: the
 # closing axis (tool x) along cube y, tool y along cube x, the approach (tool z) down.
 # This is the rotation KINDER's pick uses (quaternion (0.707, 0.707, 0, 0) xyzw).
+# Half the length of a Robotiq 2F-85 pad along the approach axis (KINDER's MuJoCo
+# model, `pad_box1`), about the pinch point at its centre.
+PAD_HALF_LENGTH = 0.0094
+
 _DOWN = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
 
 
@@ -94,9 +98,25 @@ class CubeGraspSampler:
     cube_size: float
     tilts_deg: tuple[float, ...] = (0.0, 10.0, 20.0, 30.0)
     opening_margins: tuple[float, ...] = (0.012, 0.008, 0.020)
-    depths: tuple[float, ...] = (0.010, 0.016)
+    # How far down the cube's sides the pads reach (approved minimum 5 mm); the pads'
+    # centre then sits at cube_size / 2 + PAD_HALF_LENGTH - overlap above the centre.
+    # Shallower grasps keep the fingertips off the floor beneath a small cube.
+    pad_overlaps: tuple[float, ...] = (0.025, 0.0188, 0.012, 0.007)
+    depths: tuple[float, ...] | None = None
     tool_to_pinch: float = 0.0052
     max_opening: float = 0.085
+
+    def grasp_depths(self) -> tuple[float, ...]:
+        """Heights of the pads' centre above the cube centre, deepest first."""
+        if self.depths is not None:
+            return self.depths
+        out = []
+        for overlap in self.pad_overlaps:
+            overlap = min(overlap, self.cube_size)
+            depth = round(self.cube_size / 2 + PAD_HALF_LENGTH - overlap, 4)
+            if depth not in out:
+                out.append(depth)
+        return tuple(out)
 
     def candidates(self) -> list[GraspCandidate]:
         """All candidates, most preferred first."""
@@ -105,7 +125,7 @@ class CubeGraspSampler:
             tilts = [0.0] if tilt_deg == 0 else [np.radians(tilt_deg), -np.radians(tilt_deg)]
             for margin in self.opening_margins:
                 opening = min(self.cube_size + margin, self.max_opening)
-                for depth in self.depths:
+                for depth in self.grasp_depths():
                     for yaw_index in range(4):
                         yaw = yaw_index * np.pi / 2
                         for tilt in tilts:

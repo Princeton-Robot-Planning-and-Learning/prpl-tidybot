@@ -70,6 +70,9 @@ class ShelfSim:
         self.data.qvel[:] = row["qvel"]
         self.data.ctrl[:] = row["ctrl"]
         mujoco.mj_forward(self.model, self.data)
+        # The object-centric env caches its state at each step; refresh it from the
+        # restored MuJoCo data.
+        self.oc._current_state = self.oc._get_object_centric_state()  # pylint: disable=protected-access
         return self.live()
 
     def live(self) -> Any:

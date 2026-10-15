@@ -19,7 +19,10 @@ The simulator's ground-truth cube pose never enters it; see
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -92,6 +95,44 @@ def pose_to_matrix(pose: Pose) -> FloatArray:
     return out
 
 
+PHANTOM_CAMERA_BOX = """    <!-- Bounding box for wrist-mounted RealSense camera -->
+    <collision>
+      <origin rpy="0 0 0" xyz="0.05 0 0.02"/>
+      <geometry>
+        <box size="0.025 0.09 0.035"/>
+      </geometry>
+    </collision>
+"""
+
+
+def gripper_urdf_without_phantom_camera() -> Path:
+    """pybullet_helpers' Kinova Gen3 + 2F-85 model, minus its wrist-RealSense box.
+
+    The model KINDER plans with puts a 2.5 x 9 x 3.5 cm collision box beside the
+    Robotiq base for "a wrist-mounted RealSense camera". Our TidyBot has no such camera
+    (its camera is inside the Kinova bracelet), and neither KINDER's MuJoCo model nor
+    the robot's own URDF has the box; near a container wall it is often the only thing
+    in collision. The copy is written next to a link to the original package so its
+    `package://` mesh paths still resolve.
+    """
+    import pybullet_helpers  # pylint: disable=import-outside-toplevel
+
+    source_dir = Path(pybullet_helpers.__file__).parent / "assets" / "urdf"
+    text = (source_dir / "kortex_description" / "gen3_7dof.urdf").read_text()
+    if PHANTOM_CAMERA_BOX not in text:
+        raise RuntimeError("pybullet_helpers' Kinova URDF changed: phantom camera box not found")
+    out_dir = Path(tempfile.gettempdir()) / f"prpl_tidybot_urdf_{os.getuid()}"
+    out_dir.mkdir(exist_ok=True)
+    link = out_dir / "kortex_description"
+    if not link.exists():
+        link.symlink_to(source_dir / "kortex_description")
+    target = out_dir / "gen3_7dof_no_phantom_camera.urdf"
+    stripped = text.replace(PHANTOM_CAMERA_BOX, "")
+    if not target.exists() or target.read_text() != stripped:
+        target.write_text(stripped)
+    return target
+
+
 @dataclass(frozen=True)
 class ContainerSpec:
     """An open box the cube may sit in (KINDER's Bin primitive: origin at the base)."""
@@ -125,6 +166,7 @@ class PlanningScene:
         cube_name: str,
         containers: Sequence[ContainerSpec] = (),
         extra_obstacle_names: Sequence[str] = (),
+        phantom_camera_box: bool = False,
     ) -> None:
         # pylint: disable=import-outside-toplevel
         from kinder.envs.dynamic3d.object_types import MujocoTidyBotRobotObjectType
@@ -133,6 +175,8 @@ class PlanningScene:
         self._state = state.copy()
         self._cube_name = cube_name
         self._sim = PyBulletSim(self._state)
+        if not phantom_camera_box:
+            self._swap_robot_model()
         for spec in containers:
             self._sim.add_bin(
                 name=spec.name,
@@ -164,6 +208,23 @@ class PlanningScene:
         self._cube_body = self._sim._cubes[cube_name]
         self._extra = list(extra_obstacle_names)
         self._sim.set_state(self._state)
+
+    def _swap_robot_model(self) -> None:
+        """Replace KINDER's arm model with the same one minus the phantom camera box."""
+        # pylint: disable=import-outside-toplevel,protected-access
+        from pybullet_helpers.motion_planning import create_joint_distance_fn
+        from pybullet_helpers.robots.kinova import KinovaGen3RobotiqGripperPyBulletRobot
+
+        sim = self._sim
+        old = sim._robot
+        p.removeBody(old.robot_id, physicsClientId=sim.physics_client_id)
+        sim._robot = KinovaGen3RobotiqGripperPyBulletRobot(
+            sim.physics_client_id,
+            fixed_base=False,
+            control_mode="reset",
+            custom_urdf_path=gripper_urdf_without_phantom_camera(),
+        )
+        sim._joint_distance_fn = create_joint_distance_fn(sim._robot)
 
     # --- the believed world -------------------------------------------------------------
 
@@ -273,6 +334,72 @@ class PlanningScene:
                         culprit = f"{self._names.get(body, str(body))} ({self._link_name(point[3])})"
         finally:
             self._sim.set_state(self._state)
+        return ClearanceReport(ok=bool(closest >= 0), closest=float(closest), culprit=culprit)
+
+    # Links rigidly attached beyond the last arm joint: the hand (bracelet, Robotiq base,
+    # fingers). Where these are, given the tool pose, does not depend on the arm.
+    HAND_LINK_PREFIXES = ("bracelet", "robotiq", "left_", "right_")
+
+    def hand_check(
+        self,
+        tool_pose: FloatArray,
+        *,
+        opening: float,
+        clearance: float,
+        include_cube: bool,
+        cube_clearance: float = 0.0,
+    ) -> ClearanceReport:
+        """Clearance of the hand alone with its tool frame at `tool_pose`.
+
+        A second copy of the arm is kept at a fixed configuration and its base moved so
+        its tool frame lands on `tool_pose`; only its hand links are queried. No
+        inverse kinematics is needed, so a grasp the hand cannot fit is rejected before
+        any arm configuration is searched -- and that rejection holds for every base
+        placement.
+        """
+        if not hasattr(self, "_hand"):
+            self._hand = type(self.robot)(
+                self._client,
+                fixed_base=False,
+                control_mode="reset",
+                custom_urdf_path=getattr(self.robot, "_custom_urdf_path", None),
+            )
+            self._hand_q0 = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
+            self._hand.set_joints(self._hand_q0 + [0.0] * 6)
+            base_pose = pose_to_matrix(self._hand.get_base_pose()) if hasattr(self._hand, "get_base_pose") else np.eye(4)
+            tool = pose_to_matrix(self._hand.forward_kinematics(self._hand_q0 + [0.0] * 6))
+            self._base_from_tool = np.linalg.inv(base_pose) @ tool
+            names = {
+                i: p.getJointInfo(self._hand.robot_id, i, physicsClientId=self._client)[12].decode()
+                for i in range(p.getNumJoints(self._hand.robot_id, physicsClientId=self._client))
+            }
+            self._hand_links = [i for i, n in names.items() if n.startswith(self.HAND_LINK_PREFIXES)]
+            self._hand_names = names
+            # Park every link of the copy out of the way of the planning robot.
+            for body in (self.robot.robot_id,):
+                for link in range(-1, p.getNumJoints(self._hand.robot_id, physicsClientId=self._client)):
+                    p.setCollisionFilterPair(
+                        self._hand.robot_id, body, link, -1, 0, physicsClientId=self._client
+                    )
+        hand = self._hand
+        hand.set_base(matrix_to_pose(tool_pose @ np.linalg.inv(self._base_from_tool)))
+        hand.set_joints(self._hand_q0 + hand.finger_state_to_joints(opening_to_driver(opening)))
+        closest = np.inf
+        culprit = None
+        for body in self.obstacle_bodies(include_cube=include_cube):
+            threshold = cube_clearance if body == self._cube_body else clearance
+            for link in self._hand_links:
+                for point in p.getClosestPoints(
+                    hand.robot_id,
+                    body,
+                    distance=threshold + 0.02,
+                    linkIndexA=link,
+                    physicsClientId=self._client,
+                ):
+                    margin = point[8] - threshold
+                    if margin < closest:
+                        closest = margin
+                        culprit = f"{self._names.get(body, str(body))} ({self._hand_names[link]})"
         return ClearanceReport(ok=bool(closest >= 0), closest=float(closest), culprit=culprit)
 
     def _link_name(self, link: int) -> str:
