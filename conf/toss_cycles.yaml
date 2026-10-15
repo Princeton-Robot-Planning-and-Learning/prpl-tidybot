@@ -14,9 +14,12 @@ defaults:
 
 cycles: 2
 
-# Where every throw starts: map-frame (x, y, heading rad). The PRPL lab's start pose,
-# facing -x down the open half of the room.
-toss_pose: [0.489, -0.493, -3.132]
+# Where every throw starts: map-frame (x, y, heading rad), facing -x down the open
+# half of the room. The first real throw (140 deg/s, 600 ms) came to rest 2.34 m from
+# the base, past the localizer's search box when thrown from the lab start pose
+# (x = 0.489). Here the base's back edge (0.274 m behind its centre) stops 0.1 m
+# inside the box (x_max 1.7), and that throw lands ~0.48 m inside it, pickable again.
+toss_pose: [1.326, -0.493, -3.132]
 
 toss:
   max_vel: 140.0

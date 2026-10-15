@@ -17,7 +17,7 @@ from prpl_tidybot.top_down_pick import TopDownPickGeometry, forward_kinematics
 from prpl_tidybot.toss_cycles import run_toss_cycles
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
-TOSS_POSE = (0.489, -0.493, -3.132)
+TOSS_POSE = (1.326, -0.493, -3.132)
 
 
 def _compose(**extra):
@@ -276,6 +276,20 @@ def test_ceiling_video_can_be_turned_off(tmp_path):
         prompt_fn=_Operator(),
     )
     assert not (tmp_path / "ceiling.mp4").exists()
+
+
+def test_a_throw_from_the_toss_pose_lands_where_it_can_be_found_again():
+    """The first real throw (140 deg/s, 600 ms) came to rest 2.34 m from the base,
+    0.31 m beyond the localizer's search box, so the cube was lost. From the toss
+    pose that throw must land at least 0.3 m inside the box, and the base (its
+    collision box reaches 0.274 m behind its centre) must stop 0.1 m inside the box's
+    back edge."""
+    cfg = _compose()
+    x, _, heading = cfg.toss_pose
+    x_min, x_max = cfg.preview.floor_bounds[0], cfg.preview.floor_bounds[1]
+    assert math.cos(heading) < -0.99  # throwing towards -x
+    assert x - 2.34 >= x_min + 0.3
+    assert x + 0.274 == pytest.approx(x_max - 0.1, abs=0.005)
 
 
 def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
