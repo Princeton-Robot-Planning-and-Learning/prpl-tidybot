@@ -1,0 +1,30 @@
+# Config for scripts/skill_server.py: Tossing3D's skills on the real robot, one RPC
+# call each (prpl_tidybot.skill_server). Runs ON the NUC next to the arm and base
+# servers; a planner on the LAN connects with TossingRobotClient.
+#
+#   python scripts/skill_server.py mode=real
+#   python scripts/skill_server.py mode=fake      # no robot: the same skills, faked
+#
+# Everything in toss_cycles.yaml (pick, bin, real_toss_bounds, toss_pose,
+# settle_after_toss_s) applies; the barrier is on.
+
+defaults:
+  - toss_cycles
+  - _self_
+
+# The planner confirms nothing on stdin; the server never prompts.
+interactive: false
+
+barrier:
+  enabled: true
+
+skill_server:
+  # Bind address on the NUC (all interfaces, so agni can reach it) and port, next to
+  # the base (50000) and arm (50001) servers. The authkey is
+  # third_party.constants.RPC_AUTHKEY. Clients connect to ${lab.nuc_ip}.
+  host: 0.0.0.0
+  port: 50002
+  # observe()["cube_upright"]: the cube's flat-cube silhouette fit scored at least
+  # this IoU (a cube resting on a face fits at ~0.9; the localizer drops a fit below
+  # its own min_iou, 0.6).
+  upright_min_iou: 0.75
