@@ -265,3 +265,33 @@ def test_a_gain_measured_on_a_cut_off_cube_is_remeasured_before_turning_the_wris
     assert sum(t.label == "probe_x" for t in result.trace) == 2
     turn = (result.yaw - 0.15 + math.pi / 4) % (math.pi / 2) - math.pi / 4
     assert abs(turn) < math.radians(4)
+
+
+def test_a_sideways_probe_along_the_edge_is_not_mistaken_for_pushing_the_cube_out():
+    """Run 13: the x probe slid the cut-off cube along the image edge, its area
+    wobbled down a little, and the probe was needlessly retried the other way. Only a
+    clear shrink (below pushed_out_frac) counts as pushed out."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.55, 0.0), 0.0, start[:2], start[2])
+    world.k = np.array([[2000.0, 0.0], [0.0, -2000.0]])
+    _, y_axis = _tool_axes(0.0)
+    world.cube = np.array(start[:2]) - 0.07 * y_axis
+    real_image = world.get_image
+    looks = {"n": 0}
+
+    def wobbling():
+        looks["n"] += 1
+        image = real_image()
+        if looks["n"] == 2:  # the x probe: shave the top rows off the cut-off blob
+            rows = np.nonzero((image != 200).any(axis=(1, 2)))[0]
+            image[rows.min() : rows.min() + 4] = 200
+        return image
+
+    world.get_image = wobbling
+    params = TopDownServoParams(target_uv=TARGET, travel_limit=0.12)
+    result = TopDownCubeServo(world, params).align(
+        start, world.move, _tool_axes, measured_xy=lambda: tuple(world.pinch)
+    )
+    labels = [t.label for t in result.trace]
+    assert labels[: labels.index("probe_y")] == ["hover", "probe_x", "probe_back"]
+    assert result.aligned, result.note
