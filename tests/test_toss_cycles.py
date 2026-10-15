@@ -583,4 +583,4 @@ def test_the_real_cube_source_searches_the_graspable_range():
     fake = {
         "_target_": "prpl_tidybot.real_sim.perceivers.target_source.ConstantTargetSource"
     }
-    assert _cube_source_kwargs(cfg, fake) == {}
+    assert not _cube_source_kwargs(cfg, fake)
