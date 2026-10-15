@@ -155,7 +155,7 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
     cube_source = hydra.utils.instantiate(
         pipeline.perceiver.target_source,
         _convert_="all",
-        **_cube_source_kwargs(cfg, pipeline.perceiver.target_source),
+        **_cube_source_kwargs(cfg, pipeline.perceiver.target_source, resolved_log_dir),
     )
     source: ImageSource | None = None
     if wrist_camera is not None:
@@ -387,15 +387,21 @@ def _move_arm(
     return False
 
 
-def _cube_source_kwargs(cfg: DictConfig, target_cfg: Any) -> dict[str, Any]:
+def _cube_source_kwargs(
+    cfg: DictConfig, target_cfg: Any, log_dir: Path | None = None
+) -> dict[str, Any]:
     """The ceiling localizer searches everywhere the arm can grasp from inside the
-    drivable box, not just the box itself (a bin just past its edge)."""
+    drivable box, not just the box itself (a bin just past its edge), and saves the
+    frames of any missed localization beside the run's logs."""
     if not str(target_cfg["_target_"]).endswith("CeilingCubeTargetSource"):
         return {}
     bounds = grasp_search_bounds(
         tuple(cfg.preview.floor_bounds), geometry_from_config(cfg.pick.get("top_down"))
     )
-    return {"floor_bounds": list(bounds)}
+    kwargs: dict[str, Any] = {"floor_bounds": list(bounds)}
+    if log_dir is not None:
+        kwargs["failure_dir"] = str(Path(log_dir) / "localization_failures")
+    return kwargs
 
 
 def _retract(cfg: DictConfig, arm: ArmInterface) -> None:

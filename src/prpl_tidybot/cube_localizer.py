@@ -22,6 +22,7 @@ import math
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import cv2 as cv
@@ -271,17 +272,23 @@ def localize_cube(
     min_iou: float = 0.6,
     fusion: str = "best_view",
     serials: Sequence[str] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> CubeFit | None:
     """The best-fitting cube in the drivable area, or None if nothing fits well
     enough.
 
     ``fusion="best_view"`` (default) fits each camera on its own and keeps the best;
     ``"fused"`` scores every camera that sees the cube together, which is only right
-    when their calibrations agree.
+    when their calibrations agree. ``diagnostics``, when given, is filled with every
+    candidate and its quick-screen fit.
     """
     best: CubeFit | None = None
+    screened: list[dict[str, Any]] = []
+    if diagnostics is not None:
+        diagnostics["candidates"] = screened
     for guess in find_cube_candidates(frames[-1], cameras, floor_bounds, side, exclude):
         fit = fit_cube_pose(frames[-3:], cameras, guess, side)  # quick screen
+        screened.append({"guess": list(guess), "iou": None if fit is None else fit.iou})
         if fit is not None and (best is None or fit.iou > best.iou):
             best = fit
     if best is None or best.iou < min_iou:
@@ -366,6 +373,8 @@ class CeilingCubeTargetSource(TargetSource):
         host: str | None = None,
         fusion: str = "best_view",
         warn_disagreement_m: float = 0.01,
+        failure_dir: str | Path | None = None,
+        retries: int = 1,
     ) -> None:
         if image_client is None:
             from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
@@ -393,6 +402,8 @@ class CeilingCubeTargetSource(TargetSource):
         self._min_iou = float(min_iou)
         self._fusion = fusion
         self._warn_m = float(warn_disagreement_m)
+        self._failure_dir = None if failure_dir is None else Path(failure_dir)
+        self._retries = int(retries)
         self.last_fit: CubeFit | None = None
 
     def _frames(self) -> list[NDArray[np.uint8]]:
@@ -413,17 +424,28 @@ class CeilingCubeTargetSource(TargetSource):
         return [(float(p[0]), float(p[1]), self._robot_half) for p in poses.values()]
 
     def localize(self) -> CubeFit:
-        """Run the localizer now and return the fit (raises if there is no cube)."""
-        fit = localize_cube(
-            self._frames(),
-            self._cameras,
-            self._floor_bounds,
-            self._side,
-            exclude=self._exclusions(),
-            min_iou=self._min_iou,
-            fusion=self._fusion,
-            serials=self._serials,
-        )
+        """Run the localizer now and return the fit (raises if there is no cube).
+
+        A miss is retried with fresh frames; each miss saves its frames and inputs
+        under ``failure_dir`` so it can be replayed."""
+        fit = None
+        for _ in range(1 + self._retries):
+            frames, exclude = self._frames(), self._exclusions()
+            diagnostics: dict[str, Any] = {}
+            fit = localize_cube(
+                frames,
+                self._cameras,
+                self._floor_bounds,
+                self._side,
+                exclude=exclude,
+                min_iou=self._min_iou,
+                fusion=self._fusion,
+                serials=self._serials,
+                diagnostics=diagnostics,
+            )
+            if fit is not None:
+                break
+            self._save_failure(frames, exclude, diagnostics)
         if fit is None:
             raise RuntimeError(
                 "CeilingCubeTargetSource: no cube found in the drivable area "
@@ -440,6 +462,32 @@ class CeilingCubeTargetSource(TargetSource):
             )
         self.last_fit = fit
         return fit
+
+    def _save_failure(
+        self,
+        frames: Sequence[NDArray[np.uint8]],
+        exclude: Sequence[Sequence[float]],
+        diagnostics: dict[str, Any],
+    ) -> None:
+        if self._failure_dir is None:
+            return
+        stamp = time.strftime("%H-%M-%S")
+        n = len(list(self._failure_dir.glob("*"))) if self._failure_dir.exists() else 0
+        out = self._failure_dir / f"{n:02d}_{stamp}"
+        out.mkdir(parents=True, exist_ok=True)
+        for i, frame in enumerate(frames):
+            cv.imwrite(str(out / f"frame_{i:02d}.png"), frame)
+        info = {
+            "time": time.time(),
+            "floor_bounds": list(self._floor_bounds),
+            "exclusions": [list(e) for e in exclude],
+            "min_iou": self._min_iou,
+            "side": self._side,
+            "serials": self._serials,
+            **diagnostics,
+        }
+        (out / "localization.json").write_text(json.dumps(info, indent=1))
+        _logger.warning("No cube found; saved the frames and inputs to %s.", out)
 
     def get_target(self) -> tuple[float, float, float]:
         fit = self.localize()
