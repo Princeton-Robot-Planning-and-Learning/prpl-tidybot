@@ -110,12 +110,28 @@ def test_the_base_drives_to_the_toss_pose_with_the_cube_in_the_carry_pose(
 
 
 def test_the_arm_retracts_after_each_toss_before_the_next_pick(tmp_path, arm_log):
-    """The toss leaves the arm raised in its release pose; it is retracted before the
-    base drives off for the next pick (run 7 drove to cycle 2 with the arm up)."""
+    """The toss leaves the arm raised in its release pose; it is retracted, under the
+    compliant loop, before the base drives off for the next pick (run 7 drove to
+    cycle 2 with the arm up)."""
     run_toss_cycles(_compose(cycles=2), log_dir=tmp_path, prompt_fn=_Operator())
     first_toss = next(i for i, e in enumerate(arm_log) if e[0] == "toss")
     after = [e for e in arm_log[first_toss + 1 :] if e[0] in ("arm", "angular")]
+    assert after[0][0] == "arm"
     assert after[0][1] == pytest.approx(list(RETRACT_ARM_CONF))
+
+
+def test_every_retract_runs_under_the_compliant_loop(tmp_path, arm_log):
+    """Only the grasp uses the onboard controller; retracts (after a toss, before the
+    drive back after a miss, and in the reset) stay compliant."""
+    cfg = _compose(
+        **{"pick.top_down.fake_grasp_reading": 0.996, "pick.top_down.max_attempts": 2}
+    )
+    run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=_Operator())
+    retract = list(RETRACT_ARM_CONF)
+    assert not [
+        e for e in arm_log if e[0] == "angular" and e[1] == pytest.approx(retract)
+    ]
+    assert [e for e in arm_log if e[0] == "arm" and e[1] == pytest.approx(retract)]
 
 
 def test_declining_the_drive_stops_without_tossing_and_resets(tmp_path, arm_log):
@@ -207,8 +223,7 @@ def test_the_pick_runs_under_the_onboard_controller_by_default(tmp_path, arm_log
         _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
     )
     angular = [e for e in arm_log if e[0] == "angular"]
-    retract = list(RETRACT_ARM_CONF)
-    assert len([e for e in angular if e[1] != pytest.approx(retract)]) == 4
+    assert len(angular) == 4
     log = json.loads((tmp_path / "cycles.json").read_text())
     moves = log["cycles"][0]["pick_attempts"][0]["moves"]
     assert all(m["controller"] == "angular" for m in moves)
