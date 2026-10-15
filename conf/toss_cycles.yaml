@@ -68,16 +68,17 @@ pick:
     grasp_min: 0.2
     grasp_max: 0.9
     close_position: 1.0
-    # compliant: grasp moves streamed through the torque loop, each corrected onto its
-    # target (the loop alone settled 24 mm short of the cube, 2026-10-14 run 3).
+    # compliant: grasp moves streamed through the torque loop, waiting for the arm to
+    # arrive (within arrive_deg) or stop; it settles short (24 mm, run 3), which the
+    # wrist servo absorbs at the hover; only the descent is corrected (below).
     # angular: the arm's onboard position controller (Jimmy Wu's pick_object).
     # One controller per run; try each on its own.
     arm_controller: compliant
-    # Compliant correction, up to correction_rounds re-aims after the arm settles:
-    # pointing-down moves re-aim the pinch point by the measured position error
-    # (within correction_tol_mm, at most correction_max_mm past the goal, never below
-    # the grasp height); the carry pose re-commands joints (correction_tol_deg,
-    # correction_max_deg).
+    arrive_deg: 1.0
+    # The compliant descent is corrected: after the arm settles the pinch point is
+    # re-aimed by the measured position error, up to correction_rounds times, until
+    # within correction_tol_mm, at most correction_max_mm past the goal and never
+    # below the grasp height.
     correction_rounds: 3
     correction_tol_mm: 2.0
     correction_max_mm: 60.0

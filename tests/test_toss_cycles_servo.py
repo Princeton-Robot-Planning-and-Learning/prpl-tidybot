@@ -18,6 +18,13 @@ _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
 TARGET = (318.0, 280.0)
 
 
+@pytest.fixture(autouse=True)
+def _no_control_period_sleep(monkeypatch):
+    """The fake arm needs no real-time ticks; a lagging or sagging fake would
+    otherwise sleep through every settle."""
+    monkeypatch.setattr("prpl_tidybot.toss_cycles.POLICY_CONTROL_PERIOD", 0.0)
+
+
 def _compose(**extra):
     overrides = ["mode=fake", "seed=0", "interactive=true", "settle_after_toss_s=0"]
     overrides += ["cycles=1", "skip_toss=true", "pick.top_down.wrist_servo.settle_s=0"]
