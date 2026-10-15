@@ -258,6 +258,28 @@ def test_ctrl_c_during_a_pick_move_stops_without_further_motion(
     assert not resumes
 
 
+def test_the_whole_run_is_filmed_from_the_ceiling(tmp_path):
+    """ceiling.mp4 in the log dir covers the run, from the first prompt to the reset."""
+    import cv2 as cv  # pylint: disable=import-outside-toplevel
+
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    video = cv.VideoCapture(str(tmp_path / "ceiling.mp4"))
+    assert video.isOpened()
+    assert video.get(cv.CAP_PROP_FRAME_COUNT) > 0
+
+
+def test_ceiling_video_can_be_turned_off(tmp_path):
+    """ceiling_video.enabled=false records nothing."""
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true", **{"ceiling_video.enabled": "false"}),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    assert not (tmp_path / "ceiling.mp4").exists()
+
+
 def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
     """Readings that look like an empty gripper retry up to max_attempts, then stop."""
     operator = _Operator()

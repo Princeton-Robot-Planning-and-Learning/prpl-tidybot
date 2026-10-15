@@ -27,6 +27,14 @@ toss:
 capture:
   enabled: false
 
+# Whole-run video from the ceiling cameras (both, stitched), labelled with the current
+# step: <log dir>/ceiling.mp4.
+ceiling_video:
+  enabled: true
+  fps: 10
+  scale: 0.5
+  host: ${lab.marker_detector_host}
+
 arm_home:
   # The hardware tests' home pose: gripper ~46 cm in front of the base, facing forward.
   position: [0.456, 0.0, 0.434]
