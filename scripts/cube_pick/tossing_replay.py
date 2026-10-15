@@ -116,7 +116,11 @@ def main() -> None:
 
                     if record["success"] and index not in video_rows:
                         shutil.rmtree(video, ignore_errors=True)
-                    elif not record["success"] and record.get("stage") in harness.PLAN_TIME_STAGES:
+                    elif (
+                        not record["success"]
+                        and record.get("stage") in harness.PLAN_TIME_STAGES
+                        and index not in video_rows
+                    ):
                         # Nothing worth filming: keep the status record and a still.
                         (video / "video.mp4").unlink(missing_ok=True)
                         record["still"] = str(video / "still.png")

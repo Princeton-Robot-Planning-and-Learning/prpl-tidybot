@@ -105,15 +105,20 @@ PHANTOM_CAMERA_BOX = """    <!-- Bounding box for wrist-mounted RealSense camera
 """
 
 
-def gripper_urdf_without_phantom_camera() -> Path:
-    """pybullet_helpers' Kinova Gen3 + 2F-85 model, minus its wrist-RealSense box.
+BARE_BRACELET_MESH = "bracelet_no_vision_link.STL"
+VISION_BRACELET_MESH = "bracelet_with_vision_link.STL"
 
-    The model KINDER plans with puts a 2.5 x 9 x 3.5 cm collision box beside the
-    Robotiq base for "a wrist-mounted RealSense camera". Our TidyBot has no such camera
-    (its camera is inside the Kinova bracelet), and neither KINDER's MuJoCo model nor
-    the robot's own URDF has the box; near a container wall it is often the only thing
-    in collision. The copy is written next to a link to the original package so its
-    `package://` mesh paths still resolve.
+
+def planning_arm_urdf() -> Path:
+    """pybullet_helpers' Kinova Gen3 + 2F-85 model with the wrist the robot really has.
+
+    The packaged model collides the bracelet as the bare `bracelet_no_vision_link` and
+    stands a 2.5 x 9 x 3.5 cm box beside the Robotiq base in for "a wrist-mounted
+    RealSense camera". Our TidyBot has no RealSense; its camera is the Kinova vision
+    module inside the bracelet, which KINDER's MuJoCo model collides as
+    `bracelet_with_vision_link` (3.7 cm deeper on one side). This copy drops the box and
+    uses the vision bracelet, so planning and execution share one wrist. It is written
+    next to a link to the original package so its `package://` mesh paths resolve.
     """
     import pybullet_helpers  # pylint: disable=import-outside-toplevel
 
@@ -126,8 +131,10 @@ def gripper_urdf_without_phantom_camera() -> Path:
     link = out_dir / "kortex_description"
     if not link.exists():
         link.symlink_to(source_dir / "kortex_description")
-    target = out_dir / "gen3_7dof_no_phantom_camera.urdf"
-    stripped = text.replace(PHANTOM_CAMERA_BOX, "")
+    if text.count(BARE_BRACELET_MESH) != 2:
+        raise RuntimeError("pybullet_helpers' Kinova URDF changed: bare bracelet mesh not found")
+    target = out_dir / "gen3_7dof_vision_bracelet.urdf"
+    stripped = text.replace(PHANTOM_CAMERA_BOX, "").replace(BARE_BRACELET_MESH, VISION_BRACELET_MESH)
     if not target.exists() or target.read_text() != stripped:
         target.write_text(stripped)
     return target
@@ -210,7 +217,7 @@ class PlanningScene:
         self._sim.set_state(self._state)
 
     def _swap_robot_model(self) -> None:
-        """Replace KINDER's arm model with the same one minus the phantom camera box."""
+        """Replace KINDER's arm model with :func:`planning_arm_urdf`'s."""
         # pylint: disable=import-outside-toplevel,protected-access
         from pybullet_helpers.motion_planning import create_joint_distance_fn
         from pybullet_helpers.robots.kinova import KinovaGen3RobotiqGripperPyBulletRobot
@@ -222,7 +229,7 @@ class PlanningScene:
             sim.physics_client_id,
             fixed_base=False,
             control_mode="reset",
-            custom_urdf_path=gripper_urdf_without_phantom_camera(),
+            custom_urdf_path=planning_arm_urdf(),
         )
         sim._joint_distance_fn = create_joint_distance_fn(sim._robot)
 
