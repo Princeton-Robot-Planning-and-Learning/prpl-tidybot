@@ -21,7 +21,7 @@ TOSS_POSE = (1.326, -0.493, -3.132)
 
 
 def _compose(**extra):
-    overrides = ["mode=fake", "seed=0", "interactive=true"]
+    overrides = ["mode=fake", "seed=0", "interactive=true", "settle_after_toss_s=0"]
     overrides.extend(f"{k}={v}" for k, v in extra.items())
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
         return compose(config_name="toss_cycles", overrides=overrides)
@@ -290,6 +290,35 @@ def test_a_throw_from_the_toss_pose_lands_where_it_can_be_found_again():
     assert math.cos(heading) < -0.99  # throwing towards -x
     assert x - 2.34 >= x_min + 0.3
     assert x + 0.274 == pytest.approx(x_max - 0.1, abs=0.005)
+
+
+def test_each_toss_waits_for_the_cube_to_settle_before_it_is_localized(
+    tmp_path, monkeypatch
+):
+    """Localizing right after the swing caught the cube mid-flight and mid-slide (the
+    fit fell to 0.11 of the 0.6 needed) and the run stopped; every toss now waits
+    settle_after_toss_s before anything looks for the cube."""
+    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+
+    events: list[str] = []
+    monkeypatch.setattr(
+        tc.time, "sleep", lambda s: events.append(f"sleep {s}") if s >= 1 else None
+    )
+    original = ConstantTargetSource.get_target
+
+    def get_target(self):
+        events.append("localize")
+        return original(self)
+
+    monkeypatch.setattr(ConstantTargetSource, "get_target", get_target)
+    run_toss_cycles(
+        _compose(cycles=2, settle_after_toss_s=5.0),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    settles = [i for i, e in enumerate(events) if e == "sleep 5.0"]
+    assert len(settles) == 2
+    assert all("localize" in events[i + 1 :] for i in settles[:1])
 
 
 def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
