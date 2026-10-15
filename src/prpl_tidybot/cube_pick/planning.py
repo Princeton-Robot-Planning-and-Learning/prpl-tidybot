@@ -319,7 +319,7 @@ class PlanningScene:
         culprit = None
         try:
             for body in self.obstacle_bodies(include_cube=include_cube):
-                threshold = cube_clearance if body == self._cube_body else clearance
+                threshold = self._threshold(body, clearance, cube_clearance)
                 points = p.getClosestPoints(
                     robot.robot_id,
                     body,
@@ -387,7 +387,7 @@ class PlanningScene:
         closest = np.inf
         culprit = None
         for body in self.obstacle_bodies(include_cube=include_cube):
-            threshold = cube_clearance if body == self._cube_body else clearance
+            threshold = self._threshold(body, clearance, cube_clearance)
             for link in self._hand_links:
                 for point in p.getClosestPoints(
                     hand.robot_id,
@@ -401,6 +401,17 @@ class PlanningScene:
                         closest = margin
                         culprit = f"{self._names.get(body, str(body))} ({self._hand_names[link]})"
         return ClearanceReport(ok=bool(closest >= 0), closest=float(closest), culprit=culprit)
+
+    # The fingertips reach below the pads; KINDER's MuJoCo fingers sit a few millimetres
+    # lower than the planning model's, so a grasp planned 1 mm off the floor touches it.
+    FLOOR_CLEARANCE = 0.004
+
+    def _threshold(self, body: int, clearance: float, cube_clearance: float) -> float:
+        if body == self._cube_body:
+            return cube_clearance
+        if body == self._floor:
+            return max(clearance, self.FLOOR_CLEARANCE)
+        return clearance
 
     def _link_name(self, link: int) -> str:
         if not hasattr(self, "_link_names"):

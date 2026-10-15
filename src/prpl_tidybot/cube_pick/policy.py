@@ -98,6 +98,7 @@ class PickConfig:
     max_filter_bases: int = 10
     lift_check_height: float = 0.05
     rim_clearance: float = 0.04
+    close_if_short: float = 0.025
     lift_height: float = 0.25
     min_camera_range: float = 0.20
     closed_gap_fraction: float = 0.5
@@ -106,6 +107,7 @@ class PickConfig:
     arm_waypoint_tolerance: float = 0.04
     arm_final_tolerance: float = 0.01
     fine_tolerance: float = 0.006
+    pass_tolerance: float = 0.015
     fine_position_tolerance: float = 0.0015
     fine_rotation_tolerance: float = np.radians(1.5)
     motion_timeout: int = 250
@@ -614,7 +616,19 @@ class CubePickPolicy:
                 path, opening=self.grasp.opening, tolerance=self.config.fine_tolerance, stage="approach"
             )
         except PickFailed as failure:
-            raise PickFailed("approach", f"stopped short (contact?): {failure.detail}") from failure
+            # Stopped early. If the pads are already around the cube (on the approach
+            # axis, a little short), close and let step 7 judge; otherwise give up.
+            here = self.scene.tool_pose(self.robot.proprio().arm)
+            offset = target[:3, 3] - here[:3, 3]
+            along = float(offset @ target[:3, 2])
+            lateral = float(np.linalg.norm(offset - along * target[:3, 2]))
+            if 0.0 <= along <= self.config.close_if_short and lateral <= 0.004:
+                self._log("approach", f"stopped {along * 1000:.0f} mm short, {lateral * 1000:.1f} mm off axis; closing")
+                return
+            raise PickFailed(
+                "approach",
+                f"stopped short (contact?) {along * 1000:.0f} mm before the grasp, {lateral * 1000:.1f} mm off axis: {failure.detail}",
+            ) from failure
 
     def _close_and_check(self) -> None:
         cfg = self.config
@@ -732,7 +746,10 @@ class CubePickPolicy:
         previous: tuple[float, ...] | None = None
         while True:
             proprio = self.robot.proprio()
-            while index < len(path) - 1 and self._reached(proprio.arm, path[index], tolerance):
+            # Pass intermediate waypoints at a looser tolerance (the PD loop never quite
+            # settles on each); hold the final one to `tolerance`.
+            passing = max(tolerance, cfg.pass_tolerance)
+            while index < len(path) - 1 and self._reached(proprio.arm, path[index], passing):
                 index += 1
             error = _joint_error(proprio.arm, path[index])
             if index == len(path) - 1 and self._reached(
@@ -757,8 +774,10 @@ class CubePickPolicy:
                 )
             self._tick(RobotCommand(arm=path[index], gripper=gripper))
             ticks += 1
-            if ticks > cfg.motion_timeout:
-                if index == len(path) - 1 and error < 3 * tolerance:
+            if ticks > cfg.motion_timeout + 10 * len(path):
+                if index == len(path) - 1 and (
+                    error < 3 * tolerance or self._reached(proprio.arm, path[-1], tolerance, scale=2.0)
+                ):
                     break
                 raise PickFailed(
                     stage, f"arm timed out at waypoint {index}/{len(path) - 1}, {error:.3f} rad short"

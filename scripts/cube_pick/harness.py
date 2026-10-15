@@ -63,7 +63,9 @@ class VideoRecorder:
         self.sim = sim
         self.out_dir = out_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.frames: list[np.ndarray] = []
+        self.frames: list[np.ndarray] = []  # unused: frames stream to the writer
+        self._writer: Any = None
+        self.count_written = 0
         self.every = every
         self.count = 0
         model = sim.model.mj_model
@@ -115,17 +117,23 @@ class VideoRecorder:
         text = self.overlay.get("caption", "")
         if text:
             cv.putText(frame, text, (10, 470), cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv.LINE_AA)
-        self.frames.append(frame)
+        if self._writer is None:
+            import imageio.v2 as imageio  # pylint: disable=import-outside-toplevel
 
-    def write(self, name: str, fps: int = 20) -> Path:
-        import imageio.v2 as imageio  # pylint: disable=import-outside-toplevel
+            self._writer = imageio.get_writer(
+                self.out_dir / "video.mp4", fps=20, codec="libx264", quality=7, macro_block_size=8
+            )
+        self._writer.append_data(frame)
+        self.count_written += 1
+        self.frames = [frame]  # keep only the latest, so `if recorder.frames` still works
 
-        path = self.out_dir / f"{name}.mp4"
-        writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=7, macro_block_size=8)
-        for frame in self.frames:
-            writer.append_data(frame)
-        writer.close()
-        return path
+    def write(self, name: str = "video", fps: int = 20) -> Path:
+        """Close the stream (frames were written as they came)."""
+        del name, fps
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+        return self.out_dir / "video.mp4"
 
 
 def draw_overlay(
