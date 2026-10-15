@@ -25,7 +25,7 @@ centre (``MOUNTING_OFFSET`` in ``third_party/constants.py``) and the floor is at
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
 
@@ -81,12 +81,14 @@ def standoff_pose(
     cube_xy: Sequence[float],
     geom: TopDownPickGeometry,
     floor_bounds: Sequence[float],
+    is_valid: Callable[[tuple[float, float, float]], bool] | None = None,
 ) -> tuple[float, float, float]:
     """Map-frame base pose `standoff` from the cube and facing it.
 
     Prefers approaching along the line from the robot's current position; if that
-    standoff is off the floor, swings the approach round the cube in 15-degree steps
-    (nearest first) until it is on the floor.
+    standoff is off the floor (or fails ``is_valid``, e.g. the barrier's clearance),
+    swings the approach round the cube in 15-degree steps (nearest first) until it is on
+    the floor.
     """
     cx, cy = cube_xy
     direct = math.atan2(cy - robot[1], cx - robot[0])  # direction of travel to the cube
@@ -95,11 +97,13 @@ def standoff_pose(
             heading = direct + sign * math.radians(15 * k)
             x = cx - geom.standoff * math.cos(heading)
             y = cy - geom.standoff * math.sin(heading)
+            pose = (x, y, math.atan2(math.sin(heading), math.cos(heading)))
             if (
                 floor_bounds[0] <= x <= floor_bounds[1]
                 and floor_bounds[2] <= y <= floor_bounds[3]
+                and (is_valid is None or is_valid(pose))
             ):
-                return (x, y, math.atan2(math.sin(heading), math.cos(heading)))
+                return pose
     raise ValueError(
         f"No standoff for a cube at {tuple(cube_xy)} inside {tuple(floor_bounds)}."
     )
