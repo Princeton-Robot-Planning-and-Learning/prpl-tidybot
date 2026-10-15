@@ -11,6 +11,10 @@ from prpl_tidybot.toss import (
 )
 
 
+class ArmMotionAborted(KeyboardInterrupt):
+    """Ctrl-C during an onboard-controller move; the arm was sent a Stop."""
+
+
 class ArmInterface(abc.ABC):
     """Arm interface.
 
@@ -47,6 +51,16 @@ class ArmInterface(abc.ABC):
         Real-resource subclasses override; the default is a no-op.
         """
 
+    def move_angular(self, goal: list[float]) -> list[float]:
+        """Move to ``goal`` (radians) under the arm's onboard position controller and
+        return the measured joints. Only between ``release`` and ``resume``."""
+        raise NotImplementedError(f"{type(self).__name__} has no onboard controller.")
+
+    def set_gripper_angular(self, position: float, timeout: float = 4.0) -> float:
+        """Move the gripper under the onboard controller; returns where it stopped.
+        Only between ``release`` and ``resume``."""
+        raise NotImplementedError(f"{type(self).__name__} has no onboard controller.")
+
     def toss(
         self,
         heading: float = 0.0,
@@ -73,6 +87,27 @@ class FakeArmInterface(ArmInterface):
         self.arm_state: list[float] = [0.0] * 7
         self.gripper_state: float = 0.0
         self.toss_calls: list[dict[str, Any]] = []
+        self.released = False
+        # Added to every joint by move_angular, to model an arm that stops short.
+        self.angular_offset = 0.0
+
+    def release(self) -> None:
+        self.released = True
+
+    def resume(self) -> None:
+        self.released = False
+
+    def move_angular(self, goal: list[float]) -> list[float]:
+        if not self.released:
+            raise RuntimeError("release() the torque loop before an angular move")
+        self.arm_state = [float(q) + self.angular_offset for q in goal]
+        return list(self.arm_state)
+
+    def set_gripper_angular(self, position: float, timeout: float = 4.0) -> float:
+        if not self.released:
+            raise RuntimeError("release() the torque loop before an angular move")
+        self.gripper_state = float(position)
+        return self.gripper_state
 
     def get_arm_state(self) -> list[float]:
         return list(self.arm_state)

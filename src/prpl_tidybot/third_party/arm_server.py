@@ -131,6 +131,22 @@ class Arm:
         finally:
             self.resume()
 
+    def move_joints_angular(self, qpos):
+        # One blocking move under the arm's onboard position controller (as Jimmy
+        # Wu's original pick_object), between release() and resume(). Radians in,
+        # wrapped radians of the measured pose out.
+        if self.arm.cyclic_running:
+            raise RuntimeError("release() the torque loop before an angular move")
+        self.arm.move_angular([float(v) for v in np.degrees(qpos) % 360.0])
+        measured = np.radians(self.arm.get_measured_joint_angles())
+        return [float(v) for v in self.radians_clip(measured)]
+
+    def gripper_angular(self, value, timeout=4.0):
+        # Gripper move under the onboard controller; returns where it stopped.
+        if self.arm.cyclic_running:
+            raise RuntimeError("release() the torque loop before an angular move")
+        return float(self.arm.gripper_to(value, timeout))
+
     def get_state(self):
         arm_pos, arm_quat = self.arm.get_tool_pose()
         if arm_quat[3] < 0.0:  # Enforce quaternion uniqueness

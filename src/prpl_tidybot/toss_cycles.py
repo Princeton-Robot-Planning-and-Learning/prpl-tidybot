@@ -13,6 +13,7 @@ cycle's cube pose before the pick and where its throw landed relative to ``toss_
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -21,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import cv2 as cv
 import hydra
 import kinder
 import numpy as np
@@ -30,7 +32,7 @@ from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
 import prpl_tidybot.config_resolvers  # noqa: F401  # pylint: disable=unused-import
-from prpl_tidybot.interfaces.arm_interface import ArmInterface
+from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.pick_and_toss import PickSkillAgent, PromptFn, _toss
 from prpl_tidybot.pipeline import _resolve_log_dir
 from prpl_tidybot.preview import planned_trajectory_from_agent, preview_or_abort
@@ -39,7 +41,16 @@ from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
 from prpl_tidybot.real_sim.plan_executors.failures import ExecutionFailure
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExecutor
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD, RETRACT_ARM_CONF
-from prpl_tidybot.third_party.ik_solver import IKSolver
+from prpl_tidybot.top_down_pick import (
+    CARRY_ARM_CONF,
+    TopDownPickGeometry,
+    arm_frame_target,
+    forward_kinematics,
+    geometry_from_config,
+    grasp_succeeded,
+    standoff_pose,
+    top_down_joint_targets,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -116,18 +127,19 @@ def run_toss_cycles(
             cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
         ),
     )
-    home_joints = (
-        IKSolver()  # type: ignore[no-untyped-call]
-        .solve(  # type: ignore[no-untyped-call]
-            np.array(cfg.arm_home.position),
-            np.array(cfg.arm_home.quat_xyzw),
-            RETRACT_ARM_CONF,
-        )
-        .tolist()
-    )
     arm: ArmInterface = real_env.interface.arm_interface
+    cube_source = hydra.utils.instantiate(
+        pipeline.perceiver.target_source, _convert_="all"
+    )
+    geom = geometry_from_config(cfg.pick.get("top_down"))
+    wrist = _WristRecorder(
+        cfg.mode == "real" and bool(cfg.pick.top_down.get("record_wrist", True)),
+        resolved_log_dir,
+    )
+    ceiling = _CeilingRecorder(cfg, resolved_log_dir)
 
     def confirm(question: str) -> None:
+        ceiling.label = question
         if not interactive:
             return
         answer = prompt_fn(f"\n{question} [y/N]: ")
@@ -138,57 +150,48 @@ def run_toss_cycles(
     completed = 0
     finish_reason = f"completed {requested}/{requested} cycles"
     final_pose: tuple[float, float, float] | None = None
+    aborted = False
     try:
         for cycle in range(1, requested + 1):
             record: dict[str, Any] = {"cycle": cycle, "tossed": False}
             records.append(record)
-            _logger.info(
-                "Cycle %d/%d: localizing the cube and planning the pick.",
-                cycle,
-                requested,
-            )
-            agent = PickSkillAgent(
-                env_models,
-                int(cfg.seed) + cycle - 1,
-                max_skill_horizon=cfg.agent.max_skill_horizon,
-                max_attempts=cfg.pick.max_attempts,
-            )
-            runner: Runner = Runner(
-                real_env=real_env,
-                perceiver=perceiver,
-                agent=agent,
-                plan_executor=plan_executor,
-            )
-            try:
-                state = runner.reset(seed=int(cfg.seed) + cycle - 1)
-            except RuntimeError as e:
-                finish_reason = f"{e}; move the cube into the drivable area and rerun"
-                break
-            except AgentFailure as e:
-                finish_reason = f"pick_failure: {e}; move the cube and rerun"
-                break
-            record["cube_before_pick"] = cube_pose(state)
-            if cycle > 1:
+            _logger.info("Cycle %d/%d: localizing the cube.", cycle, requested)
+            if cfg.pick.method == "top_down":
+                failure = _pick_top_down(
+                    cfg,
+                    real_env,
+                    cube_source,
+                    arm,
+                    geom,
+                    confirm,
+                    cycle,
+                    record,
+                    wrist,
+                    toss_pose,
+                )
+            else:
+                failure = _pick_kinder(
+                    cfg,
+                    real_env,
+                    perceiver,
+                    plan_executor,
+                    env_models,
+                    resolved_log_dir,
+                    interactive,
+                    prompt_fn,
+                    confirm,
+                    cycle,
+                    record,
+                )
+            if cycle > 1 and "cube_before_pick" in record:
                 records[-2]["landing"] = _landing(record["cube_before_pick"], toss_pose)
-            _confirm_pick(
-                cfg,
-                agent,
-                state,
-                resolved_log_dir,
-                interactive,
-                prompt_fn,
-                confirm,
-                cycle,
-            )
-            try:
-                state, _, _, _, _ = runner.step()
-            except ExecutionFailure as e:
-                finish_reason = f"executor_failure during the pick: {e}"
+            if failure is not None:
+                finish_reason = failure
                 break
             record["picked"] = True
-
-            confirm(f"Cycle {cycle}: move the arm to home, holding the cube?")
-            _move_arm(arm, home_joints, arm.get_gripper_state(), cfg.arm_home)
+            if cfg.get("skip_toss"):
+                finish_reason = "picked (toss skipped)"
+                break
 
             confirm(
                 f"Cycle {cycle}: Drive to the toss pose ({toss_pose[0]:+.3f}, "
@@ -204,14 +207,34 @@ def run_toss_cycles(
                 raise _Declined(reason)
             record["tossed"] = True
             completed += 1
+            # The toss leaves the arm raised in its release pose.
+            confirm(f"Cycle {cycle}: retract the arm after the toss?")
+            _retract(cfg, arm)
+            settle = float(cfg.get("settle_after_toss_s", 5.0))
+            if settle > 0:
+                _logger.info("Waiting %.1f s for the cube to settle.", settle)
+                time.sleep(settle)
         else:
             finish_reason = f"completed {completed}/{requested} cycles"
     except _Declined as e:
         finish_reason = f"declined: {e}"
+    except ArmMotionAborted as e:
+        # The arm was stopped mid-move; command nothing more (the arm-server RPC is
+        # mid-call and the operator wants motion to end). Rerun to reset.
+        finish_reason = f"aborted: {e}"
+        aborted = True
     finally:
-        final_pose = _reset(
-            cfg, real_env, perceiver, arm, toss_pose, records, interactive, prompt_fn
-        )
+        if not aborted:
+            final_pose = _reset(
+                cfg,
+                real_env,
+                perceiver,
+                arm,
+                toss_pose,
+                records,
+                interactive,
+                prompt_fn,
+            )
         if resolved_log_dir is not None:
             resolved_log_dir.mkdir(parents=True, exist_ok=True)
             (resolved_log_dir / "cycles.json").write_text(
@@ -227,7 +250,11 @@ def run_toss_cycles(
                 ),
                 encoding="utf-8",
             )
-        real_env.close()
+        wrist.close()
+        ceiling.close()
+        cube_source.close()
+        if not aborted:
+            real_env.close()
     _logger.info("Toss cycles: %s.", finish_reason)
     return TossCyclesSummary(
         mode=cfg.mode,
@@ -294,19 +321,68 @@ def _confirm_pick(  # pylint: disable=too-many-arguments,too-many-positional-arg
 
 def _move_arm(
     arm: ArmInterface, goal: list[float], gripper: float, arm_cfg: DictConfig
-) -> None:
+) -> bool:
     """Stream ``goal`` until every joint is within tolerance (wrapped) or time runs
-    out."""
+    out; returns whether it got there."""
     for _ in range(int(arm_cfg.max_ticks)):
         arm.execute_action(goal, gripper)
         err = np.array(arm.get_arm_state()) - np.array(goal)
         if np.all(
             np.abs((err + np.pi) % (2 * np.pi) - np.pi) < float(arm_cfg.tolerance)
         ):
-            return
+            return True
         time.sleep(POLICY_CONTROL_PERIOD)
     _logger.warning(
         "Arm did not reach its goal within %d ticks.", int(arm_cfg.max_ticks)
+    )
+    return False
+
+
+def _retract(cfg: DictConfig, arm: ArmInterface) -> None:
+    """Fold the arm to its retract pose under the compliant loop: it needs no
+    precision, and only the grasp itself runs under the stiff onboard controller."""
+    _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
+
+
+def _logged_move(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    arm: ArmInterface,
+    name: str,
+    goal: list[float],
+    gripper: float,
+    arm_cfg: DictConfig,
+    geom: TopDownPickGeometry,
+    moves: list[dict[str, Any]],
+) -> None:
+    """`_move_arm`, then record planned vs measured joints and pinch-point heights:
+    the arm's torque loop is compliant, so where it settles (sag, or stopped by the
+    floor) can differ from the target."""
+    reached = _move_arm(arm, goal, gripper, arm_cfg)
+    measured = list(arm.get_arm_state())
+    move = {
+        "name": name,
+        "controller": "compliant",
+        "reached": reached,
+        "planned_deg": np.round(np.degrees(goal), 2).tolist(),
+        "measured_deg": np.round(np.degrees(measured), 2).tolist(),
+        "planned_pinch_z": float(forward_kinematics(goal, geom)[0][2]),
+        "measured_pinch_z": float(forward_kinematics(measured, geom)[0][2]),
+    }
+    moves.append(move)
+    _logger.info(
+        "Move %s: pinch z planned %+.4f measured %+.4f (floor %+.3f); max joint error "
+        "%.2f deg.",
+        name,
+        move["planned_pinch_z"],
+        move["measured_pinch_z"],
+        geom.floor_z,
+        float(
+            np.max(
+                np.abs(
+                    (np.array(move["measured_deg"]) - move["planned_deg"] + 180) % 360
+                    - 180
+                )
+            )
+        ),
     )
 
 
@@ -362,7 +438,7 @@ def _reset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         if answer.strip().lower() not in ("y", "yes"):
             _logger.info("Reset declined; leaving the robot where it is.")
             return None
-    _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
+    _retract(cfg, arm)
     reached = _drive_to(real_env, toss_pose)
     if records and records[-1].get("tossed") and "landing" not in records[-1]:
         try:
@@ -373,3 +449,430 @@ def _reset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         except RuntimeError as e:
             records[-1]["landing"] = {"error": str(e)}
     return reached
+
+
+def _pick_kinder(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    perceiver: Any,
+    plan_executor: Any,
+    env_models: Any,
+    log_dir: Path | None,
+    interactive: bool,
+    prompt_fn: PromptFn,
+    confirm: Any,
+    cycle: int,
+    record: dict[str, Any],
+) -> str | None:
+    """The kinder shelf3d PickController, planned and executed through the Runner.
+
+    Returns a stop reason, or None once the cube is held.
+    """
+    agent = PickSkillAgent(
+        env_models,
+        int(cfg.seed) + cycle - 1,
+        max_skill_horizon=cfg.agent.max_skill_horizon,
+        max_attempts=cfg.pick.max_attempts,
+    )
+    runner: Runner = Runner(
+        real_env=real_env, perceiver=perceiver, agent=agent, plan_executor=plan_executor
+    )
+    try:
+        state = runner.reset(seed=int(cfg.seed) + cycle - 1)
+    except RuntimeError as e:
+        return f"{e}; move the cube into the drivable area and rerun"
+    except AgentFailure as e:
+        return f"pick_failure: {e}; move the cube and rerun"
+    record["cube_before_pick"] = cube_pose(state)
+    _confirm_pick(cfg, agent, state, log_dir, interactive, prompt_fn, confirm, cycle)
+    try:
+        runner.step()
+    except ExecutionFailure as e:
+        return f"executor_failure during the pick: {e}"
+    return None
+
+
+def _localize(source: Any) -> dict[str, float]:
+    x, y, _ = source.get_target()
+    return {"x": float(x), "y": float(y), "yaw_deg": math.degrees(source.get_yaw())}
+
+
+def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    cube_source: Any,
+    arm: ArmInterface,
+    geom: TopDownPickGeometry,
+    confirm: Any,
+    cycle: int,
+    record: dict[str, Any],
+    wrist: "_WristRecorder",
+    toss_pose: list[float],
+) -> str | None:
+    """Jimmy Wu's top-down pick (prpl_tidybot.top_down_pick) on the localized cube.
+
+    For up to ``max_attempts``: localize the cube, drive to a standoff facing it,
+    re-localize, then open, hover 10 cm above, descend, close, and read the gripper.
+    After a miss the arm retracts and the base returns to the toss pose, where the
+    ceiling cameras see the (possibly nudged) cube without the robot over it. Returns
+    a stop reason, or None once the cube is held (arm at its carry pose).
+    """
+    td = cfg.pick.top_down
+    floor = tuple(cfg.preview.floor_bounds)
+    attempts = int(td.get("max_attempts", 3))
+    for attempt in range(1, attempts + 1):
+        try:
+            cube = _localize(cube_source)
+        except RuntimeError as e:
+            return f"{e}; move the cube into the drivable area and rerun"
+        record.setdefault("cube_before_pick", cube)
+        obs, _ = real_env.reset()
+        robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
+        try:
+            stand = standoff_pose(robot, (cube["x"], cube["y"]), geom, floor)
+        except ValueError as e:
+            return f"{e}; move the cube and rerun"
+        confirm(
+            f"Cycle {cycle}: Drive to the pick standoff ({stand[0]:+.3f}, "
+            f"{stand[1]:+.3f}, {math.degrees(stand[2]):+.0f} deg), "
+            f"{geom.standoff:.2f} m from the cube at ({cube['x']:+.3f}, "
+            f"{cube['y']:+.3f})?"
+        )
+        base = _drive_to(real_env, list(stand))
+        try:
+            cube = _localize(cube_source)  # corrects for where the base parked
+        except RuntimeError as e:
+            return f"{e}; move the cube and rerun"
+        ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
+        yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
+        try:
+            hover, grasp = top_down_joint_targets(
+                ax, ay, yaw_rel, geom, seed=arm.get_arm_state()
+            )
+        except ValueError as e:
+            return f"pick_failure: {e}"
+        moves: list[dict[str, Any]] = []
+        record.setdefault("pick_attempts", []).append(
+            {
+                "attempt": attempt,
+                "cube": cube,
+                "arm_target_xy": [ax, ay],
+                "moves": moves,
+            }
+        )
+        confirm(
+            f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: open, arm to 10 cm "
+            f"above the cube (arm frame {ax:+.3f}, {ay:+.3f}), descend, close?"
+        )
+        wrist.start(f"cycle_{cycle:02d}_pick_{attempt}")
+        # The fake gripper closes on nothing; pretend it read fake_grasp_reading.
+        fake = float(td.get("fake_grasp_reading", 0.49))
+        read = functools.partial(_fake_reading, fake) if cfg.mode == "fake" else float
+        if td.get("arm_controller", "angular") == "angular":
+            held, reading, note = _grasp_angular(
+                arm, td, geom, hover, grasp, moves, read
+            )
+        else:
+            held, reading, note = _grasp_compliant(
+                cfg, arm, td, geom, hover, grasp, moves, read
+            )
+        record["pick_attempts"][-1].update({"gripper": reading, "held": held})
+        if note is not None:
+            record["pick_attempts"][-1]["note"] = note
+        _logger.info(
+            "Pick attempt %d: gripper %.3f -> %s%s.",
+            attempt,
+            reading,
+            "held" if held else "missed",
+            f" ({note})" if note else "",
+        )
+        if held:
+            wrist.stop()
+            return None
+        wrist.stop()
+        if attempt < attempts:
+            confirm(
+                f"Cycle {cycle}: Missed. Retract the arm and drive back to the toss "
+                "pose to re-localize the cube?"
+            )
+            _retract(cfg, arm)
+            _drive_to(real_env, list(toss_pose))
+    return (
+        f"pick failed after {attempts} attempts (gripper never closed on the cube); "
+        "move the cube and rerun"
+    )
+
+
+# An onboard-controller move that ends further than this from its goal has hit
+# something (the floor, the cube) or faulted; the toss uses the same check.
+_ANGULAR_ARRIVAL_DEG = 1.0
+
+
+def _angular_move(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    arm: ArmInterface,
+    name: str,
+    goal: list[float],
+    geom: TopDownPickGeometry,
+    moves: list[dict[str, Any]],
+) -> bool:
+    """One ``move_angular``, recorded like `_logged_move`; returns whether it
+    arrived within `_ANGULAR_ARRIVAL_DEG` on every joint."""
+    measured = arm.move_angular(goal)
+    err = np.degrees(
+        np.abs((np.array(measured) - np.array(goal) + np.pi) % (2 * np.pi) - np.pi)
+    )
+    move = {
+        "name": name,
+        "controller": "angular",
+        "reached": bool(np.all(err < _ANGULAR_ARRIVAL_DEG)),
+        "planned_deg": np.round(np.degrees(goal), 2).tolist(),
+        "measured_deg": np.round(np.degrees(measured), 2).tolist(),
+        "planned_pinch_z": float(forward_kinematics(goal, geom)[0][2]),
+        "measured_pinch_z": float(forward_kinematics(measured, geom)[0][2]),
+    }
+    moves.append(move)
+    _logger.info(
+        "Move %s (angular): pinch z planned %+.4f measured %+.4f (floor %+.3f); max "
+        "joint error %.2f deg.",
+        name,
+        move["planned_pinch_z"],
+        move["measured_pinch_z"],
+        geom.floor_z,
+        float(err.max()),
+    )
+    return bool(move["reached"])
+
+
+def _grasp_angular(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    arm: ArmInterface,
+    td: Any,
+    geom: TopDownPickGeometry,
+    hover: list[float],
+    grasp: list[float],
+    moves: list[dict[str, Any]],
+    read: Any,
+) -> tuple[bool, float, str | None]:
+    """Jimmy Wu's pick_object sequence under the arm's onboard position controller
+    (the compliant torque loop settled 24 mm short of the cube): open, hover,
+    descend, close, read; then lift and carry, or open and back off. The torque loop
+    is released for the whole sequence and resumed holding the final pose.
+
+    Returns (held, gripper reading, note); the note says why the gripper was not
+    closed, if it was not.
+    """
+    timeout = float(td.get("gripper_timeout_s", 4.0))
+    arm.release()
+    aborted = False
+    try:
+        arm.set_gripper_angular(0.0, timeout)
+        for name, goal in (("hover", hover), ("grasp", grasp)):
+            if not _angular_move(arm, name, goal, geom, moves):
+                _angular_move(arm, "retreat", hover, geom, moves)
+                return False, arm.get_gripper_state(), f"{name} did not arrive"
+        reading = read(
+            arm.set_gripper_angular(float(td.get("close_position", 1.0)), timeout)
+        )
+        held = grasp_succeeded(reading, geom)
+        if held:
+            _angular_move(arm, "lift", hover, geom, moves)
+            _angular_move(arm, "carry", list(CARRY_ARM_CONF), geom, moves)
+        else:
+            arm.set_gripper_angular(0.0, timeout)
+            _angular_move(arm, "retreat", hover, geom, moves)
+        return held, reading, None
+    except ArmMotionAborted:
+        aborted = True
+        raise
+    finally:
+        if not aborted:
+            arm.resume()
+
+
+def _grasp_compliant(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    arm: ArmInterface,
+    td: Any,
+    geom: TopDownPickGeometry,
+    hover: list[float],
+    grasp: list[float],
+    moves: list[dict[str, Any]],
+    read: Any,
+) -> tuple[bool, float, str | None]:
+    """The same sequence streamed through the compliant torque loop."""
+    _set_gripper(arm, 0.0, td)
+    _logged_move(arm, "hover", hover, 0.0, cfg.arm_home, geom, moves)
+    _logged_move(arm, "grasp", grasp, 0.0, cfg.arm_home, geom, moves)
+    _set_gripper(arm, float(td.get("close_position", 1.0)), td)
+    reading = read(arm.get_gripper_state())
+    held = grasp_succeeded(reading, geom)
+    _finish_grasp(cfg, arm, td, geom, hover, moves, held=held)
+    return held, reading, None
+
+
+def _finish_grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    arm: ArmInterface,
+    td: Any,
+    geom: TopDownPickGeometry,
+    hover: list[float],
+    moves: list[dict[str, Any]],
+    held: bool,
+) -> None:
+    """Compliant lift and carry after a grasp, or open and back off after a miss."""
+    if held:
+        grip = arm.get_gripper_state()
+        _logged_move(arm, "lift", hover, grip, cfg.arm_home, geom, moves)
+        carry = list(CARRY_ARM_CONF)
+        _logged_move(arm, "carry", carry, grip, cfg.arm_home, geom, moves)
+    else:
+        _set_gripper(arm, 0.0, td)
+        _logged_move(arm, "retreat", hover, 0.0, cfg.arm_home, geom, moves)
+
+
+def _fake_reading(value: float, _reading: float) -> float:
+    """The fake gripper closes on nothing; report `value` instead."""
+    return value
+
+
+def _set_gripper(arm: ArmInterface, position: float, td: Any) -> None:
+    """Command the gripper and wait until it stops moving."""
+    arm.execute_action(arm.get_arm_state(), position)
+    deadline = time.monotonic() + float(td.get("gripper_timeout_s", 4.0))
+    last = arm.get_gripper_state()
+    while time.monotonic() < deadline:
+        time.sleep(0.15)
+        arm.execute_action(arm.get_arm_state(), position)
+        now = arm.get_gripper_state()
+        if abs(now - last) < 0.005:
+            return
+        last = now
+
+
+class _CeilingRecorder:
+    """Films the whole run from the ceiling cameras into <log_dir>/ceiling.mp4,
+    stamping each frame with the time and the step last asked about. Frames are
+    encoded as they arrive (H.264), so a long run costs no memory."""
+
+    def __init__(self, cfg: DictConfig, log_dir: Path | None) -> None:
+        video_cfg = cfg.get("ceiling_video")
+        self.label = "start"
+        self._running = False
+        if log_dir is None or video_cfg is None or not video_cfg.enabled:
+            return
+        import threading  # pylint: disable=import-outside-toplevel
+
+        from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
+            CeilingImageClient,
+            FakeCeilingImageClient,
+        )
+
+        self._client: Any = (
+            CeilingImageClient(str(video_cfg.host))
+            if cfg.mode == "real"
+            else FakeCeilingImageClient()
+        )
+        self._fps = int(video_cfg.fps)
+        self._scale = float(video_cfg.scale)
+        self._path = log_dir / "ceiling.mp4"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._writer: Any = None
+        self._t0 = time.monotonic()
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        import imageio_ffmpeg  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
+
+        period = 1.0 / self._fps
+        while self._running:
+            start = time.monotonic()
+            try:
+                img = self._client.get_image()
+            except Exception:  # pylint: disable=broad-except
+                break  # the publisher went away; keep what was recorded
+            if img is not None:
+                frame = cv.resize(img, None, fx=self._scale, fy=self._scale)
+                frame = frame[: frame.shape[0] // 2 * 2, : frame.shape[1] // 2 * 2]
+                text = f"{start - self._t0:6.1f}s  {self.label.strip()[:90]}"
+                cv.rectangle(frame, (0, 0), (frame.shape[1], 30), (0, 0, 0), -1)
+                cv.putText(frame, text, (8, 22), 0, 0.6, (255, 255, 255), 1)
+                if self._writer is None:
+                    self._writer = imageio_ffmpeg.write_frames(
+                        str(self._path),
+                        (frame.shape[1], frame.shape[0]),
+                        fps=self._fps,
+                        codec="libx264",
+                        pix_fmt_out="yuv420p",
+                        output_params=["-movflags", "+faststart"],
+                        ffmpeg_log_level="error",
+                    )
+                    self._writer.send(None)
+                self._writer.send(np.ascontiguousarray(frame[:, :, ::-1]))
+            time.sleep(max(0.0, period - (time.monotonic() - start)))
+
+    def close(self) -> None:
+        """Stop recording and finish the file."""
+        if not self._running:
+            return
+        self._running = False
+        self._thread.join(timeout=5)
+        if self._writer is not None:
+            self._writer.close()
+        self._client.close()
+
+
+class _WristRecorder:
+    """Records the Kinova wrist camera during each pick attempt (real mode only)."""
+
+    def __init__(self, enabled: bool, log_dir: Path | None) -> None:
+        self._enabled = enabled and log_dir is not None
+        self._log_dir = log_dir
+        self._source: Any = None
+        self._thread: Any = None
+        self._frames: list[Any] = []
+        self._name = ""
+        self._running = False
+
+    def start(self, name: str) -> None:
+        """Begin recording a clip called `name`."""
+        if not self._enabled:
+            return
+        import threading  # pylint: disable=import-outside-toplevel
+
+        from prpl_tidybot.visual_servo.image_sources import (  # pylint: disable=import-outside-toplevel
+            KinovaWristCameraSource,
+        )
+
+        if self._source is None:
+            self._source = KinovaWristCameraSource()
+        self._frames, self._name, self._running = [], name, True
+
+        def grab() -> None:
+            while self._running:
+                img = self._source.get_image()
+                if img is not None:
+                    self._frames.append(img)
+                time.sleep(0.1)
+
+        self._thread = threading.Thread(target=grab, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop and write the clip to <log_dir>/<name>_wrist.mp4."""
+        if not self._enabled or not self._running:
+            return
+        self._running = False
+        self._thread.join(timeout=2)
+        if self._frames and self._log_dir is not None:
+            from prpl_tidybot.video import (  # pylint: disable=import-outside-toplevel
+                write_mp4,
+            )
+
+            write_mp4(self._frames, self._log_dir / f"{self._name}_wrist.mp4", fps=10)
+
+    def close(self) -> None:
+        """Release the camera."""
+        self.stop()
+        if self._source is not None:
+            self._source.close()

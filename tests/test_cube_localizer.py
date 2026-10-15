@@ -11,6 +11,7 @@ from prpl_tidybot.cube_localizer import (
     CeilingCubeTargetSource,
     cube_silhouette,
     find_cube_candidates,
+    in_calibrated_region,
     load_ceiling_cameras,
     localize_cube,
 )
@@ -81,6 +82,69 @@ def test_localize_on_the_camera_seam(cameras):
     fit = localize_cube([_render(cameras, [pose])], cameras, FLOOR_BOUNDS, side=SIDE)
     assert fit is not None
     assert math.hypot(fit.x - pose[0], fit.y - pose[1]) < 0.01
+
+
+@pytest.mark.parametrize("pose", [(-0.184, 0.13, 0.1), (-0.5, 0.11, -0.3)])
+def test_a_cube_beside_the_stitch_line_fits_well(cameras, pose):
+    """Rows masked at the stitch line are unknown, not 'not cube', so a cube whose
+    silhouette crosses them still scores a high IoU (seen on the robot 2026-10-14:
+    IoU 0.57 and rejected)."""
+    fit = localize_cube([_render(cameras, [pose])], cameras, FLOOR_BOUNDS, side=SIDE)
+    assert fit is not None
+    assert fit.iou > 0.8
+    assert math.hypot(fit.x - pose[0], fit.y - pose[1]) < 0.01
+
+
+def _render_inconsistent(cameras, pose_top, pose_bottom, seed=0):
+    """A frame in which the two cameras disagree about where the cube is, as when
+    their extrinsics are inconsistent (seen on the robot: 2.6 cm at the seam)."""
+    top = _render(cameras, [pose_top], seed=seed)
+    bottom = _render(cameras, [pose_bottom], seed=seed)
+    return np.vstack([top[:H], bottom[H:]])
+
+
+def test_inconsistent_cameras_pick_one_view_instead_of_blending(cameras):
+    """With the cameras 2.6 cm apart on the same cube, the localizer keeps the better
+    single-camera fit (high IoU, on one of the two answers), reports both, and flags the
+    disagreement, instead of a blended pose that matches neither image."""
+    top_pose, bottom_pose = (-0.184, 0.10, 0.1), (-0.177, 0.074, 0.1)
+    frames = [
+        _render_inconsistent(cameras, top_pose, bottom_pose, seed=s) for s in range(3)
+    ]
+    fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE)
+    assert fit is not None
+    assert fit.iou > 0.8
+    assert (
+        min(math.hypot(fit.x - p[0], fit.y - p[1]) for p in (top_pose, bottom_pose))
+        < 0.006
+    )
+    assert len(fit.per_camera) == 2
+    assert fit.camera_disagreement_m == pytest.approx(0.0269, abs=0.006)
+
+
+def test_prefers_the_camera_whose_calibrated_region_holds_the_cube(cameras):
+    """Outside a camera's calibrated region its extrinsics are least trustworthy, so
+    when only one camera's calibrated region contains the cube that camera wins, even
+    if the other fits slightly better."""
+    pose = (-0.18, 0.105, 0.0)
+    inside = [
+        in_calibrated_region(c, i, pose[0], pose[1], SERIALS)
+        for i, c in enumerate(cameras)
+    ]
+    assert inside.count(True) == 1  # the seam strip: only one calibrated region
+    frames = [_render(cameras, [pose], seed=s) for s in range(3)]
+    fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE, serials=SERIALS)
+    assert fit is not None
+    assert fit.camera == inside.index(True)
+
+
+def test_consistent_cameras_agree(cameras):
+    """When the calibration is consistent, both cameras' fits land together."""
+    pose = (-0.3, 0.05, 0.2)
+    fit = localize_cube([_render(cameras, [pose])], cameras, FLOOR_BOUNDS, side=SIDE)
+    assert fit is not None
+    assert len(fit.per_camera) == 2
+    assert fit.camera_disagreement_m < 0.006
 
 
 def test_nothing_on_the_floor_gives_none(cameras):
