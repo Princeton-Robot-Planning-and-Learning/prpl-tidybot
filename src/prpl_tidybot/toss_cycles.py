@@ -19,7 +19,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -889,16 +889,22 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
         if servo is not None:
 
             def move_hover(label: str, x: float, y: float, w: float) -> bool:
-                joints, _ = top_down_joint_targets(
-                    x, y, w, geom, seed=mover.arm.get_arm_state()
-                )
+                here = mover.arm.get_arm_state()
+                joints, _ = top_down_joint_targets(x, y, w, geom, seed=here)
+                if not _servo_step_is_small(here, joints, td):
+                    return False
                 return mover.move(f"servo_{label}", joints)
+
+            def measured_xy() -> tuple[float, float]:
+                pos = forward_kinematics(mover.arm.get_arm_state(), geom)[0]
+                return float(pos[0]), float(pos[1])
 
             result = servo.align(
                 (ax, ay, yaw),
                 move_hover,
                 functools.partial(_tool_axes, geom),
                 name=name,
+                measured_xy=measured_xy,
             )
             servo_log = _servo_log(result)
             ax, ay, yaw = result.ax, result.ay, result.yaw
@@ -927,6 +933,27 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
         return held, reading, None, servo_log
     finally:
         mover.end()
+
+
+def _servo_step_is_small(
+    here: Sequence[float], target: Sequence[float], td: Any
+) -> bool:
+    """As in the cylinder servo, refuse a nudge whose IK jumps an arm joint by more
+    than `max_joint_step` (a branch flip near a singularity); the wrist (joint 7) may
+    turn further, up to `max_wrist_step`, to square the fingers to the cube."""
+    jump = np.abs(_wrap(np.asarray(target) - np.asarray(here)))
+    arm_limit = float(td.get("max_joint_step", 0.2))
+    wrist_limit = float(td.get("max_wrist_step", 0.9))
+    if jump[:6].max() > arm_limit or jump[6] > wrist_limit:
+        _logger.warning(
+            "Servo nudge refused: joint change %s rad (limits %.2f arm, %.2f wrist); "
+            "likely an IK branch flip.",
+            np.round(jump, 3).tolist(),
+            arm_limit,
+            wrist_limit,
+        )
+        return False
+    return True
 
 
 def _servo_log(result: TopDownServoResult) -> dict[str, Any]:

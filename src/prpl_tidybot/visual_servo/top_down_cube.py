@@ -84,18 +84,15 @@ def detect_wrist_cube(
     )
 
 
-def estimate_jacobian(
-    start: WristCube, after_x: WristCube, after_y: WristCube, step: float
+def jacobian_from_moves(
+    pixel_moves: Sequence[Sequence[float]], tool_moves: Sequence[Sequence[float]]
 ) -> NDArray[np.float64]:
-    """Pixel motion of the cube per metre of gripper motion along tool x (column 0)
-    and tool y (column 1), from probes of `step` metres along each from `start`."""
-    p0 = np.array([start.u, start.v])
-    return np.column_stack(
-        [
-            (np.array([after_x.u, after_x.v]) - p0) / step,
-            (np.array([after_y.u, after_y.v]) - p0) / step,
-        ]
-    )
+    """The 2x2 Jacobian from two probe moves: the cube's pixel displacement for each
+    and how far the gripper really moved (tool x, tool y; metres), which under a
+    compliant arm is not what was commanded (run 9)."""
+    pixels = np.column_stack([np.asarray(m, float) for m in pixel_moves])
+    tools = np.column_stack([np.asarray(m, float) for m in tool_moves])
+    return np.asarray(pixels @ np.linalg.inv(tools), float)
 
 
 def tool_correction(
@@ -123,9 +120,11 @@ class TopDownServoParams:
     target_uv: tuple[float, float] = (312.0, 320.0)
     probe_step: float = 0.015
     tolerance_px: float = 6.0
-    confirm_looks: int = 2
+    confirm_looks: int = 3
     min_step: float = 0.002
-    max_step: float = 0.03
+    max_step: float = 0.01
+    max_area_change_frac: float = 0.3
+    area_history: int = 5
     yaw_tolerance: float = math.radians(4.0)
     align_yaw: bool = True
     max_missed_detections: int = 2
@@ -162,6 +161,8 @@ class TopDownServoResult:
 
 # (label, ax, ay, yaw) -> whether the arm arrived at the hover there.
 MoveHover = Callable[[str, float, float, float], bool]
+# () -> where the pinch point really is (arm-frame x, y), from the joint readings.
+MeasuredXY = Callable[[], tuple[float, float]]
 # yaw -> the tool x and y axes (unit 2-vectors, arm frame) at that closing yaw.
 ToolAxes = Callable[[float], tuple[NDArray[np.float64], NDArray[np.float64]]]
 
@@ -186,16 +187,30 @@ class TopDownCubeServo:
         move: MoveHover,
         tool_axes: ToolAxes,
         name: str = "servo",
+        measured_xy: MeasuredXY | None = None,
     ) -> TopDownServoResult:
-        """Align from the hover at ``start`` = (ax, ay, yaw), where the arm is now."""
+        """Align from the hover at ``start`` = (ax, ay, yaw), where the arm is now.
+
+        With `measured_xy` the probe Jacobian uses how far the gripper really moved;
+        without it, the commanded probe step."""
         p = self.params
         self._run += 1
         ax, ay, yaw = start
         result = TopDownServoResult(ax, ay, yaw, False)
 
+        areas: list[float] = []
+
         def look(label: str) -> WristCube | None:
             image = self._images.get_image()
             cube = None if image is None else detect_wrist_cube(image)
+            # As in the cylinder servo, a blob whose size jumps from the recent median
+            # is a stray detection, not the cube: a miss, not a step target.
+            if cube is not None and areas:
+                median = float(np.median(areas[-p.area_history :]))
+                if abs(cube.area - median) > p.max_area_change_frac * median:
+                    label, cube = f"{label}_outlier", None
+            if cube is not None:
+                areas.append(cube.area)
             error = (
                 None
                 if cube is None
@@ -216,26 +231,43 @@ class TopDownCubeServo:
         if first is None:
             return fail("cube not seen in the wrist camera at the hover")
         x_axis, y_axis = tool_axes(yaw)
-        probes = []
+
+        def where() -> NDArray[np.float64]:
+            return np.array(measured_xy() if measured_xy is not None else (ax, ay))
+
+        pixel_moves, tool_moves = [], []
         for label, axis in (("probe_x", x_axis), ("probe_y", y_axis)):
+            before, cube_before = where(), result.trace[-1].cube
             px, py = ax + p.probe_step * axis[0], ay + p.probe_step * axis[1]
             if not move(label, px, py, yaw):
                 return fail(f"{label} move did not arrive")
             seen = look(label)
-            if seen is None:
+            if seen is None or cube_before is None:
                 return fail(f"cube lost during {label}")
-            probes.append(seen)
+            moved = (
+                where() - before
+                if measured_xy is not None
+                else p.probe_step * np.asarray(axis)
+            )
+            tool_moves.append([float(moved @ x_axis), float(moved @ y_axis)])
+            pixel_moves.append([seen.u - cube_before.u, seen.v - cube_before.v])
             if not move("probe_back", ax, ay, yaw):
                 return fail("probe return did not arrive")
-        jacobian = estimate_jacobian(first, probes[0], probes[1], p.probe_step)
+            if look("probe_back") is None:
+                return fail("cube lost after the probe")
+        if min(np.linalg.norm(tool_moves, axis=1)) < 0.3 * p.probe_step:
+            return fail("the probes barely moved the gripper")
+        if abs(np.linalg.det(np.array(tool_moves))) < 0.05 * p.probe_step**2:
+            return fail("the probe moves were nearly parallel")
+        jacobian = jacobian_from_moves(pixel_moves, tool_moves)
         result.jacobian = jacobian.round(1).tolist()
         # Each probe must move the cube by at least a few pixels, or the inverse is
         # all noise (a frozen image, the wrong blob).
-        if min(np.linalg.norm(jacobian, axis=0)) * p.probe_step < 4.0:
+        if min(np.linalg.norm(pixel_moves, axis=1)) < 4.0:
             return fail("the probes barely moved the cube in the image")
 
         origin = (ax, ay)
-        cube = look("settled")
+        cube = result.trace[-1].cube
         missed = 0 if cube is not None else 1
         aligned_looks = 0
         nudges = 0

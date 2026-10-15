@@ -129,7 +129,7 @@ def test_refuses_to_walk_the_gripper_further_than_the_travel_limit():
     a bad Jacobian) stops the servo instead of following it."""
     world = _World((0.55, 0.12), 0.0, (0.55, 0.0), 0.0)
     world.k = world.k * 0.2  # keep the far cube in view
-    params = TopDownServoParams(target_uv=TARGET, travel_limit=0.05)
+    params = TopDownServoParams(target_uv=TARGET, travel_limit=0.05, max_moves=20)
     result = TopDownCubeServo(world, params).align(
         (0.55, 0.0, 0.0), world.move, _tool_axes
     )
@@ -169,3 +169,51 @@ def test_gives_up_after_max_moves_nudges():
     assert not result.aligned
     assert "5 nudges" in result.note
     assert sum(t.label == "align" for t in result.trace) == 5
+
+
+def test_converges_when_the_arm_covers_only_part_of_each_commanded_move():
+    """The compliant arm stops short of its targets (run 9: the probes moved it less
+    than 1.5 cm, the image gain came out ~2x small and the corrections overshot past
+    the travel limit). With the measured pinch position, the Jacobian is built from
+    how far the arm really moved, and the nudges converge."""
+    start = (0.55, 0.0, 0.1)
+    world = _World((0.568, -0.014), 0.1, start[:2], start[2])
+    commanded = {"xy": np.array(start[:2])}
+
+    def half_way(label, ax, ay, yaw):
+        target = np.array([ax, ay])
+        step = target - commanded["xy"]
+        commanded["xy"] = target
+        world.pinch = world.pinch + 0.5 * step
+        world.yaw = yaw
+        return True
+
+    result = TopDownCubeServo(world, TopDownServoParams(target_uv=TARGET)).align(
+        start, half_way, _tool_axes, measured_xy=lambda: tuple(world.pinch)
+    )
+    assert result.aligned, result.note
+    assert math.hypot(*(world.pinch - world.cube)) < 0.004
+
+
+def test_a_sudden_change_in_blob_size_is_a_miss_not_a_target():
+    """As in the cylinder servo, a detection whose size jumps from the recent median
+    (a stray blue object entering the view) is not stepped towards."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.555, 0.0), 0.0, start[:2], start[2])
+    real_image = world.get_image
+    looks = {"n": 0}
+
+    def with_a_stray(self=None):
+        looks["n"] += 1
+        image = real_image()
+        if looks["n"] == 6:  # the first look after the probes
+            image[:] = 200
+            image = _square(image, (100, 100), 0.0, side=160)
+        return image
+
+    world.get_image = with_a_stray
+    result = TopDownCubeServo(world, TopDownServoParams(target_uv=TARGET)).align(
+        start, world.move, _tool_axes
+    )
+    assert any(t.label.endswith("_outlier") for t in result.trace)
+    assert result.aligned, result.note

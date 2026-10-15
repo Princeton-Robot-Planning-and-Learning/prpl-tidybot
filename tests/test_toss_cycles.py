@@ -225,9 +225,10 @@ def test_each_pick_move_logs_planned_and_measured_joints(tmp_path):
     )
 
 
-def test_the_onboard_controller_pick_is_selectable(tmp_path, arm_log):
-    """arm_controller=angular: hover, grasp, lift and carry are onboard-controller
-    moves, with the torque loop released around them."""
+def test_the_pick_runs_under_the_onboard_controller_by_default(tmp_path, arm_log):
+    """Hover, grasp, lift and carry are onboard-controller moves by default (the
+    compliant loop creeps too much for the wrist servo, run 9), with the torque loop
+    released around them."""
     run_toss_cycles(
         _compose(
             cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "angular"}
@@ -242,10 +243,14 @@ def test_the_onboard_controller_pick_is_selectable(tmp_path, arm_log):
     assert all(m["controller"] == "angular" for m in moves)
 
 
-def test_the_pick_runs_under_the_compliant_loop_by_default(tmp_path, arm_log):
-    """The default streams every grasp move through the compliant torque loop."""
+def test_the_compliant_pick_is_selectable(tmp_path, arm_log):
+    """arm_controller=compliant streams every grasp move through the torque loop."""
     run_toss_cycles(
-        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+        _compose(
+            cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "compliant"}
+        ),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
     )
     assert not [e for e in arm_log if e[0] == "angular"]
     log = json.loads((tmp_path / "cycles.json").read_text())
@@ -384,7 +389,11 @@ def test_a_compliant_move_that_sags_is_corrected_onto_its_target(tmp_path, monke
 
     monkeypatch.setattr(FakeArmInterface, "execute_action", sagging)
     run_toss_cycles(
-        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+        _compose(
+            cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "compliant"}
+        ),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
     )
     log = json.loads((tmp_path / "cycles.json").read_text())
     moves = {m["name"]: m for m in log["cycles"][0]["pick_attempts"][0]["moves"]}
@@ -408,7 +417,11 @@ def test_a_compliant_move_waits_for_a_lagging_arm_to_arrive(tmp_path, monkeypatc
     14 mm off). Hover and lift end within 1 deg; the corrected descent within 2 mm."""
     monkeypatch.setattr(FakeArmInterface, "execute_action", _LaggingArm.execute_action)
     run_toss_cycles(
-        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+        _compose(
+            cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "compliant"}
+        ),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
     )
     log = json.loads((tmp_path / "cycles.json").read_text())
     moves = {m["name"]: m for m in log["cycles"][0]["pick_attempts"][0]["moves"]}
@@ -443,7 +456,11 @@ def test_the_correction_never_aims_the_grasp_below_its_planned_height(
 
     monkeypatch.setattr(FakeArmInterface, "execute_action", blocked)
     run_toss_cycles(
-        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+        _compose(
+            cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "compliant"}
+        ),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
     )
     assert min(commanded_z) > grasp_z - 0.001
 
