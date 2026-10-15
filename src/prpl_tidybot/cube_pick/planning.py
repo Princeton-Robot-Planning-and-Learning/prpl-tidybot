@@ -241,7 +241,7 @@ class PlanningScene:
         )
         sim._joint_distance_fn = create_joint_distance_fn(sim._robot)
 
-    # --- the believed world -------------------------------------------------------------
+    # --- the believed world -----------------------------------------------------------
 
     @property
     def robot(self) -> Any:
@@ -304,7 +304,7 @@ class PlanningScene:
             bodies.discard(self._cube_body)
         return sorted(bodies)
 
-    # --- kinematics -----------------------------------------------------------------------
+    # --- kinematics -------------------------------------------------------------------
 
     def tool_pose(self, arm: Sequence[float]) -> FloatArray:
         """Forward kinematics of the tool frame at the current base."""
@@ -357,7 +357,10 @@ class PlanningScene:
                     margin = distance - threshold
                     if margin < closest:
                         closest = margin
-                        culprit = f"{self._names.get(body, str(body))} ({self._link_name(point[3])})"
+                        culprit = (
+                            f"{self._names.get(body, str(body))} "
+                            f"({self._link_name(point[3])})"
+                        )
         finally:
             self._sim.set_state(self._state)
         return ClearanceReport(
@@ -384,6 +387,7 @@ class PlanningScene:
         kinematics is needed, so a grasp the hand cannot fit is rejected before any arm
         configuration is searched -- and that rejection holds for every base placement.
         """
+        # pylint: disable=attribute-defined-outside-init  # built lazily, hasattr-guarded
         if not hasattr(self, "_hand"):
             self._hand = type(self.robot)(
                 self._client,
@@ -448,7 +452,10 @@ class PlanningScene:
                     margin = point[8] - threshold
                     if margin < closest:
                         closest = margin
-                        culprit = f"{self._names.get(body, str(body))} ({self._hand_names[link]})"
+                        culprit = (
+                            f"{self._names.get(body, str(body))} "
+                            f"({self._hand_names[link]})"
+                        )
         return ClearanceReport(
             ok=bool(closest >= 0), closest=float(closest), culprit=culprit
         )
@@ -465,6 +472,7 @@ class PlanningScene:
         return clearance
 
     def _link_name(self, link: int) -> str:
+        # pylint: disable=attribute-defined-outside-init  # built lazily, hasattr-guarded
         if not hasattr(self, "_link_names"):
             robot_id = self.robot.robot_id
             self._link_names = {
@@ -475,7 +483,7 @@ class PlanningScene:
             }
         return self._link_names.get(link, "base")
 
-    # --- motion ---------------------------------------------------------------------------
+    # --- motion -----------------------------------------------------------------------
 
     def plan_arm(
         self,

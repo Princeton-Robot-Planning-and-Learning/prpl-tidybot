@@ -15,6 +15,7 @@ from prpl_tidybot.cube_pick.camera import (
 
 
 def test_intrinsics_from_diagonal_fov_reproduce_the_fov():
+    """Intrinsics built from a diagonal FOV give back that FOV."""
     intr = PinholeIntrinsics.from_diagonal_fov(
         width=1280, height=720, diagonal_fov_deg=67
     )
@@ -26,6 +27,7 @@ def test_intrinsics_from_diagonal_fov_reproduce_the_fov():
 
 
 def test_kinova_specs_match_the_robot():
+    """The Kinova wrist camera specs match what the robot streams."""
     # The robot streams 640x480 colour and 480x270 depth. The reported fisheye is
     # unverified and not modelled.
     assert KINOVA_WRIST_COLOR_FISHEYE is None
@@ -41,12 +43,14 @@ def test_kinova_specs_match_the_robot():
 
 
 def test_scaled_intrinsics_keep_the_fov():
+    """Scaling the intrinsics keeps the field of view."""
     intr = KINOVA_WRIST_COLOR.scaled(0.5)
     assert (intr.width, intr.height) == (320, 240)
     assert intr.vertical_fov_deg == pytest.approx(KINOVA_WRIST_COLOR.vertical_fov_deg)
 
 
 def test_project_and_backproject_round_trip():
+    """Projecting then back-projecting recovers the points."""
     intr = PinholeIntrinsics.from_diagonal_fov(width=64, height=48, diagonal_fov_deg=70)
     points = np.array([[0.01, -0.02, 0.3], [0.0, 0.0, 0.5]])
     uv, z = intr.project(points)
@@ -55,6 +59,7 @@ def test_project_and_backproject_round_trip():
 
 
 def test_noise_blacks_out_depth_closer_than_min_range():
+    """Depth closer than the minimum range reads zero."""
     depth = np.full((10, 10), 0.10, dtype=np.float32)
     depth[:, 5:] = 0.40
     noisy = DepthNoiseModel(min_range=0.18, seed=0).apply(depth)
@@ -65,6 +70,7 @@ def test_noise_blacks_out_depth_closer_than_min_range():
 
 
 def test_noise_is_deterministic_per_seed():
+    """The same seed gives the same noise."""
     depth = np.full((20, 20), 0.5, dtype=np.float32)
     a = DepthNoiseModel(seed=3).apply(depth)
     b = DepthNoiseModel(seed=3).apply(depth)
@@ -72,6 +78,7 @@ def test_noise_is_deterministic_per_seed():
 
 
 def test_noise_grows_with_range():
+    """Depth noise grows with range."""
     near = DepthNoiseModel(seed=0, dropout=0.0).apply(
         np.full((100, 100), 0.3, np.float32)
     )
@@ -82,6 +89,7 @@ def test_noise_grows_with_range():
 
 
 def test_register_depth_to_color_with_identity_extrinsics_resamples():
+    """With identity extrinsics, registration only resamples the depth."""
     depth_intr = PinholeIntrinsics.from_diagonal_fov(
         width=48, height=27, diagonal_fov_deg=72
     )
@@ -101,6 +109,7 @@ def test_register_depth_to_color_with_identity_extrinsics_resamples():
 
 
 def test_register_depth_to_color_shifts_with_baseline():
+    """A baseline between the sensors shifts the registered depth."""
     intr = PinholeIntrinsics.from_diagonal_fov(
         width=100, height=100, diagonal_fov_deg=60
     )
@@ -124,6 +133,7 @@ def test_register_depth_to_color_shifts_with_baseline():
 
 
 def test_fisheye_projection_matches_the_equidistant_model():
+    """Fisheye projection follows the equidistant model."""
     fish = FisheyeIntrinsics(
         width=640,
         height=480,
@@ -141,6 +151,7 @@ def test_fisheye_projection_matches_the_equidistant_model():
 
 
 def test_distort_then_undistort_round_trips_a_pinhole_image():
+    """Distorting then undistorting restores a pinhole image."""
     fish = FisheyeIntrinsics(
         width=320,
         height=240,

@@ -171,7 +171,8 @@ def fit_cube(
     ]
     if below and position[2] < max(below) + size / 2 - 0.01:
         raise CubeFitError(
-            f"fit centre z={position[2]:.3f} sinks below the support at z={max(below):.3f}"
+            f"fit centre z={position[2]:.3f} sinks below the support "
+            f"at z={max(below):.3f}"
         )
     residuals = np.abs(_surface_distance(cluster, rotation, position, size))
     inliers = residuals < 0.004

@@ -385,10 +385,12 @@ class DepthNoiseModel:
     seed: int = 0
 
     def __post_init__(self) -> None:
+        # pylint: disable-next=attribute-defined-outside-init  # a dataclass: no __init__
         self._rng = np.random.default_rng(self.seed)
 
     def reseed(self, seed: int) -> None:
         """Restart the noise stream."""
+        # pylint: disable-next=attribute-defined-outside-init  # set in __post_init__
         self._rng = np.random.default_rng(seed)
 
     def apply(self, depth: NDArray[np.floating]) -> NDArray[np.float32]:

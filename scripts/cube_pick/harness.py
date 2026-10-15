@@ -16,6 +16,8 @@ import numpy as np
 os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
+# KINDER and mujoco must import after the rendering backend is chosen above.
+# pylint: disable=wrong-import-position
 import kinder  # noqa: E402
 import kinder.envs.dynamic3d.envs  # noqa: E402,F401  (the module, so mujoco imports)
 
@@ -40,6 +42,8 @@ from prpl_tidybot.cube_pick.perception import (  # noqa: E402
 )
 from prpl_tidybot.cube_pick.planning import ContainerSpec  # noqa: E402
 from prpl_tidybot.cube_pick.policy import CubePickPolicy, PickConfig  # noqa: E402
+
+# pylint: enable=wrong-import-position
 
 CUBE = "cube_0"
 # Failures before anything is executed: the record and a still, no video.
@@ -80,6 +84,7 @@ class VideoRecorder:
         self.every = every
         self.count = 0
         model = sim.model.mj_model
+        # pylint: disable=no-member  # mujoco is a C extension
         self._site = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_SITE, f"{robot_name}_pinch_site"
         )
@@ -88,6 +93,7 @@ class VideoRecorder:
         self._lookat: np.ndarray | None = None
 
     def scene_view(self) -> np.ndarray:
+        """A free-camera render of the scene, following the gripper."""
         ctx = self.sim._render_context_offscreen  # pylint: disable=protected-access
         data = self.sim.data.mj_data
         target = np.array(data.site_xpos[self._site])
@@ -95,24 +101,27 @@ class VideoRecorder:
         self._lookat = (
             target if self._lookat is None else 0.8 * self._lookat + 0.2 * target
         )
+        # pylint: disable-next=no-member  # mujoco is a C extension
         ctx.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
         ctx.cam.lookat[:] = self._lookat
         ctx.cam.distance = 1.6
         ctx.cam.azimuth = 135.0
         ctx.cam.elevation = -35.0
         rgb = self.sim.render(width=640, height=480, camera_name=None)
+        # pylint: disable-next=no-member  # mujoco is a C extension
         ctx.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
         return rgb
 
     def wrist_view(self, robot: KinderPickRobot) -> np.ndarray:
+        """The wrist camera's undistorted colour view, for video."""
         cam = robot.camera
         model = self.sim.model.mj_model
+        # pylint: disable-next=no-member  # mujoco is a C extension
         cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, self._wrist)
         fovy0 = float(model.cam_fovy[cid])
         model.cam_fovy[cid] = cam.color.vertical_fov_deg  # undistorted view, for video
-        vopt = (
-            self.sim._render_context_offscreen.vopt
-        )  # pylint: disable=protected-access
+        # pylint: disable-next=protected-access  # KINDER exposes no public handle
+        vopt = self.sim._render_context_offscreen.vopt
         sitegroup0 = np.array(vopt.sitegroup).copy()
         vopt.sitegroup[:] = 0
         try:
@@ -274,7 +283,7 @@ class TossingSim:
         self.sim = self.oc._robot_env.sim  # pylint: disable=protected-access
         self._clients: dict[str, PerceptionClient] = {}
 
-    # --- state --------------------------------------------------------------------------
+    # --- state ------------------------------------------------------------------------
 
     def restore(self, plain: dict[str, list[float]]) -> Any:
         """Put the scene into a recorded state (float64, colliders from the live
@@ -293,9 +302,11 @@ class TossingSim:
         return self.oc._get_current_state()  # pylint: disable=protected-access
 
     def live(self) -> Any:
+        """The live object-centric state."""
         return self.oc._get_current_state()  # pylint: disable=protected-access
 
     def holding(self) -> dict[str, Any]:
+        """KINDER's holding evidence for the cube, without the contacts."""
         state = self.live()
         robot = state.get_object_from_name(self.robot_obj.name)
         cube = state.get_object_from_name(CUBE)
@@ -328,6 +339,7 @@ class TossingSim:
         return tuple(heights)
 
     def containers(self, state: Any) -> list[ContainerSpec]:
+        """The bin as a container the planner knows about."""
         obj = state.get_object_from_name(BIN)
         from scipy.spatial.transform import (  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
             Rotation,
@@ -341,7 +353,7 @@ class TossingSim:
         length, width, height, wall = self.bin_dims
         return [ContainerSpec(BIN, pose, length, width, height, wall)]
 
-    # --- arms ---------------------------------------------------------------------------
+    # --- arms -------------------------------------------------------------------------
 
     def run_old(
         self, plain: dict[str, list[float]], video: Path | None = None
@@ -357,7 +369,7 @@ class TossingSim:
             Pose,
         )
 
-        state = self.restore(plain)
+        self.restore(plain)
         obs_state = self._observed()
         pybullet_sim = PyBulletSim(obs_state)
         obj = obs_state.get_object_from_name(BIN)
@@ -388,9 +400,8 @@ class TossingSim:
             controller: Any = lifted["pick_cube"].ground(objects)
             try:
                 controller.reset(obs_state, None)
-            except (
-                BaseException
-            ) as exc:  # noqa: BLE001  (TrajectorySamplingFailure is not an Exception)
+            except BaseException as exc:  # pylint: disable=broad-exception-caught
+                # TrajectorySamplingFailure is not an Exception subclass.
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
                 stage: str | None = "filter" if "grasp" in str(exc).lower() else "plan"
@@ -414,7 +425,8 @@ class TossingSim:
                 try:
                     action = controller.step()
                     obs, _, _, _, _ = self.env.step(action)
-                except BaseException as exc:  # noqa: BLE001
+                except BaseException as exc:  # pylint: disable=broad-exception-caught
+                    # Any failure ends the run; it is recorded and scored, not raised.
                     if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                         raise
                     error = f"{type(exc).__name__}: {exc}"
@@ -468,6 +480,7 @@ class TossingSim:
         return obs
 
     def estimator(self, name: str) -> Any:
+        """The named pose estimator, over the shared perception client."""
         if name == "colour":
             return DepthFitEstimator(ColourSegmenter())
         sam2 = Sam2Segmenter(self._client("perception", self.perception_port))
@@ -578,6 +591,7 @@ class TossingSim:
         }
 
     def generator(self, name: str, size: float) -> Any:
+        """A learned grasp generator for the named detector."""
         from prpl_tidybot.cube_pick import (  # pylint: disable=import-outside-toplevel
             learned_grasps,
         )
@@ -602,8 +616,10 @@ class _RecordingEstimator:
         self.inner = inner
         self.recorder = recorder
         self.name = inner.name
+        self.count = 0
 
     def estimate(self, frame: RGBDFrame, prior: CubePrior) -> Any:
+        """Estimate, and save the overlay and depth image for the video."""
         result = self.inner.estimate(frame, prior)
         self.count = getattr(self, "count", 0) + 1
         est = result if isinstance(result, CubeEstimate) else None

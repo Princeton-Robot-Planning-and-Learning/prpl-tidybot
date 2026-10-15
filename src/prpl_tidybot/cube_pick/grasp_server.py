@@ -41,7 +41,9 @@ from typing import Any
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import wire  # type: ignore[import-not-found]  # noqa: E402  (sibling module, imported without installing the package)
+# A sibling module, imported without installing the package: the server runs as a
+# standalone script in its own conda env.
+import wire  # type: ignore[import-not-found]  # pylint: disable=wrong-import-position,import-error
 
 # Local checkouts and interpreters for the two models live outside this repository;
 # point at them with these environment variables or the matching flags.
@@ -53,7 +55,8 @@ _DEFAULTS = {
     "m2t2_ckpt": f"{_ROOT}/weights/m2t2/m2t2.pth",
     "cgn_dir": f"{_ROOT}/contact_graspnet",
     "cgn_ckpt_dir": (
-        f"{_ROOT}/weights/cgn_tf/contact_graspnet_models/scene_test_2048_bs3_hor_sigma_001"
+        f"{_ROOT}/weights/cgn_tf/contact_graspnet_models/"
+        "scene_test_2048_bs3_hor_sigma_001"
     ),
 }
 MODELS = ("contact_graspnet", "m2t2")
@@ -86,6 +89,7 @@ class RequestValidator:
 
     @staticmethod
     def grasps(req: dict[str, Any]) -> dict[str, Any]:
+        """Validate a ``grasps`` request and return its cleaned fields."""
         model = req.get("model")
         if model not in MODELS:
             raise ValueError(f"model must be one of {MODELS}, got {model!r}")
@@ -205,18 +209,22 @@ class Worker:
         _log(f"{model} worker ready (pid {self.proc.pid}, load {ready['load_s']:.1f}s)")
 
     def call(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Send one request to the worker and return its reply."""
         wire.send_message(self.sock, req)
         return wire.recv_message(self.sock)
 
     def alive(self) -> bool:
+        """Whether the worker process is still running."""
         return self.proc.poll() is None
 
     def stop(self) -> None:
+        """Shut the worker down, killing it if it does not exit."""
         try:
             if self.alive():
                 wire.send_message(self.sock, {"op": "shutdown"})
                 self.proc.wait(timeout=20)
-        except Exception:  # noqa: BLE001  (the process is killed below regardless)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # The process is killed below regardless.
             pass
         if self.alive():
             self.proc.kill()
@@ -237,7 +245,8 @@ def _gpu_mem_mib(pid: int) -> int | None:
             timeout=10,
             check=True,
         ).stdout
-    except Exception:  # noqa: BLE001  (memory reporting is best effort)
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Memory reporting is best effort.
         return None
     for line in out.splitlines():
         parts = [p.strip() for p in line.split(",")]
@@ -254,6 +263,7 @@ class GraspServer:
         self.workers: dict[str, Worker] = {}
 
     def worker(self, model: str) -> Worker:
+        """The running worker for a model, starting or restarting it."""
         w = self.workers.get(model)
         if w is not None and not w.alive():
             _log(f"{model} worker died (exit {w.proc.returncode}); restarting")
@@ -265,11 +275,13 @@ class GraspServer:
         return w
 
     def release(self) -> None:
+        """Stop every worker, freeing its GPU memory."""
         for w in self.workers.values():
             w.stop()
         self.workers.clear()
 
     def handle(self, req: Any) -> dict[str, Any]:
+        """Answer one request, raising on an invalid one."""
         if not isinstance(req, dict):
             raise ValueError("request must be a dict")
         op = req.get("op")
@@ -319,6 +331,7 @@ class GraspServer:
         return out
 
     def serve(self) -> None:
+        """Accept clients one at a time until a shutdown request."""
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((self.args.host, self.args.port))
@@ -344,9 +357,8 @@ class GraspServer:
                 except ConnectionError:
                     _log("client disconnected")
                     return False
-                except (
-                    Exception
-                ) as exc:  # noqa: BLE001  (unreadable frame: resync impossible)
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    # An unreadable frame: resync is impossible.
                     _log(f"bad frame, dropping connection: {exc!r}")
                     try:
                         wire.send_message(
@@ -362,7 +374,8 @@ class GraspServer:
                         reply: dict[str, Any] = {"ok": True}
                     else:
                         reply = self.handle(req)
-                except Exception as exc:  # noqa: BLE001  (never crash on a bad request)
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    # Never crash on a bad request.
                     reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                 dt = (time.perf_counter() - t0) * 1000
                 detail = ""
@@ -405,20 +418,21 @@ class ContactGraspNetBackend:
     """Official TF Contact-GraspNet (NVlabs), used through its own GraspEstimator."""
 
     def __init__(self, *, repo: str, ckpt_dir: str) -> None:
-        import yaml  # type: ignore[import-untyped]
+        # Worker-only dependencies, imported in the model's own environment.
+        import yaml  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
 
         # The checkout calls yaml.load(f) with no Loader, which PyYAML >= 6 rejects.
         _orig_load = yaml.load
         yaml.load = lambda stream, Loader=yaml.FullLoader: _orig_load(stream, Loader)  # type: ignore[assignment]  # noqa: E501
 
-        import tensorflow.compat.v1 as tf  # type: ignore[import-untyped]
+        import tensorflow.compat.v1 as tf  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel,import-error
 
         tf.disable_eager_execution()
         for gpu in tf.config.experimental.list_physical_devices("GPU"):
             tf.config.experimental.set_memory_growth(gpu, True)
         sys.path.insert(0, os.path.join(repo, "contact_graspnet"))
-        import config_utils  # type: ignore[import-not-found]
-        from contact_grasp_estimator import (  # type: ignore[import-not-found]
+        import config_utils  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel,import-error
+        from contact_grasp_estimator import (  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel,import-error
             GraspEstimator,
         )
 
@@ -435,6 +449,7 @@ class ContactGraspNetBackend:
         self.ckpt = tf.train.get_checkpoint_state(ckpt_dir).model_checkpoint_path
 
     def grasps(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Contact-GraspNet grasps for one validated request."""
         segmap = req["segmap"]
         target = req["target_id"]
         use_seg = segmap is not None
@@ -477,15 +492,19 @@ class M2T2Backend:
     """M2T2 (NVlabs) with its released generic pick-and-place checkpoint."""
 
     def __init__(self, *, repo: str, ckpt: str) -> None:
-        import torch  # type: ignore[import-not-found]
-        from omegaconf import OmegaConf
+        # Worker-only dependencies, imported in the model's own environment.
+        import torch  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel,import-error
+        from omegaconf import OmegaConf  # pylint: disable=import-outside-toplevel
 
         sys.path.insert(0, repo)
+        # pylint: disable-next=import-outside-toplevel,import-error
         from m2t2.dataset import collate  # type: ignore[import-not-found]
-        from m2t2.dataset_utils import (  # type: ignore[import-not-found]  # noqa: E501
+        from m2t2.dataset_utils import (  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel,import-error
             normalize_rgb,
             sample_points,
         )
+
+        # pylint: disable-next=import-outside-toplevel,import-error
         from m2t2.m2t2 import M2T2  # type: ignore[import-not-found]
 
         self.torch = torch
@@ -536,6 +555,7 @@ class M2T2Backend:
         return T
 
     def grasps(self, req: dict[str, Any]) -> dict[str, Any]:
+        """M2T2 grasps for one validated request, in the camera frame."""
         torch = self.torch
         pts_cam, pix = DepthCloud.points(
             depth=req["depth"], K=req["K"], z_range=req["z_range"]
@@ -632,6 +652,7 @@ class M2T2Backend:
 
 
 def run_worker(args: argparse.Namespace) -> None:
+    """Load one model and answer requests over the parent's socket."""
     sock = socket.socket(fileno=args.worker_fd)
     t0 = time.perf_counter()
     try:
@@ -641,7 +662,8 @@ def run_worker(args: argparse.Namespace) -> None:
             )
         else:
             backend = M2T2Backend(repo=args.m2t2_dir, ckpt=args.m2t2_ckpt)
-    except Exception as exc:  # noqa: BLE001  (reported to the parent, then exit)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # Reported to the parent, then exit.
         traceback.print_exc()
         wire.send_message(sock, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
         return
@@ -655,13 +677,15 @@ def run_worker(args: argparse.Namespace) -> None:
             return
         try:
             reply = backend.grasps(req)
-        except Exception as exc:  # noqa: BLE001  (never crash on a bad request)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Never crash on a bad request.
             traceback.print_exc()
             reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         wire.send_message(sock, reply)
 
 
 def main() -> None:
+    """Parse the command line and run the server or a worker."""
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=50112)

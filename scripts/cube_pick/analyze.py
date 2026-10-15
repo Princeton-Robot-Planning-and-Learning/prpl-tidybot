@@ -19,7 +19,8 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+# pyplot must import after the backend is chosen.
+import matplotlib.pyplot as plt  # noqa: E402  # pylint: disable=wrong-import-position
 
 TOSSING_CLASSES = {
     "in bin near wall": "in bin",
@@ -45,13 +46,15 @@ def mcnemar_exact(b: int, c: int) -> float:
 
 
 def arm_name(rec: dict) -> str:
+    """The record's arm: old, or <estimator>+<generator>."""
     return "old" if rec["arm"] == "old" else f"{rec['estimator']}+{rec['generator']}"
 
 
 def load(paths: list[str], domain: str) -> list[dict]:
+    """Read JSON-line records and tag each with its domain, class and arm."""
     out = []
     for path in paths:
-        for line in open(path):
+        for line in open(path, encoding="utf-8"):
             rec = json.loads(line)
             rec["domain"] = domain
             if domain == "tossing":
@@ -70,6 +73,7 @@ def load(paths: list[str], domain: str) -> list[dict]:
 
 
 def main() -> None:
+    """Write the tables, paired tests and figures for the given runs."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--tossing", nargs="*", default=[])
     parser.add_argument("--shelf", nargs="*", default=[])
@@ -100,9 +104,7 @@ def main() -> None:
                     cell = table[cls][arm]
                     cell[0] += int(bool(rec["success"]))
                     cell[1] += 1
-        report["tables"][domain] = {
-            c: {a: v for a, v in t.items()} for c, t in table.items()
-        }
+        report["tables"][domain] = {c: dict(t.items()) for c, t in table.items()}
         lines.append(f"\n## {domain}\n")
         lines.append("| class | " + " | ".join(arms) + " |")
         lines.append("|---|" + "---|" * len(arms))
@@ -122,8 +124,8 @@ def main() -> None:
                     both = [
                         k
                         for k in keys
-                        if a in by[k]
-                        and b_arm in by[k]
+                        if a in by[k] and b_arm in by[k]
+                        # pylint: disable-next=consider-using-in  # keeps the short-circuit
                         and (group == "[all]" or by[k][a]["group"] == group)
                     ]
                     if not both:
@@ -154,7 +156,9 @@ def main() -> None:
                         }
                     )
                     lines.append(
-                        f"- {domain} {group}: {a} {sa}/{len(both)} vs {b_arm} {sb}/{len(both)}; discordant {b} vs {c}; exact McNemar p = {p:.3g}"
+                        f"- {domain} {group}: {a} {sa}/{len(both)} vs "
+                        f"{b_arm} {sb}/{len(both)}; discordant {b} vs {c}; "
+                        f"exact McNemar p = {p:.3g}"
                     )
         # Failures by step.
         for arm in arms:

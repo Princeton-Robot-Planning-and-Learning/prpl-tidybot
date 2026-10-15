@@ -86,6 +86,7 @@ class PickFailed(RuntimeError):
         super().__init__(f"{stage}: {detail}")
         self.stage = stage
         self.detail = detail
+        self.hand_blocked = False
 
 
 @dataclass
@@ -193,7 +194,7 @@ class CubePickPolicy:
         self._grasp_yaw = 0.0
         self._standoff_joints: list[float] = []
 
-    # --- driving ---------------------------------------------------------------------------
+    # --- driving ----------------------------------------------------------------------
 
     def run(self, max_ticks: int = 2000) -> PickResult:
         """Run the pick to completion against the robot."""
@@ -219,6 +220,7 @@ class CubePickPolicy:
         )
 
     def _run(self, max_ticks: int) -> None:
+        # pylint: disable-next=attribute-defined-outside-init  # set per run
         self._budget = max_ticks
         cfg = self.config
         failure: PickFailed | None = None
@@ -301,6 +303,8 @@ class CubePickPolicy:
         options = [here.base] + [
             b for b in bases if not self._base_close(b, here.base, 0.03, 0.05)
         ]
+        # Read with a getattr default until the first look sets it.
+        # pylint: disable-next=attribute-defined-outside-init
         self._hand_blocked: set[tuple[Any, ...]] = set()
         last = PickFailed("filter", "no grasp fits from any base placement")
         for base in options[: cfg.max_filter_bases]:
@@ -325,7 +329,7 @@ class CubePickPolicy:
         self.scene.set_robot(here.base, here.arm)
         raise last
 
-    # --- stage helpers ---------------------------------------------------------------------
+    # --- stage helpers ----------------------------------------------------------------
 
     def _base_pose_candidates(self) -> list[tuple[float, float, float]]:
         cfg = self.config
@@ -492,7 +496,8 @@ class CubePickPolicy:
             self.scene.set_cube_estimate(_upright(result))
             self._log(
                 stage,
-                f"estimate {np.round(result.position, 4)} yaw {np.degrees(result.yaw):.1f}",
+                f"estimate {np.round(result.position, 4)} "
+                f"yaw {np.degrees(result.yaw):.1f}",
                 {
                     "position": result.position.tolist(),
                     "yaw": result.yaw,
@@ -553,7 +558,7 @@ class CubePickPolicy:
                 break
         if not feasible:
             failure = PickFailed("filter", f"every candidate rejected: {counts}")
-            failure.hand_blocked = hand_only  # type: ignore[attr-defined]
+            failure.hand_blocked = hand_only
             raise failure
         margin, _, candidate, grasp_joints, standoff_joints = max(
             feasible,
@@ -568,7 +573,8 @@ class CubePickPolicy:
         self._grasp_yaw = float(np.arctan2(frame[1, 0], frame[0, 0]))
         self._log(
             "filter",
-            f"grasp {candidate.label} (margin {margin * 1000:.1f} mm, {len(feasible)} fit)",
+            f"grasp {candidate.label} (margin {margin * 1000:.1f} mm, "
+            f"{len(feasible)} fit)",
             {"rejections": counts},
         )
         return candidate, grasp_joints, standoff_joints
@@ -714,12 +720,14 @@ class CubePickPolicy:
             if 0.0 <= along <= self.config.close_if_short and lateral <= 0.004:
                 self._log(
                     "approach",
-                    f"stopped {along * 1000:.0f} mm short, {lateral * 1000:.1f} mm off axis; closing",
+                    f"stopped {along * 1000:.0f} mm short, "
+                    f"{lateral * 1000:.1f} mm off axis; closing",
                 )
                 return
             raise PickFailed(
                 "approach",
-                f"stopped short (contact?) {along * 1000:.0f} mm before the grasp, {lateral * 1000:.1f} mm off axis: {failure.detail}",
+                f"stopped short (contact?) {along * 1000:.0f} mm before the grasp, "
+                f"{lateral * 1000:.1f} mm off axis: {failure.detail}",
             ) from failure
 
     def _close_and_check(self) -> None:
@@ -760,7 +768,8 @@ class CubePickPolicy:
         if gap < cfg.cube_size * cfg.closed_gap_fraction or abs(gap - before) > 0.006:
             raise PickFailed(
                 "lift",
-                f"hold not verified after the lift: gap {before * 1000:.1f} -> {gap * 1000:.1f} mm",
+                f"hold not verified after the lift: gap {before * 1000:.1f} -> "
+                f"{gap * 1000:.1f} mm",
             )
         self._log("lift", f"hold verified (gap {gap * 1000:.1f} mm)")
 
@@ -851,7 +860,7 @@ class CubePickPolicy:
         except PickFailed as failure:
             self._log("retract", f"back-out incomplete: {failure.detail}")
 
-    # --- motion primitives -----------------------------------------------------------------
+    # --- motion primitives ------------------------------------------------------------
 
     def _move_arm_planned(
         self,
@@ -924,7 +933,8 @@ class CubePickPolicy:
                     break
                 raise PickFailed(
                     stage,
-                    f"arm stopped at waypoint {index}/{len(path) - 1}, {error:.3f} rad short",
+                    f"arm stopped at waypoint {index}/{len(path) - 1}, "
+                    f"{error:.3f} rad short",
                 )
             self._tick(RobotCommand(arm=path[index], gripper=gripper))
             ticks += 1
@@ -936,7 +946,8 @@ class CubePickPolicy:
                     break
                 raise PickFailed(
                     stage,
-                    f"arm timed out at waypoint {index}/{len(path) - 1}, {error:.3f} rad short",
+                    f"arm timed out at waypoint {index}/{len(path) - 1}, "
+                    f"{error:.3f} rad short",
                 )
         proprio = self.robot.proprio()
         self.scene.set_robot(proprio.base, proprio.arm)

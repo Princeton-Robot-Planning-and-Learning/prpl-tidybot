@@ -31,7 +31,6 @@ import time
 import traceback
 import zlib
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -41,6 +40,7 @@ import harness  # noqa: E402  pylint: disable=wrong-import-position
 
 
 def main() -> None:
+    """Replay every selected row for each arm, appending one record per run."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--states", required=True)
     parser.add_argument("--out", required=True)
@@ -61,7 +61,7 @@ def main() -> None:
     parser.add_argument("--grasp-port", type=int, default=50112)
     args = parser.parse_args()
 
-    rows = json.load(open(args.states))
+    rows = json.load(open(args.states, encoding="utf-8"))
     selected = harness.parse_rows(args.rows, len(rows))
     video_rows = (
         set(harness.parse_rows(args.video_rows, len(rows)))
@@ -70,13 +70,13 @@ def main() -> None:
     )
     done = set()
     if os.path.exists(args.out):
-        for line in open(args.out):
+        for line in open(args.out, encoding="utf-8"):
             rec = json.loads(line)
             done.add((rec["row"], rec["arm"]))
     sim = harness.TossingSim(
         perception_port=args.perception_port, grasp_port=args.grasp_port
     )
-    with open(args.out, "a") as out:
+    with open(args.out, "a", encoding="utf-8") as out:
         for index in selected:
             row = rows[index]
             for arm in args.arms.split(","):
@@ -101,7 +101,8 @@ def main() -> None:
                             max_ticks=args.max_ticks,
                             video=video,
                         )
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    # One row's failure is recorded; the sweep goes on.
                     record = {
                         "success": False,
                         "stage": "harness_error",
@@ -137,7 +138,8 @@ def main() -> None:
                 out.flush()
                 print(
                     f"row {index} {arm}: {'OK ' if record['success'] else 'FAIL'} "
-                    f"{record.get('stage')} {str(record.get('detail'))[:120]} ({record['seconds']} s)",
+                    f"{record.get('stage')} {str(record.get('detail'))[:120]} "
+                    f"({record['seconds']} s)",
                     flush=True,
                 )
 

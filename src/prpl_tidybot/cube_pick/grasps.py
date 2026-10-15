@@ -80,7 +80,8 @@ class GraspCandidate:
     def label(self) -> str:
         """Short human-readable description."""
         return (
-            f"{self.source} yaw+{np.degrees(self.yaw_offset):.0f} tilt{np.degrees(self.tilt):+.0f} "
+            f"{self.source} yaw+{np.degrees(self.yaw_offset):.0f} "
+            f"tilt{np.degrees(self.tilt):+.0f} "
             f"open{self.opening * 1000:.0f}mm depth{self.depth * 1000:.0f}mm"
         )
 
@@ -198,5 +199,6 @@ class AnalyticGraspGenerator:
     def candidates(
         self, *, cube_frame: FloatArray, frame: Any, mask: Any
     ) -> list[GraspCandidate]:
+        """The sampler's candidates, best first."""
         del cube_frame, frame, mask
         return self.sampler.candidates()

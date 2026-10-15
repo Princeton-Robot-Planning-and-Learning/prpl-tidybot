@@ -14,6 +14,7 @@ def _looking_down(height: float) -> np.ndarray:
 
 
 def test_depth_prompt_finds_the_cube_when_the_prior_is_off():
+    """The depth prompt finds the cube when the prior is off."""
     intr = PinholeIntrinsics.from_diagonal_fov(
         width=320, height=240, diagonal_fov_deg=67
     )
@@ -33,6 +34,7 @@ def test_depth_prompt_finds_the_cube_when_the_prior_is_off():
 
 
 def test_depth_prompt_gives_up_on_a_flat_view():
+    """The depth prompt gives up on a flat view."""
     intr = PinholeIntrinsics.from_diagonal_fov(
         width=320, height=240, diagonal_fov_deg=67
     )

@@ -6,6 +6,7 @@ from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 from prpl_tidybot.cube_pick.cube_fit import (
     CubeFitError,
+    SupportSurface,
     fit_cube,
     sample_visible_cube_points,
     yaw_error_mod_90,
@@ -24,6 +25,7 @@ def _pose(x, y, z, yaw_deg, tilt_deg=0.0):
 
 
 def test_yaw_error_mod_90():
+    """Yaw error wraps at the cube's 90-degree symmetry."""
     assert yaw_error_mod_90(np.radians(89), np.radians(1)) == pytest.approx(
         np.radians(2)
     )
@@ -32,6 +34,7 @@ def test_yaw_error_mod_90():
 
 @pytest.mark.parametrize("yaw", [0.0, 17.0, 44.0, 71.0])
 def test_fit_recovers_a_face_down_cube_seen_from_above(yaw):
+    """A face-down cube seen from above is recovered."""
     truth = _pose(0.4, -0.2, 0.045, yaw)
     camera = np.array([0.42, -0.18, 0.40])
     rng = np.random.default_rng(0)
@@ -46,6 +49,7 @@ def test_fit_recovers_a_face_down_cube_seen_from_above(yaw):
 
 
 def test_fit_recovers_an_obliquely_viewed_cube():
+    """An obliquely viewed cube is recovered."""
     truth = _pose(0.0, 0.0, 0.025, 30.0)
     camera = np.array([-0.25, 0.05, 0.25])
     rng = np.random.default_rng(1)
@@ -59,6 +63,7 @@ def test_fit_recovers_an_obliquely_viewed_cube():
 
 
 def test_fit_survives_outliers_from_the_bin_floor():
+    """Bin-floor points in the cloud do not throw the fit off."""
     truth = _pose(0.3, 0.1, 0.045, 10.0)
     camera = np.array([0.3, 0.1, 0.40])
     rng = np.random.default_rng(2)
@@ -73,11 +78,13 @@ def test_fit_survives_outliers_from_the_bin_floor():
 
 
 def test_fit_rejects_too_few_points():
+    """Too few points raise CubeFitError."""
     with pytest.raises(CubeFitError):
         fit_cube(points=np.zeros((5, 3)), size=SIZE, viewpoint=np.array([0, 0, 1.0]))
 
 
 def test_fit_reports_a_tipped_cube():
+    """A tipped cube is reported through its up alignment."""
     truth = _pose(0.0, 0.0, 0.04, 20.0, tilt_deg=35.0)
     camera = np.array([0.05, -0.05, 0.40])
     rng = np.random.default_rng(3)
@@ -90,6 +97,7 @@ def test_fit_reports_a_tipped_cube():
 
 
 def test_fit_does_not_bury_the_cube_under_a_floor_patch_in_its_mask():
+    """A floor patch in the mask does not put the cube under the floor."""
     # A floor cube whose mask leaked onto more floor than the cube's own top face:
     # the dominant plane is the floor, and a cube "under" it would explain those
     # points. The known support height rules that out.
@@ -109,8 +117,7 @@ def test_fit_does_not_bury_the_cube_under_a_floor_patch_in_its_mask():
 
 
 def test_a_container_floor_does_not_reject_a_cube_beside_the_container():
-    from prpl_tidybot.cube_pick.cube_fit import SupportSurface
-
+    """A container's floor does not reject a cube beside the container."""
     truth = _pose(0.2, 0.0, 0.025, 10.0)
     camera = np.array([0.2, 0.0, 0.38])
     rng = np.random.default_rng(5)

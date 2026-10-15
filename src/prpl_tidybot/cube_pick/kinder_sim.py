@@ -64,6 +64,8 @@ class KinderWristCamera:
     noise: DepthNoiseModel = field(default_factory=DepthNoiseModel)
 
     def __post_init__(self) -> None:
+        # pylint: disable=attribute-defined-outside-init  # a dataclass: no __init__
+        # pylint: disable=no-member  # mujoco is a C extension pylint cannot inspect
         if self.render is None:
             self.render = (
                 self.color
@@ -98,9 +100,8 @@ class KinderWristCamera:
         # a real camera would see.
         render = self.render
         assert render is not None  # set in __post_init__
-        vopt = (
-            self.sim._render_context_offscreen.vopt
-        )  # pylint: disable=protected-access
+        # pylint: disable-next=protected-access  # KINDER exposes no public handle
+        vopt = self.sim._render_context_offscreen.vopt
         sitegroup0 = np.array(vopt.sitegroup).copy()
         vopt.sitegroup[:] = 0
         try:
@@ -115,10 +116,10 @@ class KinderWristCamera:
             offset_cv = np.asarray(self.depth_offset)
             body_from_cam = model.cam_quat[cam]
             rot = np.zeros(9)
-            mujoco.mju_quat2Mat(rot, body_from_cam)
+            mujoco.mju_quat2Mat(rot, body_from_cam)  # pylint: disable=no-member
             model.cam_pos[cam] = pos0 + rot.reshape(3, 3) @ (_MJ_TO_CV @ offset_cv)
             model.cam_fovy[cam] = self.depth.vertical_fov_deg
-            mujoco.mj_camlight(model, data)
+            mujoco.mj_camlight(model, data)  # pylint: disable=no-member
             _, zbuffer = self.sim.render(
                 width=self.depth.width,
                 height=self.depth.height,
@@ -129,7 +130,7 @@ class KinderWristCamera:
             vopt.sitegroup[:] = sitegroup0
             model.cam_fovy[cam] = fovy0
             model.cam_pos[cam] = pos0
-            mujoco.mj_camlight(model, data)
+            mujoco.mj_camlight(model, data)  # pylint: disable=no-member
         extent = model.stat.extent
         near, far = model.vis.map.znear * extent, model.vis.map.zfar * extent
         depth_m = near / (1.0 - zbuffer.astype(np.float64) * (1.0 - near / far))
@@ -178,6 +179,7 @@ class KinderPickRobot:
         camera_noise_seed: int = 0,
         on_step: Callable[[Any], None] | None = None,
     ) -> None:
+        # pylint: disable=no-member  # mujoco is a C extension pylint cannot inspect
         self._env = env
         self._oc = env.unwrapped._object_centric_env  # pylint: disable=protected-access
         self.sim = self._oc._robot_env.sim  # pylint: disable=protected-access
@@ -204,6 +206,7 @@ class KinderPickRobot:
         return self._oc._get_current_state()  # pylint: disable=protected-access
 
     def proprio(self) -> Proprio:
+        """The current configuration, from the sim's joints."""
         state = self.state()
         r = self._robot
         driver = float(self.sim.data.mj_data.qpos[self._driver_qpos])
@@ -218,10 +221,12 @@ class KinderPickRobot:
         )
 
     def wrist_frame(self) -> RGBDFrame:
+        """A fresh wrist RGB-D observation (depth registered to colour)."""
         self.frames_captured += 1
         return self.camera.capture()
 
     def command(self, cmd: RobotCommand) -> None:
+        """Turn one tick of targets into a KINDER action and step the env."""
         current = self.proprio()
         action = np.zeros(11, dtype=np.float32)
         if cmd.base is not None:

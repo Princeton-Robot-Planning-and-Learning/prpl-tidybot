@@ -64,6 +64,7 @@ class ShelfSim:
         self.tossing.grasp_port = grasp_port
         self.tossing._clients = {}  # pylint: disable=protected-access
         self._pads = {
+            # pylint: disable-next=no-member  # mujoco is a C extension
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, n)
             for n in (
                 "robot_left_pad1",
@@ -74,31 +75,37 @@ class ShelfSim:
         }
 
     def restore(self, row: dict[str, Any]) -> Any:
+        """Restore a recorded MuJoCo state exactly and return the live state."""
         assert len(row["qpos"]) == self.model.nq, (len(row["qpos"]), self.model.nq)
         self.data.qpos[:] = row["qpos"]
         self.data.qvel[:] = row["qvel"]
         self.data.ctrl[:] = row["ctrl"]
+        # pylint: disable-next=no-member  # mujoco is a C extension
         mujoco.mj_forward(self.model, self.data)
         # The object-centric env caches its state at each step; refresh it from the
         # restored MuJoCo data.
-        self.oc._current_state = (
-            self.oc._get_object_centric_state()
-        )  # pylint: disable=protected-access
+        # pylint: disable-next=protected-access  # KINDER exposes no public setter
+        self.oc._current_state = self.oc._get_object_centric_state()
         return self.live()
 
     def live(self) -> Any:
+        """The live object-centric state."""
         return self.oc._get_current_state()  # pylint: disable=protected-access
 
     def cube_geoms(self, cube: str) -> set[int]:
+        """The geom ids of a cube's body."""
+        # pylint: disable-next=no-member  # mujoco is a C extension
         body = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, cube)
         return {g for g in range(self.model.ngeom) if self.model.geom_bodyid[g] == body}
 
     def holding(self, cube: str, start_z: float) -> dict[str, Any]:
+        """Whether both pads touch the cube and it is lifted 5 cm."""
         geoms = self.cube_geoms(cube)
         left = right = False
         for c in self.data.contact[: self.data.ncon]:
             pair = {int(c.geom1), int(c.geom2)}
             if pair & geoms and pair & self._pads:
+                # pylint: disable=no-member  # mujoco is a C extension
                 name = mujoco.mj_id2name(
                     self.model, mujoco.mjtObj.mjOBJ_GEOM, (pair & self._pads).pop()
                 )
@@ -114,6 +121,7 @@ class ShelfSim:
         }
 
     def box_spec(self, state: Any) -> Any:
+        """The box as a container spec, and its pose."""
         from scipy.spatial.transform import (  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
             Rotation,
         )
@@ -133,6 +141,7 @@ class ShelfSim:
         )
 
     def support_heights(self, state: Any) -> tuple[Any, ...]:
+        """The floor and the box's inner floor (the map)."""
         from prpl_tidybot.cube_pick.cube_fit import (  # pylint: disable=import-outside-toplevel
             SupportSurface,
         )
@@ -153,6 +162,7 @@ class ShelfSim:
         )
 
     def run_old(self, row: dict[str, Any], cube: str) -> dict[str, Any]:
+        """Run KINDER's pick on one case and score it."""
         from kinder_models.dynamic3d.tossing.parameterized_skills import (  # pylint: disable=import-outside-toplevel
             PickCubeController,
         )
@@ -185,7 +195,8 @@ class ShelfSim:
             )
             try:
                 pick.reset(state, np.zeros(0))
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # pylint: disable=broad-exception-caught
+                # TrajectorySamplingFailure is not an Exception subclass.
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
                 stage: str | None = "filter" if "grasp" in str(exc).lower() else "plan"
@@ -200,7 +211,8 @@ class ShelfSim:
             for ticks in range(1, self.OLD_STEP_LIMIT + 1):
                 try:
                     obs, _, _, _, _ = self.env.step(pick.step())
-                except BaseException as exc:  # noqa: BLE001
+                except BaseException as exc:  # pylint: disable=broad-exception-caught
+                    # Any failure ends the run; it is recorded and scored, not raised.
                     if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                         raise
                     error = f"{type(exc).__name__}: {exc}"
@@ -248,6 +260,7 @@ class ShelfSim:
         max_ticks: int,
         video: Path | None,
     ) -> dict[str, Any]:
+        """Run the cube_pick policy on one case and score it."""
         state = self.restore(row)
         obj = state.get_object_from_name(cube)
         true_position = np.array([state.get(obj, k) for k in ("x", "y", "z")])
@@ -320,6 +333,7 @@ class ShelfSim:
 
 
 def main() -> None:
+    """Replay every pick case for each arm, appending one record per run."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--states", required=True)
     parser.add_argument("--out", required=True)
@@ -336,7 +350,7 @@ def main() -> None:
     args = parser.parse_args()
     cases = []
     seen = set()
-    for line in open(args.states):
+    for line in open(args.states, encoding="utf-8"):
         row = json.loads(line)
         for case in row["cases"]:
             if (
@@ -349,12 +363,12 @@ def main() -> None:
     cases = cases[k::n]
     done = set()
     if os.path.exists(args.out):
-        for line in open(args.out):
+        for line in open(args.out, encoding="utf-8"):
             rec = json.loads(line)
             done.add((rec["id"], rec["arm"]))
     sim = ShelfSim(args.perception_port, args.grasp_port)
     video_ids = set(args.video_ids.split(",")) if args.video_ids else set()
-    with open(args.out, "a") as out:
+    with open(args.out, "a", encoding="utf-8") as out:
         for row, case in cases:
             cid = f"{row['state_id']}:{case['cube']}"
             for arm in args.arms.split(","):
@@ -380,7 +394,8 @@ def main() -> None:
                             max_ticks=args.max_ticks,
                             video=video,
                         )
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    # One case's failure is recorded; the sweep goes on.
                     record = {
                         "success": False,
                         "stage": "harness_error",
@@ -400,7 +415,9 @@ def main() -> None:
                 out.write(json.dumps(record) + "\n")
                 out.flush()
                 print(
-                    f"{cid} {arm}: {'OK ' if record['success'] else 'FAIL'} {record.get('stage')} {str(record.get('detail'))[:120]} ({record['seconds']} s)",
+                    f"{cid} {arm}: {'OK ' if record['success'] else 'FAIL'} "
+                    f"{record.get('stage')} {str(record.get('detail'))[:120]} "
+                    f"({record['seconds']} s)",
                     flush=True,
                 )
 

@@ -25,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import harness  # noqa: E402  pylint: disable=wrong-import-position
 
+# These import after harness, which chooses the rendering backend first.
+# pylint: disable=wrong-import-position
 from prpl_tidybot.cube_pick.cube_fit import (  # noqa: E402
     cube_yaw_and_up,
     yaw_error_mod_90,
@@ -33,6 +35,8 @@ from prpl_tidybot.cube_pick.kinder_sim import KinderPickRobot  # noqa: E402
 from prpl_tidybot.cube_pick.perception import CubeEstimate, CubePrior  # noqa: E402
 from prpl_tidybot.cube_pick.planning import PlanningScene  # noqa: E402
 from prpl_tidybot.cube_pick.robot import TOOL_FROM_CAMERA  # noqa: E402
+
+# pylint: enable=wrong-import-position
 
 # (tilt from vertical, azimuth relative to the base->cube direction, camera distance)
 VIEWS = {
@@ -49,6 +53,7 @@ def camera_pose(
     azimuth: float,
     distance: float,
 ) -> NDArray[np.float64]:
+    """A camera pose looking at `target` from the given tilt, azimuth and distance."""
     direction = np.array(
         [
             np.sin(tilt) * np.cos(base_heading + azimuth),
@@ -69,6 +74,7 @@ def camera_pose(
 
 
 def main() -> None:
+    """Estimate the cube from each view of each state and append the errors."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--states", required=True)
     parser.add_argument("--rows", default="")
@@ -76,13 +82,13 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=50111)
     parser.add_argument("--prior-noise", type=float, default=0.02)
     args = parser.parse_args()
-    rows = json.load(open(args.states))
+    rows = json.load(open(args.states, encoding="utf-8"))
     sim = harness.TossingSim(perception_port=args.port)
     estimators = {
         "sam2+depthfit": sim.estimator("sam2"),
         "sam2+foundationpose": sim.estimator("foundationpose"),
     }
-    with open(args.out, "a") as out:
+    with open(args.out, "a", encoding="utf-8") as out:
         for index in harness.parse_rows(args.rows, len(rows)):
             row = rows[index]
             state = sim.restore(row["state"])
@@ -96,7 +102,7 @@ def main() -> None:
             true_rot = Rotation.from_quat(
                 [state.get(cube, k) for k in ("qx", "qy", "qz", "qw")]
             ).as_matrix()
-            true_yaw, true_up = cube_yaw_and_up(true_rot)
+            true_yaw, _ = cube_yaw_and_up(true_rot)
             rng = np.random.default_rng(zlib.crc32(row["id"].encode()))
             prior_pos = truth.copy()
             prior_pos[:2] += rng.normal(scale=args.prior_noise, size=2)

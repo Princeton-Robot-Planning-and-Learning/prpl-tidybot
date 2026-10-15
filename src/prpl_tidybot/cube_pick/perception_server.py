@@ -30,7 +30,9 @@ from typing import Any
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import wire  # type: ignore[import-not-found]  # noqa: E402  (sibling module, imported without installing the package)
+# A sibling module, imported without installing the package: the server runs as a
+# standalone script in its own conda env.
+import wire  # type: ignore[import-not-found]  # pylint: disable=wrong-import-position,import-error
 
 _CUBEPOSE_ROOT = os.environ.get("CUBEPOSE_ROOT", os.path.expanduser("~/cubepose"))
 _DEFAULT_FP_DIR = os.environ.get("CUBEPOSE_FP_DIR", f"{_CUBEPOSE_ROOT}/FoundationPose")
@@ -49,9 +51,12 @@ class Sam2Backend:
     """Point/box prompted SAM 2 image predictor."""
 
     def __init__(self, *, checkpoint: str, config: str) -> None:
-        import torch  # type: ignore[import-not-found]
+        # GPU dependencies, present only in the server's own environment.
+        import torch  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel,import-error
+
+        # pylint: disable-next=import-outside-toplevel,import-error
         from sam2.build_sam import build_sam2  # type: ignore[import-not-found]
-        from sam2.sam2_image_predictor import (  # type: ignore[import-not-found]
+        from sam2.sam2_image_predictor import (  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel,import-error
             SAM2ImagePredictor,
         )
 
@@ -60,6 +65,7 @@ class Sam2Backend:
         self.predictor = SAM2ImagePredictor(model)
 
     def segment(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Segment the image from point and/or box prompts, best mask first."""
         torch = self._torch
         rgb = np.ascontiguousarray(np.asarray(req["rgb"], dtype=np.uint8))
         if rgb.ndim != 3 or rgb.shape[2] != 3:
@@ -105,9 +111,9 @@ class FoundationPoseBackend:
         if fp_dir not in sys.path:
             sys.path.insert(0, fp_dir)
         # FoundationPose's own module, from the local checkout.
-        import estimater  # type: ignore[import-not-found]
-        import nvdiffrast.torch as dr  # type: ignore[import-not-found]
-        import torch
+        import estimater  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel,import-error
+        import nvdiffrast.torch as dr  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel,import-error
+        import torch  # pylint: disable=import-outside-toplevel,import-error
 
         self._torch = torch
         self._fp = estimater
@@ -135,7 +141,7 @@ class FoundationPoseBackend:
 
     @staticmethod
     def _cube_mesh(*, size: float, rgba: list[float]) -> Any:
-        import trimesh
+        import trimesh  # pylint: disable=import-outside-toplevel  # FoundationPose only
 
         box = trimesh.creation.box(extents=[size, size, size])
         box.unmerge_vertices()  # per-face vertices, so normals stay flat on each face
@@ -169,6 +175,7 @@ class FoundationPoseBackend:
         return self.estimators[cache_key]
 
     def register(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Register the cube's pose from RGB-D and its mask."""
         rgb = np.array(req["rgb"], dtype=np.uint8)
         depth = np.array(req["depth"], dtype=np.float32)
         K = np.array(req["K"], dtype=np.float64).reshape(3, 3)
@@ -184,7 +191,7 @@ class FoundationPoseBackend:
         if int((mask & (depth > 0.001)).sum()) < 4:
             raise ValueError("mask contains fewer than 4 pixels with valid depth")
         size = float(req["cube_size"])
-        if not size > 0:
+        if not size > 0:  # pylint: disable=unnecessary-negation  # also rejects NaN
             raise ValueError("cube_size must be positive")
         est = self._estimator(
             key=str(req.get("mesh_key", "cube")),
@@ -207,6 +214,8 @@ class FoundationPoseBackend:
 
 
 class PerceptionServer:
+    """Serves segmentation and pose requests, loading each backend lazily."""
+
     def __init__(self, *, backends: list[str], args: argparse.Namespace) -> None:
         unknown = sorted(set(backends) - set(_KNOWN_BACKENDS))
         if unknown:
@@ -244,7 +253,7 @@ class PerceptionServer:
         self.fp = None
         gc.collect()
         try:
-            import torch
+            import torch  # pylint: disable=import-outside-toplevel  # optional here
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -254,13 +263,15 @@ class PerceptionServer:
     def _gpu_mb(self) -> float:
         if "torch" not in sys.modules:
             return 0.0
-        import torch
+        # Only once a backend has imported it.
+        import torch  # pylint: disable=import-outside-toplevel,import-error
 
         return (
             torch.cuda.memory_allocated() / 2**20 if torch.cuda.is_available() else 0.0
         )
 
     def handle(self, req: Any) -> dict[str, Any]:
+        """Answer one request, raising on an invalid one."""
         if not isinstance(req, dict):
             raise ValueError("request must be a dict")
         op = req.get("op")
@@ -282,24 +293,28 @@ class PerceptionServer:
         raise ValueError(f"unknown op {op!r}")
 
     def serve_connection(self, conn: socket.socket) -> None:
+        """Answer one client's requests until it disconnects."""
         while self.running:
             try:
                 req = wire.recv_message(conn)
             except ConnectionError:
                 return
-            except Exception as exc:  # malformed frame: the stream is unrecoverable
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # A malformed frame: the stream is unrecoverable.
                 _log(f"bad frame, dropping connection: {exc!r}")
                 return
             op = req.get("op") if isinstance(req, dict) else None
             t0 = time.perf_counter()
             try:
                 reply = self.handle(req)
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # Never crash on a bad request.
                 traceback.print_exc()
                 reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             dt = (time.perf_counter() - t0) * 1000
             _log(
-                f"op={op} ok={reply.get('ok')} {dt:.1f} ms gpu_alloc={self._gpu_mb():.0f} MiB"
+                f"op={op} ok={reply.get('ok')} {dt:.1f} ms "
+                f"gpu_alloc={self._gpu_mb():.0f} MiB"
                 + ("" if reply.get("ok") else f" error={reply.get('error')}")
             )
             try:
@@ -308,6 +323,7 @@ class PerceptionServer:
                 return
 
     def serve(self, *, host: str, port: int) -> None:
+        """Accept clients one at a time until a shutdown request."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             srv.bind((host, port))
@@ -325,6 +341,7 @@ class PerceptionServer:
 
 
 def main() -> None:
+    """Parse the command line and run the server."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=50111)

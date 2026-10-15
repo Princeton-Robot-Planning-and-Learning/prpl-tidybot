@@ -61,6 +61,7 @@ class LearnedGraspGenerator:
     def candidates(
         self, *, cube_frame: FloatArray, frame: Any, mask: Any
     ) -> list[GraspCandidate]:
+        """The detector's grasps on the cube, as tool-frame candidates."""
         if frame is None:
             return []
         segmap = np.zeros(frame.depth.shape, np.int32)

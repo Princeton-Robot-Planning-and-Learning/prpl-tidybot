@@ -217,6 +217,7 @@ class ColourSegmenter:
     name: str = "colour"
 
     def segment(self, frame: RGBDFrame, prior: CubePrior) -> Mask | PerceptionFailure:
+        """Mask the largest blob of the cube's colour near the prior."""
         prompt = prior_prompt(frame, prior)
         if prompt is None:
             return PerceptionFailure("prior not in view")
@@ -282,6 +283,7 @@ class Sam2Segmenter:
     name: str = "sam2"
 
     def segment(self, frame: RGBDFrame, prior: CubePrior) -> Mask | PerceptionFailure:
+        """Mask the cube with SAM 2, prompted at the prior or the depth blob."""
         prompt = prior_prompt(frame, prior)
         if prompt is None:
             return PerceptionFailure("prior not in view")
@@ -337,6 +339,8 @@ class DepthFitEstimator:
     def estimate(
         self, frame: RGBDFrame, prior: CubePrior
     ) -> CubeEstimate | PerceptionFailure:
+        """The cube's pose from a known-size cube fit to its masked depth."""
+        # pylint: disable-next=assignment-from-no-return  # it reads the Protocol stub
         mask = self.segmenter.segment(frame, prior)
         if isinstance(mask, PerceptionFailure):
             return mask
@@ -392,6 +396,8 @@ class FoundationPoseEstimator:
     def estimate(
         self, frame: RGBDFrame, prior: CubePrior
     ) -> CubeEstimate | PerceptionFailure:
+        """The cube's pose from FoundationPose on its mask."""
+        # pylint: disable-next=assignment-from-no-return  # it reads the Protocol stub
         mask = self.segmenter.segment(frame, prior)
         if isinstance(mask, PerceptionFailure):
             return mask
