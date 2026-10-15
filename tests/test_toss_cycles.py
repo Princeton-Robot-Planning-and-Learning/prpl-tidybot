@@ -466,15 +466,23 @@ def test_the_correction_never_aims_the_grasp_below_its_planned_height(
     assert min(commanded_z) > grasp_z - 0.001
 
 
-def test_confirm_once_asks_a_single_question_for_the_whole_run(tmp_path, arm_log):
+def test_confirm_once_asks_a_single_question_for_the_whole_run(
+    tmp_path, arm_log, caplog
+):
     """confirm=once: one prompt before the first action; the picks, tosses, retracts
-    and the reset then run without asking."""
+    and the reset then run without asking, each step still printed."""
     operator = _Operator()
-    result = run_toss_cycles(
-        _compose(confirm="once"), log_dir=tmp_path, prompt_fn=operator
-    )
+    with caplog.at_level("INFO", logger="prpl_tidybot.toss_cycles"):
+        result = run_toss_cycles(
+            _compose(confirm="once"), log_dir=tmp_path, prompt_fn=operator
+        )
     assert result.completed == 2
     assert len(operator.prompts) == 1
+    steps = [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("Step")
+    ]
+    assert any("Drive to the toss pose" in m for m in steps)
+    assert any("retract the arm after the toss" in m for m in steps)
     assert len([e for e in arm_log if e[0] == "toss"]) == 2
 
 
