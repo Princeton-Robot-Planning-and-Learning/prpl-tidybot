@@ -24,6 +24,44 @@ toss_pose: [1.326, -0.493, -3.132]
 toss:
   max_vel: 140.0
   gripper_release_ms: 600
+  # Toss at the localized bin (`bin` below) instead of from toss_pose, with
+  # Tossing3D's parameters: base centre `standoff` m from the bin centre, facing
+  # it, swinging at `speed` deg/s and opening at `release_ms`. `direction` is the
+  # azimuth (map frame, rad) from the bin centre to the robot; null picks the one
+  # nearest the robot's bearing. Checked against real_toss_bounds, the drivable box,
+  # the barrier and the bin before the base moves.
+  aimed:
+    enabled: false
+    standoff: 1.2
+    speed: 120.0
+    release_ms: 600.0
+    direction: null
+
+# The box of real toss parameters (prpl_tidybot.aimed_toss.RealTossBounds). From
+# this arm's swing (prpl_tidybot.toss: trapezoidal, at most 140 deg/s, fixed release
+# pose, heading 0) and a ballistic model of the release state, validated within
+# ~0.1 m against a real throw: at every speed in [100, 140] deg/s and release cycle in
+# [500, 850] ms the cube leaves moving forward and up (tests/test_aimed_toss.py pins
+# this), and lands at rim height 0.9-1.45 m from the base centre. Anything outside
+# is rejected before the arm or base moves.
+real_toss_bounds:
+  standoff: [0.9, 1.45]
+  speed: [100.0, 140.0]
+  release_ms: [500.0, 850.0]
+
+# Tossing3D's barrier: a rectangle on the floor the robot never crosses (it works on
+# the +x side; the bin stands on the -x side). Every base pose and straight drive
+# keeps the whole footprint (0.548 x 0.508 m) at least `clearance` beyond its +x
+# face, and a cube across it is not picked. Off here (the original toss loop); the
+# skill server turns it on. PLACEHOLDER line until the physical barrier is measured.
+barrier:
+  enabled: false
+  center: [0.0, 0.0]
+  # Long side along yaw (pi/2: along the map's y axis).
+  length: 1.8
+  thickness: 0.05
+  yaw: 1.5707963267948966
+  clearance: 0.05
 
 # The cube carries no markers, so the marker-based landing capture is off; the next
 # localization (or the final one) records where each throw landed.
@@ -143,7 +181,7 @@ bin:
   pipelines:
     fake:
       _target_: prpl_tidybot.bin_localizer.ConstantBinSource
-      x: -1.0
+      x: -0.45
       y: 0.4
       yaw: 0.0
       length: ${bin.length}
