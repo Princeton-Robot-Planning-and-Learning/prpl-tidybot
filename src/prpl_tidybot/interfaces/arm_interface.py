@@ -1,6 +1,7 @@
 """Arm interface."""
 
 import abc
+import time
 from typing import Any
 
 from prpl_tidybot.toss import (
@@ -66,13 +67,14 @@ class ArmInterface(abc.ABC):
         heading: float = 0.0,
         max_vel: float = TOSS_MAX_VEL,
         gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
-    ) -> None:
+    ) -> dict[str, float] | None:
         """Throw whatever the gripper holds (see ``prpl_tidybot.toss``).
 
         Moves to the wind-up pose with joint 1 at ``heading`` (Kortex degrees), swings
         to the release pose at up to ``max_vel`` deg/s and opens the gripper
         ``gripper_release_ms`` ms into the swing. Blocks until the arm is back under the
-        normal controller, holding the release pose with the gripper open.
+        normal controller, holding the release pose with the gripper open. Returns
+        ``{"swing_start_time": t}``, when the swing began after the wind-up, if known.
         """
         raise NotImplementedError(f"{type(self).__name__} cannot toss.")
 
@@ -124,7 +126,7 @@ class FakeArmInterface(ArmInterface):
         heading: float = 0.0,
         max_vel: float = TOSS_MAX_VEL,
         gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
-    ) -> None:
+    ) -> dict[str, float] | None:
         """Record the call and open the gripper; the arm conf is left unchanged.
 
         The swing is planned (and discarded) so that parameters the arm server would
@@ -144,3 +146,4 @@ class FakeArmInterface(ArmInterface):
             }
         )
         self.gripper_state = 0.0
+        return {"swing_start_time": time.time()}

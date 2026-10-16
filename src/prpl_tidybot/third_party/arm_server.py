@@ -125,11 +125,14 @@ class Arm:
                 max_vel=max_vel,
                 gripper_release_ms=gripper_release_ms,
             )
+            swing_start = time.time()
             self.arm.run_position_trajectory(
                 trajectory, gripper_release_step=gripper_release_ms
             )
         finally:
             self.resume()
+        # The wind-up takes seconds; callers align video to the swing itself.
+        return {"swing_start_time": swing_start}
 
     def move_joints_angular(self, qpos):
         # One blocking move under the arm's onboard position controller (as Jimmy

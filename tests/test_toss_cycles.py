@@ -66,7 +66,7 @@ def _arm_log(monkeypatch):
 
     def toss(self, **kwargs):
         log.append(("toss", kwargs))
-        original_toss(self, **kwargs)
+        return original_toss(self, **kwargs)
 
     def execute_action(self, arm_goal, gripper_goal):
         log.append(("arm", list(arm_goal), gripper_goal))
@@ -134,7 +134,11 @@ def test_every_retract_runs_under_the_compliant_loop(tmp_path, arm_log):
     """Only the grasp uses the onboard controller; retracts (after a toss, before the
     drive back after a miss, and in the reset) stay compliant."""
     cfg = _compose(
-        **{"pick.top_down.fake_grasp_reading": 0.996, "pick.top_down.max_attempts": 2}
+        **{
+            "pick.top_down.fake_grasp_reading": 0.996,
+            "pick.top_down.max_attempts": 2,
+            "pick.top_down.ask_to_move_after_miss": 0,
+        }
     )
     run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=_Operator())
     retract = list(RETRACT_ARM_CONF)
@@ -507,7 +511,11 @@ def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
     """Readings that look like an empty gripper retry up to max_attempts, then stop."""
     operator = _Operator()
     cfg = _compose(
-        **{"pick.top_down.fake_grasp_reading": 0.996, "pick.top_down.max_attempts": 2}
+        **{
+            "pick.top_down.fake_grasp_reading": 0.996,
+            "pick.top_down.max_attempts": 2,
+            "pick.top_down.ask_to_move_after_miss": 0,
+        }
     )
     result = run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=operator)
     assert result.completed == 0
@@ -535,7 +543,11 @@ def test_a_missed_grasp_drives_back_to_the_toss_pose_to_relocalize(
     monkeypatch.setattr(tc, "_drive_to", drive_to)
     operator = _Operator()
     cfg = _compose(
-        **{"pick.top_down.fake_grasp_reading": 0.996, "pick.top_down.max_attempts": 2}
+        **{
+            "pick.top_down.fake_grasp_reading": 0.996,
+            "pick.top_down.max_attempts": 2,
+            "pick.top_down.ask_to_move_after_miss": 0,
+        }
     )
     run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=operator)
     order = [
@@ -696,3 +708,36 @@ def test_a_cube_that_ends_up_in_the_bin_is_put_back_by_the_person(
     assert operator.asked("in the bin") == 1
     log = json.loads((tmp_path / "cycles.json").read_text())
     assert log["cycles"][1]["cube_in_bin"] == {"x": 0.13, "y": 1.68}
+
+
+def test_the_toss_logs_when_its_swing_started_not_when_it_was_called(tmp_path):
+    """The arm server's toss winds up first (seconds), then swings; the record carries
+    the swing's own start, so the release is swing start + release ms."""
+    run_toss_cycles(
+        _compose(cycles=1, **{"+toss.grid": "[[140,675]]"}),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    toss = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0]["toss"]
+    assert toss["swing_start_time"] >= toss["toss_call_time"]
+    assert toss["release_time"] == pytest.approx(toss["swing_start_time"] + 0.675)
+
+
+def test_a_missed_pick_asks_the_person_to_move_the_cube_then_retries(
+    tmp_path, monkeypatch
+):
+    """Josh, 2026-10-16: on a missed pick, ask the person to move the cube (e.g. out
+    of the camera overlap strip) and try again, instead of ending the run."""
+    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+
+    readings = iter([1.0, 0.49])  # closed on nothing, then on the cube
+    monkeypatch.setattr(tc, "_fake_reading", lambda _v, _r: next(readings))
+    operator = _Operator()
+    summary = run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=operator
+    )
+    assert operator.asked("move the cube") == 1
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    assert [a["held"] for a in log["cycles"][0]["pick_attempts"]] == [False, True]
+    assert log["cycles"][0]["cube_moved_by_person"] == 1
+    assert "picked" in summary.finish_reason

@@ -110,6 +110,9 @@ pick:
     gripper_timeout_s: 4.0
     # One attempt: a miss retracts, returns to the toss pose and ends the run.
     max_attempts: 1
+    # After a missed pick: retract, ask the person to move the cube, and try again
+    # (this many times; 0 ends the run on a miss as before).
+    ask_to_move_after_miss: 3
     # Record the wrist camera during each pick attempt (real mode).
     record_wrist: true
     # Fake mode only: the gripper reading to pretend after closing.

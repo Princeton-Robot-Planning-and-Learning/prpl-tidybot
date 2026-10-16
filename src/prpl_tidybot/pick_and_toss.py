@@ -411,12 +411,18 @@ def _toss(
     try:
         if capture is not None:
             capture.start()
-        info["swing_start_time"] = time.time()
-        arm.toss(
+        info["toss_call_time"] = time.time()
+        timing = arm.toss(
             heading=float(toss_cfg.heading),
             max_vel=float(toss_cfg.max_vel),
             gripper_release_ms=int(toss_cfg.gripper_release_ms),
         )
+        # The call includes the wind-up; the arm reports when the swing began.
+        if timing and "swing_start_time" in timing:
+            info["swing_start_time"] = float(timing["swing_start_time"])
+            info["release_time"] = info["swing_start_time"] + float(
+                info["release_time_s"]
+            )
         outcome = capture.finish(toss=info) if capture is not None else None
     finally:
         if capture is not None:
