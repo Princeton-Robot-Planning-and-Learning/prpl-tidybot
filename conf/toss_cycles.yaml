@@ -212,3 +212,24 @@ confirm: once
 # after the swing caught the cube mid-flight and mid-slide (at rest ~1.6 s after
 # release) and rejected it.
 settle_after_toss_s: 5.0
+
+# mode=sim: the same commands on a kinematic TidyBot (prpl_tidybot.sim_robot), filmed
+# overhead and oblique into <log dir>/sim.mp4, with per-step clearances, contacts and
+# joint-limit margins in sim_safety.json. Only the robot's motion is faithful: the
+# cube rides in a closed gripper and a thrown one lands landing_offset (m, forward
+# and left of the base) away. Prompts are answered automatically unless
+# interactive=true; a cube found in the bin is put back at put_back.
+#   python scripts/toss_cycles.py mode=sim pick.top_down.wrist_servo.enabled=false
+sim:
+  start_base_pose: ${toss_pose}
+  # Where the cube starts: map-frame x, y (m) and yaw (deg).
+  cube: [-0.5, 0.8, 20.0]
+  landing_offset: [1.2, 0.0]
+  put_back: [0.13, 0.6]
+  video:
+    enabled: true
+    fps: 30
+    # The swing lasts about a second; it plays this many times slower.
+    swing_slowdown: 4
+    width: 640
+    height: 480

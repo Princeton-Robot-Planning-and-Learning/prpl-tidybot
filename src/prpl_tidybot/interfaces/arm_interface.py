@@ -52,6 +52,10 @@ class ArmInterface(abc.ABC):
         Real-resource subclasses override; the default is a no-op.
         """
 
+    def note_step(self, name: str) -> None:
+        """Name the motion about to be commanded (e.g. "hover"), for a simulated arm's
+        video; the robot ignores it."""
+
     def move_angular(self, goal: list[float]) -> list[float]:
         """Move to ``goal`` (radians) under the arm's onboard position controller and
         return the measured joints. Only between ``release`` and ``resume``."""
