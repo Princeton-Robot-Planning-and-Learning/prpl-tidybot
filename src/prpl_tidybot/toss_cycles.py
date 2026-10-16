@@ -35,6 +35,7 @@ from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
 import prpl_tidybot.config_resolvers  # noqa: F401  # pylint: disable=unused-import
+from prpl_tidybot.aimed_toss import RealTossBounds, Workspace, plan_aimed_toss
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.pick_and_toss import PickSkillAgent, PromptFn, _toss
 from prpl_tidybot.pipeline import _resolve_log_dir
@@ -174,6 +175,12 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
         raise ValueError(
             "toss_cycles needs a toss, which the kinematic sim does not have."
         )
+    aimed_cfg = cfg.toss.get("aimed")
+    if cfg.toss.get("grid") and aimed_cfg is not None and aimed_cfg.get("enabled"):
+        raise ValueError(
+            "toss.grid (calibration, thrown from the fixed toss pose) and toss.aimed "
+            "cannot both be enabled; turn one off."
+        )
     interactive = (
         cfg.mode == "real" if cfg.get("interactive") is None else bool(cfg.interactive)
     )
@@ -206,6 +213,14 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
         pipeline.perceiver.target_source,
         _convert_="all",
         **_cube_source_kwargs(cfg, pipeline.perceiver.target_source, resolved_log_dir),
+    )
+    workspace = Workspace.from_config(cfg.get("barrier"), cfg.preview.floor_bounds)
+    aimed = cfg.toss.get("aimed")
+    aiming = aimed is not None and bool(aimed.get("enabled", False))
+    bin_source = (
+        hydra.utils.instantiate(cfg.bin.pipelines[cfg.mode], _convert_="all")
+        if aiming
+        else None
     )
     source: ImageSource | None = None
     if wrist_camera is not None:
@@ -268,6 +283,7 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
                     toss_pose,
                     servo,
                     prompt_fn if interactive else None,
+                    workspace,
                 )
             else:
                 failure = _pick_kinder(
@@ -293,13 +309,33 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
                 finish_reason = "picked (toss skipped)"
                 break
 
-            confirm(
-                f"Cycle {cycle}: Drive to the toss pose ({toss_pose[0]:+.3f}, "
-                f"{toss_pose[1]:+.3f}, {math.degrees(toss_pose[2]):+.0f} deg)?"
-            )
-            _drive_to(real_env, toss_pose)
+            toss_cfg = cfg
+            if aiming:
+                assert bin_source is not None and aimed is not None
+                throw_from, toss_cfg = _aim(cfg, real_env, bin_source, workspace)
+                record["aimed"] = {
+                    "bin": bin_source.last_fit.as_dict(),
+                    "pose": list(throw_from),
+                    "standoff": float(aimed.standoff),
+                    "speed": float(aimed.speed),
+                    "release_ms": float(aimed.release_ms),
+                }
+                confirm(
+                    f"Cycle {cycle}: Drive to the aimed toss pose "
+                    f"({throw_from[0]:+.3f}, {throw_from[1]:+.3f}, "
+                    f"{math.degrees(throw_from[2]):+.0f} deg), "
+                    f"{float(aimed.standoff):.2f} m from the bin?"
+                )
+                _drive_to(real_env, list(throw_from), workspace)
+            else:
+                confirm(
+                    f"Cycle {cycle}: Drive to the toss pose ({toss_pose[0]:+.3f}, "
+                    f"{toss_pose[1]:+.3f}, {math.degrees(toss_pose[2]):+.0f} deg)?"
+                )
+                _drive_to(real_env, toss_pose, workspace)
 
-            cycle_cfg = _with_grid_setting(cfg, cycle)
+            # toss.grid and toss.aimed are exclusive (checked at startup).
+            cycle_cfg = _with_grid_setting(toss_cfg, cycle)
             ask_toss = interactive and bool(cfg.toss.get("confirm_each", False))
             tossed, reason, info, _ = _toss(
                 cycle_cfg, arm, resolved_log_dir, asking() or ask_toss, prompt_fn
@@ -320,6 +356,9 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
             finish_reason = f"completed {completed}/{requested} cycles"
     except _Declined as e:
         finish_reason = f"declined: {e}"
+    except ValueError as e:
+        # A toss or drive refused before anything moved (bounds, barrier, bin).
+        finish_reason = f"refused: {e}"
     except ArmMotionAborted as e:
         # The arm was stopped mid-move; command nothing more (the arm-server RPC is
         # mid-call and the operator wants motion to end). Rerun to reset.
@@ -357,6 +396,8 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
             source.close()
         ceiling.close()
         cube_source.close()
+        if bin_source is not None:
+            bin_source.close()
         if not aborted:
             real_env.close()
     _logger.info("Toss cycles: %s.", finish_reason)
@@ -465,17 +506,28 @@ def _retract(cfg: DictConfig, arm: ArmInterface) -> None:
     _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
 
 
-def _drive_to(real_env: Any, pose: list[float]) -> tuple[float, float, float]:
+def _drive_to(
+    real_env: Any, pose: list[float], workspace: Workspace | None = None
+) -> tuple[float, float, float]:
     """Drive the base to the map-frame pose with the kinematic3d executor (as
     hardware_tests/test_base_map_target.py does); returns the reached pose.
 
     Uses a robot-only perceiver: driving needs no cube, and must still work when the
-    cube cannot be found (the reset after a failed localization).
+    cube cannot be found (the reset after a failed localization). With a
+    ``workspace`` the straight drive is checked first (drivable box, barrier) and a
+    drive that would leave it raises ``ValueError`` before the base moves.
     """
     perceiver = PrplLab3DPerceiver()
     obs, info = real_env.reset()
     state = perceiver.step(obs, info)
     robot = state.get_object_from_name("robot")
+    if workspace is not None:
+        here = obs.map_base_pose
+        problem = workspace.path_problem(
+            (float(here.x), float(here.y), float(here.theta())), pose
+        )
+        if problem is not None:
+            raise ValueError(f"Drive refused: {problem}.")
     delta = np.zeros(11)
     delta[0] = pose[0] - state.get(robot, "pos_base_x")
     delta[1] = pose[1] - state.get(robot, "pos_base_y")
@@ -518,7 +570,15 @@ def _reset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
             _logger.info("Reset declined; leaving the robot where it is.")
             return None
     _retract(cfg, arm)
-    reached = _drive_to(real_env, toss_pose)
+    try:
+        reached = _drive_to(
+            real_env,
+            toss_pose,
+            Workspace.from_config(cfg.get("barrier"), cfg.preview.floor_bounds),
+        )
+    except ValueError as e:
+        _logger.warning("Reset drive refused, leaving the base where it is: %s", e)
+        return None
     if records and records[-1].get("tossed") and "landing" not in records[-1]:
         try:
             obs, info = real_env.reset()
@@ -576,6 +636,77 @@ def _localize(source: Any) -> dict[str, float]:
     return {"x": float(x), "y": float(y), "yaw_deg": math.degrees(source.get_yaw())}
 
 
+def pick_problem(
+    robot: Sequence[float],
+    cube: dict[str, float],
+    geom: TopDownPickGeometry,
+    floor: Sequence[float],
+    workspace: Workspace | None,
+) -> str | None:
+    """Why the top-down pick of ``cube`` cannot even start from ``robot``, or None:
+
+    the cube across the barrier (the robot never crosses it), no standoff that keeps the
+    base in the drivable box and on its side, or no straight drive there.
+    """
+    if (
+        workspace is not None
+        and workspace.barrier is not None
+        and cube["x"] < workspace.barrier.robot_side_x
+    ):
+        return "cube across the barrier"
+    try:
+        stand = standoff_pose(
+            robot,
+            (cube["x"], cube["y"]),
+            geom,
+            floor,
+            None if workspace is None else workspace.valid(),
+        )
+    except ValueError as e:
+        return str(e)
+    if workspace is not None:
+        problem = workspace.path_problem(robot, stand)
+        if problem is not None:
+            return f"pick standoff unreachable: {problem}"
+    return None
+
+
+def _aim(
+    cfg: DictConfig, real_env: Any, bin_source: Any, workspace: Workspace
+) -> tuple[tuple[float, float, float], DictConfig]:
+    """Localize the bin and check the configured aimed toss (``toss.aimed``) before
+    anything moves; returns the pose to throw from and the config to toss with
+    (``toss.max_vel`` / ``gripper_release_ms`` from the aimed speed and release, the arm
+    straight ahead)."""
+    aimed = cfg.toss.aimed
+    bin_fit = bin_source.localize()
+    obs, _ = real_env.reset()
+    here = obs.map_base_pose
+    direction = aimed.get("direction")
+    pose = plan_aimed_toss(
+        bin_fit,
+        float(aimed.standoff),
+        float(aimed.speed),
+        float(aimed.release_ms),
+        None if direction is None else float(direction),
+        (float(here.x), float(here.y), float(here.theta())),
+        workspace,
+        RealTossBounds.from_config(cfg.real_toss_bounds),
+    )
+    toss_cfg = OmegaConf.merge(
+        cfg,
+        {
+            "toss": {
+                "heading": 0.0,
+                "max_vel": float(aimed.speed),
+                "gripper_release_ms": int(round(float(aimed.release_ms))),
+            }
+        },
+    )
+    assert isinstance(toss_cfg, DictConfig)
+    return pose, toss_cfg
+
+
 def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     cfg: DictConfig,
     real_env: Any,
@@ -589,6 +720,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
     toss_pose: list[float],
     servo: TopDownCubeServo | None = None,
     ask_to_move: PromptFn | None = None,
+    workspace: Workspace | None = None,
 ) -> str | None:
     """Jimmy Wu's top-down pick (prpl_tidybot.top_down_pick) on the localized cube.
 
@@ -621,17 +753,23 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         record.setdefault("cube_before_pick", cube)
         obs, _ = real_env.reset()
         robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
-        try:
-            stand = standoff_pose(robot, (cube["x"], cube["y"]), geom, floor)
-        except ValueError as e:
-            return f"{e}; move the cube and rerun"
+        problem = pick_problem(robot, cube, geom, floor, workspace)
+        if problem is not None:
+            return f"{problem}; move the cube and rerun"
+        stand = standoff_pose(
+            robot,
+            (cube["x"], cube["y"]),
+            geom,
+            floor,
+            None if workspace is None else workspace.valid(),
+        )
         confirm(
             f"Cycle {cycle}: Drive to the pick standoff ({stand[0]:+.3f}, "
             f"{stand[1]:+.3f}, {math.degrees(stand[2]):+.0f} deg), "
             f"{geom.standoff:.2f} m from the cube at ({cube['x']:+.3f}, "
             f"{cube['y']:+.3f})?"
         )
-        base = _drive_to(real_env, list(stand))
+        base = _drive_to(real_env, list(stand), workspace)
         try:
             cube = _localize(cube_source)  # corrects for where the base parked
         except RuntimeError as e:
@@ -688,7 +826,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 "pose to re-localize the cube?"
             )
             _retract(cfg, arm)
-            _drive_to(real_env, list(toss_pose))
+            _drive_to(real_env, list(toss_pose), workspace)
     return (
         f"pick failed after {attempts} attempts (gripper never closed on the cube); "
         "move the cube and rerun"
