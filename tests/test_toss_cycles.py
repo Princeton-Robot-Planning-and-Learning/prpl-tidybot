@@ -741,3 +741,28 @@ def test_a_missed_pick_asks_the_person_to_move_the_cube_then_retries(
     assert [a["held"] for a in log["cycles"][0]["pick_attempts"]] == [False, True]
     assert log["cycles"][0]["cube_moved_by_person"] == 1
     assert "picked" in summary.finish_reason
+
+
+def test_a_cube_the_cameras_cannot_find_asks_the_person_to_move_it(
+    tmp_path, monkeypatch
+):
+    """Josh, 2026-10-16: when the cube can't be found (e.g. beside the robot, inside its
+    exclusion zone), ask the person to move it and try again, like a missed pick."""
+    original = ConstantTargetSource.get_target
+    calls = {"n": 0}
+
+    def get_target(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("CeilingCubeTargetSource: no cube found")
+        return original(self)
+
+    monkeypatch.setattr(ConstantTargetSource, "get_target", get_target)
+    operator = _Operator()
+    summary = run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=operator
+    )
+    assert operator.asked("can't find the cube") == 1
+    assert summary.finish_reason == "picked (toss skipped)"
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    assert log["cycles"][0]["cube_moved_by_person"] == 1
