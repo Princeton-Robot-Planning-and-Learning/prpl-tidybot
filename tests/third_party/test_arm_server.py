@@ -1,10 +1,13 @@
-"""Tests for the toss sequence in third_party/arm_server.py.
+"""Tests for third_party/arm_server.py.
 
-`Arm.toss` is exercised against a recording stand-in for `TorqueControlledArm`, so
-the order of mode switches and the trajectory handed to the 1 kHz loop are checked
-without the Kortex API.
+`Arm.toss` is exercised against a recording stand-in for `TorqueControlledArm`, so the
+order of mode switches and the trajectory handed to the 1 kHz loop are checked without
+the Kortex API. The RPC tests run the real `ArmManager` server in-process against a fake
+Kortex session, to check that every client shares one Arm and that at most one torque
+loop ever runs.
 """
 
+import threading
 from unittest import mock
 
 import numpy as np
@@ -134,3 +137,133 @@ def test_gripper_angular_moves_the_gripper_under_the_onboard_controller():
     recording.cyclic_running = False
     assert _arm(recording).gripper_angular(1.0, timeout=3.0) == 0.5
     assert recording.calls == [("gripper_to", 1.0, 3.0)]
+
+
+class _FakeKortexArm:
+    """Stands in for `TorqueControlledArm` (one Kortex session) and tracks whether its 1
+    kHz torque loop runs, so a test can count the loops commanding the arm."""
+
+    sessions: list["_FakeKortexArm"] = []
+
+    def __init__(self) -> None:
+        self.cyclic_running = False
+        self.connected = True
+        self.q = np.zeros(7)
+        self.gripper_pos = 0.0
+        _FakeKortexArm.sessions.append(self)
+
+    def set_joint_limits(self, speed_limits, acceleration_limits):
+        """No-op."""
+        del speed_limits, acceleration_limits
+
+    def clear_faults(self):
+        """No-op."""
+
+    def open_gripper(self):
+        """No-op."""
+
+    def retract(self):
+        """No-op."""
+
+    def init_cyclic(self, control_callback):
+        """Start the torque loop; asserts as the real one does."""
+        del control_callback
+        assert not self.cyclic_running, "Cyclic thread is already running"
+        self.cyclic_running = True
+
+    def stop_cyclic(self):
+        """Stop the torque loop."""
+        self.cyclic_running = False
+
+    def disconnect(self):
+        """End the Kortex session."""
+        self.connected = False
+
+
+def _live_loops() -> int:
+    return sum(session.cyclic_running for session in _FakeKortexArm.sessions)
+
+
+@pytest.fixture(name="kortex")
+def _kortex(monkeypatch):
+    """The arm server with every Kortex session faked and no shared Arm yet."""
+    # pylint: disable=import-outside-toplevel
+    import time as real_time
+    from types import SimpleNamespace
+
+    from prpl_tidybot.third_party import arm_server
+
+    monkeypatch.setattr(_FakeKortexArm, "sessions", [])
+    monkeypatch.setattr(arm_server, "TorqueControlledArm", _FakeKortexArm)
+    monkeypatch.setattr(arm_server, "IKSolver", lambda ee_offset: None)
+    monkeypatch.setattr(
+        arm_server, "time", SimpleNamespace(sleep=lambda _: None, time=real_time.time)
+    )
+    monkeypatch.setattr(arm_server, "_shared_arm", None, raising=False)
+    return arm_server
+
+
+_SERVERS: list = []  # keeps each test's in-process RPC server alive
+
+
+@pytest.fixture(name="arm_rpc")
+def _arm_rpc(kortex):
+    """An in-process arm RPC server (as on the NUC); returns a client factory, each call
+    a separate client process's `manager.Arm()`."""
+    manager = kortex.ArmManager(address=("127.0.0.1", 0), authkey=b"test")
+    server = manager.get_server()
+    _SERVERS.append(server)
+    # Only the accepter (and the stop event serve_forever would make): serve_forever
+    # itself resets sys.stdout and sys.exit()s, which breaks pytest's capture.
+    server.stop_event = threading.Event()
+    threading.Thread(target=server.accepter, daemon=True).start()
+
+    def client():
+        connection = kortex.ArmManager(address=server.address, authkey=b"test")
+        connection.connect()
+        return connection.Arm()  # pylint: disable=no-member
+
+    return client
+
+
+def test_every_client_drives_the_same_arm_with_one_torque_loop(arm_rpc):
+    """Two clients (the second after the first died without close(), runs 21c/21d):
+
+    one Kortex session and one torque loop, not one of each per client.
+    """
+    first = arm_rpc()
+    first.reset(reset_arm=False)
+    second = arm_rpc()
+    second.reset(reset_arm=False)
+    assert len(_FakeKortexArm.sessions) == 1
+    assert _live_loops() == 1
+
+
+def test_resume_while_the_loop_runs_restarts_it_rather_than_adding_one(kortex):
+    """`resume()` on a running loop stops it first; it never asserts or doubles."""
+    arm = kortex.Arm()
+    arm.resume()
+    arm.resume()
+    assert _live_loops() == 1
+
+
+def test_close_stops_the_loop_and_the_next_client_reconnects(arm_rpc):
+    """Close() ends the loop and the Kortex session; the next client's reset() opens a
+    fresh session on the same shared Arm, as each client got before."""
+    first = arm_rpc()
+    first.reset(reset_arm=False)
+    first.close()
+    assert _live_loops() == 0
+    assert not _FakeKortexArm.sessions[0].connected
+    second = arm_rpc()
+    second.reset(reset_arm=False)
+    assert [s.connected for s in _FakeKortexArm.sessions] == [False, True]
+    assert _live_loops() == 1
+
+
+def test_the_server_reports_whether_a_torque_loop_is_running(arm_rpc):
+    """A client can see a loop a previous client left running."""
+    arm_rpc().reset(reset_arm=False)
+    assert arm_rpc().is_cyclic_running()
+    arm_rpc().release()
+    assert not arm_rpc().is_cyclic_running()

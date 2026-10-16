@@ -12,6 +12,7 @@
 # pylint: disable=all
 
 import queue
+import threading
 import time
 from multiprocessing.managers import BaseManager as MPBaseManager
 
@@ -30,18 +31,27 @@ from prpl_tidybot.toss import (
     toss_windup_pose,
 )
 
+# Guards starting and stopping the torque loop, so two clients' RPC threads cannot
+# both see it stopped and both start one.
+_LOOP_LOCK = threading.RLock()
+
 
 class Arm:
     def __init__(self):
-        self.arm = TorqueControlledArm()
-        self.arm.set_joint_limits(
-            speed_limits=(7 * (30,)), acceleration_limits=(7 * (80,))
-        )
+        self._connect()
         self.command_queue = queue.Queue(1)
         self.controller = None
         self.ik_solver = IKSolver(ee_offset=0.12)
 
+    def _connect(self):
+        self.arm = TorqueControlledArm()
+        self.arm.set_joint_limits(
+            speed_limits=(7 * (30,)), acceleration_limits=(7 * (80,))
+        )
+
     def reset(self, reset_arm: bool = True):
+        if self.arm is None:  # A previous client close()d the shared Arm
+            self._connect()
         self.release()
 
         # Clear faults
@@ -59,11 +69,23 @@ class Arm:
         # Stop low-level control. The arm returns to high-level servoing,
         # where its onboard controller (and any gamepad plugged into the
         # Kinova base) is in charge.
-        if self.arm.cyclic_running:
-            time.sleep(0.75)  # Wait for arm to stop moving
-            self.arm.stop_cyclic()
+        with _LOOP_LOCK:
+            if self.arm.cyclic_running:
+                time.sleep(0.75)  # Wait for arm to stop moving
+                self.arm.stop_cyclic()
+
+    def is_cyclic_running(self):
+        return self.arm is not None and self.arm.cyclic_running
 
     def resume(self):
+        with _LOOP_LOCK:
+            # Stop a loop that is already running rather than starting a second one
+            # beside it: two 1 kHz loops commanding one arm with different targets
+            # is what made it flip out.
+            self.release()
+            self._resume()
+
+    def _resume(self):
         # Drain any leftover commands from the previous session. The
         # command_queue is reused across sessions (passed into each new
         # JointCompliantController), so a stale (qpos, gripper) item from
@@ -170,17 +192,36 @@ class Arm:
         return self.radians_clip(self.arm.q)
 
     def close(self):
-        if self.arm.cyclic_running:
-            time.sleep(0.75)  # Wait for arm to stop moving
-            self.arm.stop_cyclic()
+        if self.arm is None:
+            return
+        self.release()
         self.arm.disconnect()
+        # The Arm is shared, so the next client's reset() reconnects (as each
+        # client used to get a fresh session).
+        self.arm = None
 
 
 class ArmManager(MPBaseManager):
     pass
 
 
-ArmManager.register("Arm", Arm)
+# Every client gets this one Arm. Registering the class itself built a new Arm (a new
+# Kortex session and torque loop) per client, all in this process, so the PID-file
+# guard never fired; a client that died without close() left its loop running
+# beside the next client's, and the arm flipped out (2026-10-16, runs 21c/21d).
+_shared_arm = None
+_shared_arm_lock = threading.Lock()
+
+
+def _get_shared_arm():
+    global _shared_arm
+    with _shared_arm_lock:
+        if _shared_arm is None:
+            _shared_arm = Arm()
+        return _shared_arm
+
+
+ArmManager.register("Arm", _get_shared_arm)
 
 
 if __name__ == "__main__":
