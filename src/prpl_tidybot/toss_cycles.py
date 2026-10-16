@@ -254,6 +254,7 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
                     wrist,
                     toss_pose,
                     servo,
+                    prompt_fn if interactive else None,
                 )
             else:
                 failure = _pick_kinder(
@@ -574,19 +575,23 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
     wrist: "_WristRecorder",
     toss_pose: list[float],
     servo: TopDownCubeServo | None = None,
+    ask_to_move: PromptFn | None = None,
 ) -> str | None:
     """Jimmy Wu's top-down pick (prpl_tidybot.top_down_pick) on the localized cube.
 
     For up to ``max_attempts``: localize the cube, drive to a standoff facing it,
     re-localize, then open, hover 10 cm above, descend, close, and read the gripper.
     After a miss the arm retracts and the base returns to the toss pose, where the
-    ceiling cameras see the (possibly nudged) cube without the robot over it. Returns
-    a stop reason, or None once the cube is held (arm at its carry pose).
+    ceiling cameras see the (possibly nudged) cube without the robot over it. With
+    ``ask_to_move``, a miss instead retracts and asks the person to move the cube (up to
+    ``ask_to_move_after_miss`` times), then tries again. Returns a stop reason, or None
+    once the cube is held (arm at its carry pose).
     """
     td = cfg.pick.top_down
     floor = tuple(cfg.preview.floor_bounds)
     attempts = int(td.get("max_attempts", 3))
-    for attempt in range(1, attempts + 1):
+    asks = int(td.get("ask_to_move_after_miss", 3)) if ask_to_move is not None else 0
+    for attempt in range(1, attempts + asks + 1):
         try:
             cube = _localize(cube_source)
         except RuntimeError as e:
@@ -643,6 +648,17 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 wrist.stop()
                 return None
         wrist.stop()
+        if ask_to_move is not None and record.get("cube_moved_by_person", 0) < asks:
+            _retract(cfg, arm)
+            answer = ask_to_move(
+                f"\nCycle {cycle}: the pick missed and the arm is retracted. Please "
+                "move the cube (clear of the camera overlap strip, y -0.15..0.18), then "
+                "press Enter, or type 'stop' to end the run: "
+            )
+            if answer.strip().lower() == "stop":
+                return "pick missed; the operator stopped the run"
+            record["cube_moved_by_person"] = record.get("cube_moved_by_person", 0) + 1
+            continue
         if attempt < attempts:
             confirm(
                 f"Cycle {cycle}: Missed. Retract the arm and drive back to the toss "

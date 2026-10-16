@@ -36,7 +36,7 @@ def _arm_log(monkeypatch):
 
     def toss(self, **kwargs):
         log.append(("toss", kwargs))
-        original_toss(self, **kwargs)
+        return original_toss(self, **kwargs)
 
     def execute_action(self, arm_goal, gripper_goal):
         log.append(("execute_action", gripper_goal))

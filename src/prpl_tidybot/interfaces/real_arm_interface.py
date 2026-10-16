@@ -58,11 +58,13 @@ class RealArmInterface(ArmInterface):
         heading: float = 0.0,
         max_vel: float = TOSS_MAX_VEL,
         gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
-    ) -> None:
-        """Run the toss on the arm server (``Arm.toss``); blocks until it is done."""
-        self.arm.toss(
+    ) -> dict[str, float] | None:
+        """Run the toss on the arm server (``Arm.toss``); blocks until it is done.
+        Returns the swing's start time (after the wind-up)."""
+        result = self.arm.toss(
             heading=heading, max_vel=max_vel, gripper_release_ms=gripper_release_ms
         )
+        return dict(result) if isinstance(result, dict) else None
 
     def close(self) -> None:
         """Tear down the RPC connection and stop the low-level arm control loop."""
