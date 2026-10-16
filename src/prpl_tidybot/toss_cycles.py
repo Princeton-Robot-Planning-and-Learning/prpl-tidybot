@@ -326,39 +326,46 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
         finish_reason = f"aborted: {e}"
         aborted = True
     finally:
-        if not aborted:
-            final_pose = _reset(
-                cfg,
-                real_env,
-                perceiver,
-                arm,
-                toss_pose,
-                records,
-                asking(),
-                prompt_fn,
-            )
-        if resolved_log_dir is not None:
-            resolved_log_dir.mkdir(parents=True, exist_ok=True)
-            (resolved_log_dir / "cycles.json").write_text(
-                json.dumps(
-                    {
-                        "requested": requested,
-                        "completed": completed,
-                        "finish_reason": finish_reason,
-                        "toss_pose": toss_pose,
-                        "cycles": records,
-                    },
-                    indent=1,
-                ),
-                encoding="utf-8",
-            )
-        wrist.close()
-        if source is not None and hasattr(source, "close"):
-            source.close()
-        ceiling.close()
-        cube_source.close()
-        if not aborted:
-            real_env.close()
+        # Nested so that a Ctrl-C at the reset prompt or during the reset motion
+        # still closes the env: skipping close() left the arm server's torque
+        # loop running (runs 21c, 21d), and the next client's loop doubled up.
+        try:
+            if not aborted:
+                final_pose = _reset(
+                    cfg,
+                    real_env,
+                    perceiver,
+                    arm,
+                    toss_pose,
+                    records,
+                    asking(),
+                    prompt_fn,
+                )
+        finally:
+            try:
+                if resolved_log_dir is not None:
+                    resolved_log_dir.mkdir(parents=True, exist_ok=True)
+                    (resolved_log_dir / "cycles.json").write_text(
+                        json.dumps(
+                            {
+                                "requested": requested,
+                                "completed": completed,
+                                "finish_reason": finish_reason,
+                                "toss_pose": toss_pose,
+                                "cycles": records,
+                            },
+                            indent=1,
+                        ),
+                        encoding="utf-8",
+                    )
+                wrist.close()
+                if source is not None and hasattr(source, "close"):
+                    source.close()
+                ceiling.close()
+                cube_source.close()
+            finally:
+                if not aborted:
+                    real_env.close()
     _logger.info("Toss cycles: %s.", finish_reason)
     return TossCyclesSummary(
         mode=cfg.mode,

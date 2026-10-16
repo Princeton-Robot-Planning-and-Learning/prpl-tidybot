@@ -315,6 +315,40 @@ def test_ctrl_c_during_a_pick_move_stops_without_further_motion(tmp_path, monkey
     assert not resumes
 
 
+def test_ctrl_c_at_the_reset_prompt_still_closes_the_env(tmp_path, monkeypatch):
+    """Run 21c: a Ctrl-C at the reset prompt used to skip close(), leaving the arm
+    server's torque loop running for the next client to double up on."""
+    closes = []
+    monkeypatch.setattr(FakeArmInterface, "close", lambda self: closes.append(1))
+
+    def operator(prompt):
+        if "Reset" in prompt:
+            raise KeyboardInterrupt
+        return "n"  # decline the first step, so the run goes straight to the reset
+
+    with pytest.raises(KeyboardInterrupt):
+        run_toss_cycles(_compose(cycles=1), log_dir=tmp_path, prompt_fn=operator)
+    assert closes == [1]
+
+
+def test_ctrl_c_during_the_reset_motion_still_closes_the_env(tmp_path, monkeypatch):
+    """Run 21d: a Ctrl-C during the reset's retract must not skip close() either."""
+    closes = []
+    monkeypatch.setattr(FakeArmInterface, "close", lambda self: closes.append(1))
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("prpl_tidybot.toss_cycles._retract", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run_toss_cycles(
+            _compose(cycles=1),
+            log_dir=tmp_path,
+            prompt_fn=_Operator(decline=("Drive to the toss pose",)),
+        )
+    assert closes == [1]
+
+
 def test_the_whole_run_is_filmed_from_the_ceiling(tmp_path):
     """ceiling.mp4 in the log dir covers the run, from the first prompt to the reset."""
     import cv2 as cv  # pylint: disable=import-outside-toplevel
