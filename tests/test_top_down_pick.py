@@ -4,7 +4,7 @@ import math
 from importlib import resources
 from pathlib import Path
 
-import mujoco
+import mujoco  # type: ignore[import-untyped]
 import numpy as np
 import pytest
 from omegaconf import OmegaConf
