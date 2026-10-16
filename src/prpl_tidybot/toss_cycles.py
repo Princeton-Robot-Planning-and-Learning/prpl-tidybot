@@ -30,7 +30,7 @@ import kinder
 import numpy as np
 from kinder_bilevel_planning.agent import AgentFailure
 from numpy.typing import NDArray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
@@ -95,6 +95,43 @@ def cube_pose(state: ObjectCentricState) -> dict[str, float]:
         "y": float(state.get(cube, "pose_y")),
         "yaw_deg": math.degrees(2 * math.atan2(qz, qw)),
     }
+
+
+def _with_grid_setting(cfg: DictConfig, cycle: int) -> DictConfig:
+    """The run's config with cycle `cycle`'s toss setting from ``toss.grid``, a list of
+    ``[max_vel, gripper_release_ms]`` thrown in turn (a calibration sweep); unchanged
+    without a grid."""
+    grid = cfg.toss.get("grid")
+    if not grid:
+        return cfg
+    speed, release = grid[(cycle - 1) % len(grid)]
+    setting = {"toss": {"max_vel": float(speed), "gripper_release_ms": int(release)}}
+    merged = OmegaConf.merge(cfg, setting)
+    assert isinstance(merged, DictConfig)
+    return merged
+
+
+def _put_back_if_in_bin(
+    cfg: DictConfig, cube_source: Any, record: dict[str, Any], prompt_fn: PromptFn
+) -> None:
+    """A thrown cube that ends up in (or against) the bin is not picked: the hover is
+    below the rim. The person puts it back on the floor (``bin_stop_box`` is the bin's
+    footprint plus a margin, [x_min, x_max, y_min, y_max])."""
+    box = cfg.get("bin_stop_box")
+    if box is None:
+        return
+    try:
+        cube = _localize(cube_source)
+    except RuntimeError:
+        return  # the pick's own localization reports a missing cube
+    if not (box[0] <= cube["x"] <= box[1] and box[2] <= cube["y"] <= box[3]):
+        return
+    record["cube_in_bin"] = {"x": cube["x"], "y": cube["y"]}
+    _logger.info("The cube is in the bin at (%+.3f, %+.3f).", cube["x"], cube["y"])
+    prompt_fn(
+        f"\nThe cube is in the bin at ({cube['x']:+.3f}, {cube['y']:+.3f}): put it on "
+        "the floor clear of the bin, then press Enter. "
+    )
 
 
 def _landing(cube: dict[str, float], toss_pose: list[float]) -> dict[str, float]:
@@ -202,6 +239,8 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
             record: dict[str, Any] = {"cycle": cycle, "tossed": False}
             records.append(record)
             _logger.info("Cycle %d/%d: localizing the cube.", cycle, requested)
+            if cycle > 1:
+                _put_back_if_in_bin(cfg, cube_source, record, prompt_fn)
             if cfg.pick.method == "top_down":
                 failure = _pick_top_down(
                     cfg,
@@ -246,8 +285,10 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
             )
             _drive_to(real_env, toss_pose)
 
+            cycle_cfg = _with_grid_setting(cfg, cycle)
+            ask_toss = interactive and bool(cfg.toss.get("confirm_each", False))
             tossed, reason, info, _ = _toss(
-                cfg, arm, resolved_log_dir, asking(), prompt_fn
+                cycle_cfg, arm, resolved_log_dir, asking() or ask_toss, prompt_fn
             )
             record["toss"] = info
             if not tossed:
