@@ -11,6 +11,7 @@
 # mypy: ignore-errors
 # pylint: disable=all
 
+import threading
 import time
 from multiprocessing.managers import BaseManager as MPBaseManager
 
@@ -23,20 +24,23 @@ class Base:
         self.max_vel = max_vel
         self.max_accel = max_accel
         self.vehicle = None
+        self._loop_lock = threading.Lock()
 
     def reset(self):
-        # Stop low-level control
-        if self.vehicle is not None:
-            if self.vehicle.control_loop_running:
-                self.vehicle.stop_control()
+        # Locked so two clients' RPC threads cannot both start a loop.
+        with self._loop_lock:
+            # Stop low-level control
+            if self.vehicle is not None:
+                if self.vehicle.control_loop_running:
+                    self.vehicle.stop_control()
 
-        # Create new instance of vehicle
-        self.vehicle = Vehicle(max_vel=self.max_vel, max_accel=self.max_accel)
+            # Create new instance of vehicle
+            self.vehicle = Vehicle(max_vel=self.max_vel, max_accel=self.max_accel)
 
-        # Start low-level control
-        self.vehicle.start_control()
-        while not self.vehicle.control_loop_running:
-            time.sleep(0.01)
+            # Start low-level control
+            self.vehicle.start_control()
+            while not self.vehicle.control_loop_running:
+                time.sleep(0.01)
 
     def execute_action(self, action):
         self.vehicle.set_target_position(action["base_pose"])
@@ -55,7 +59,23 @@ class BaseManager(MPBaseManager):
     pass
 
 
-BaseManager.register("Base", Base)
+# Every client gets this one Base, so a client's reset() stops the previous client's
+# Vehicle control loop instead of starting a second one beside it. Registering the
+# class gave each client its own Base, and a client that died without close() left
+# its loop running (two loops found on the robot, 2026-10-16).
+_shared_base = None
+_shared_base_lock = threading.Lock()
+
+
+def _get_shared_base():
+    global _shared_base
+    with _shared_base_lock:
+        if _shared_base is None:
+            _shared_base = Base()
+        return _shared_base
+
+
+BaseManager.register("Base", _get_shared_base)
 
 if __name__ == "__main__":
     manager = BaseManager(address=(BASE_RPC_HOST, BASE_RPC_PORT), authkey=RPC_AUTHKEY)
