@@ -621,3 +621,17 @@ def test_a_missed_grasp_tries_the_other_cameras_estimate(tmp_path, monkeypatch):
     assert [t["held"] for t in tries] == [False, True]
     assert tries[1]["cube"]["x"] == pytest.approx(tries[0]["cube"]["x"] + 0.03)
     assert tries[1]["target"] == "other camera"
+
+
+def test_the_top_down_pick_builds_no_planner_models(tmp_path, monkeypatch):
+    """The KINDER planner's env models (~480 MB each, never freed) are only needed by
+    the kinder pick; building them on every top-down run ran CI out of memory."""
+    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the top-down pick built the planner's env models")
+
+    monkeypatch.setattr(tc, "build_planner_env_models", refuse)
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )

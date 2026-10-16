@@ -135,14 +135,21 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
     pipeline = cfg.env.pipelines[cfg.mode]
     real_env = hydra.utils.instantiate(pipeline.real_env, _convert_="all")
     perceiver = hydra.utils.instantiate(pipeline.perceiver, _convert_="all")
-    plan_executor = hydra.utils.instantiate(pipeline.plan_executor, _convert_="all")
-    env_models = build_planner_env_models(
-        cfg.env.env_name,
-        hydra.utils.instantiate(cfg.env.make_kwargs, _recursive_=True, _convert_="all"),
-        hydra.utils.instantiate(
-            cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
-        ),
-    )
+    # Only the kinder pick plans; its env models are large and never freed, so a
+    # top-down run does not build them.
+    plan_executor: Any = None
+    env_models: Any = None
+    if cfg.pick.method != "top_down":
+        plan_executor = hydra.utils.instantiate(pipeline.plan_executor, _convert_="all")
+        env_models = build_planner_env_models(
+            cfg.env.env_name,
+            hydra.utils.instantiate(
+                cfg.env.make_kwargs, _recursive_=True, _convert_="all"
+            ),
+            hydra.utils.instantiate(
+                cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
+            ),
+        )
     arm: ArmInterface = real_env.interface.arm_interface
     geom = geometry_from_config(cfg.pick.get("top_down"))
     cube_source = hydra.utils.instantiate(
