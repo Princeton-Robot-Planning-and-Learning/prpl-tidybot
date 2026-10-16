@@ -1,0 +1,297 @@
+"""Tests for the top-down cube wrist servo (prpl_tidybot.visual_servo.top_down_cube)."""
+
+import math
+
+import cv2 as cv
+import numpy as np
+import pytest
+
+from prpl_tidybot.visual_servo.top_down_cube import (
+    TopDownCubeServo,
+    TopDownServoParams,
+    detect_wrist_cube,
+)
+
+TARGET = (312.0, 320.0)
+
+
+def _square(image, centre, angle, side=60, colour=(40, 90, 230)):
+    box = cv.boxPoints(((centre[0], centre[1]), (side, side), math.degrees(angle)))
+    cv.fillPoly(image, [box.astype(np.int32)], colour)
+    return image
+
+
+def _tool_axes(yaw):
+    """The top-down tool frame's x and closing (y) axes in the arm frame."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    return np.array([-s, c]), np.array([c, s])
+
+
+class _World:
+    """A cube on the floor seen by a wrist camera fixed to the gripper: a cube at
+    tool-frame offset r from the pinch point appears at TARGET + K r, with K rotated
+    and mirrored relative to the tool axes (as a real mount may be)."""
+
+    def __init__(self, cube_xy, cube_yaw, pinch_xy, yaw, visible=True):
+        self.cube = np.array(cube_xy, float)
+        self.cube_yaw = cube_yaw
+        self.pinch = np.array(pinch_xy, float)
+        self.yaw = yaw
+        self.visible = visible
+        self.k = np.array([[300.0, -1500.0], [-1450.0, -250.0]])
+        self.moves = 0
+
+    def move(self, _label, ax, ay, yaw):
+        """Put the gripper at the hover over (ax, ay) with closing yaw `yaw`."""
+        self.pinch = np.array([ax, ay])
+        self.yaw = yaw
+        self.moves += 1
+        return True
+
+    def get_image(self):
+        """The wrist view from where the gripper is now."""
+        image = np.full((480, 640, 3), 200, np.uint8)
+        if not self.visible:
+            return image
+        x_axis, y_axis = _tool_axes(self.yaw)
+        r = self.cube - self.pinch
+        uv = np.array(TARGET) + self.k @ np.array([r @ x_axis, r @ y_axis])
+        edge = np.array([math.cos(self.cube_yaw), math.sin(self.cube_yaw)])
+        img_edge = self.k @ np.array([edge @ x_axis, edge @ y_axis])
+        return _square(image, uv, math.atan2(img_edge[1], img_edge[0]))
+
+
+def test_detects_the_blue_cube_its_centre_and_edge_angle():
+    """Centroid and edge angle of a rotated blue square."""
+    image = _square(np.full((480, 640, 3), 200, np.uint8), (300, 350), math.radians(20))
+    cube = detect_wrist_cube(image)
+    assert cube is not None
+    assert (cube.u, cube.v) == pytest.approx((300, 350), abs=1.5)
+    assert math.degrees(cube.angle) == pytest.approx(20, abs=2)
+    assert not cube.clipped
+
+
+def test_a_cube_cut_off_by_the_image_border_is_flagged_and_no_cube_is_none():
+    """Clipped blobs are flagged; an image without blue has no cube."""
+    clipped = detect_wrist_cube(
+        _square(np.full((480, 640, 3), 200, np.uint8), (320, 470), 0.0)
+    )
+    assert clipped is not None and clipped.clipped
+    assert detect_wrist_cube(np.full((480, 640, 3), 200, np.uint8)) is None
+
+
+@pytest.mark.parametrize(
+    "offset,cube_yaw", [((0.02, -0.015), 0.3), ((-0.03, 0.01), -0.6), ((0.0, 0.0), 0.0)]
+)
+def test_aligns_the_pinch_point_and_fingers_over_a_cube_the_ceiling_misplaced(
+    offset, cube_yaw
+):
+    """Starting 0-3.2 cm off and misturned, the servo ends with the pinch point within
+    3 mm of the cube and the fingers square to its faces."""
+    start = (0.55, 0.0, 0.1)
+    world = _World(
+        (start[0] + offset[0], start[1] + offset[1]), cube_yaw, start[:2], start[2]
+    )
+    servo = TopDownCubeServo(world, TopDownServoParams(target_uv=TARGET))
+    result = servo.align(start, world.move, _tool_axes)
+    assert result.aligned, result.note
+    assert math.hypot(result.ax - world.cube[0], result.ay - world.cube[1]) < 0.003
+    turn = (result.yaw - cube_yaw + math.pi / 4) % (math.pi / 2) - math.pi / 4
+    assert abs(turn) < math.radians(4)
+    assert (result.ax, result.ay, result.yaw) == pytest.approx(
+        (*world.pinch, world.yaw)
+    )
+
+
+def test_with_align_yaw_off_only_x_and_y_are_nudged():
+    """The nudges are 2-D at the hover height; align_yaw=False keeps the planned
+    closing yaw."""
+    start = (0.55, 0.0, 0.1)
+    world = _World((0.57, -0.01), 0.5, start[:2], start[2])
+    params = TopDownServoParams(target_uv=TARGET, align_yaw=False)
+    result = TopDownCubeServo(world, params).align(start, world.move, _tool_axes)
+    assert result.aligned, result.note
+    assert result.yaw == start[2]
+    assert math.hypot(result.ax - world.cube[0], result.ay - world.cube[1]) < 0.003
+
+
+def test_no_cube_in_the_wrist_camera_is_not_aligned_and_does_not_move():
+    """Nothing seen at the hover: no probe, no nudge."""
+    world = _World((0.55, 0.0), 0.0, (0.55, 0.0), 0.0, visible=False)
+    result = TopDownCubeServo(world).align((0.55, 0.0, 0.0), world.move, _tool_axes)
+    assert not result.aligned
+    assert "not seen" in result.note
+    assert world.moves == 0
+
+
+def test_refuses_to_walk_the_gripper_further_than_the_travel_limit():
+    """A cube that would need more than travel_limit of sideways travel (a stray blob,
+    a bad Jacobian) stops the servo instead of following it."""
+    world = _World((0.55, 0.12), 0.0, (0.55, 0.0), 0.0)
+    world.k = world.k * 0.2  # keep the far cube in view
+    params = TopDownServoParams(target_uv=TARGET, travel_limit=0.05, max_moves=20)
+    result = TopDownCubeServo(world, params).align(
+        (0.55, 0.0, 0.0), world.move, _tool_axes
+    )
+    assert not result.aligned
+    assert "more than" in result.note
+
+
+def test_every_look_is_traced_and_saved_raw_and_annotated(tmp_path):
+    """Each look is in the trace and on disk, raw and annotated."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.565, 0.0), 0.0, start[:2], start[2])
+    servo = TopDownCubeServo(world, TopDownServoParams(target_uv=TARGET), tmp_path)
+    result = servo.align(start, world.move, _tool_axes, name="c1a1")
+    assert result.trace and result.trace[0].label == "hover"
+    assert len(list(tmp_path.glob("c1a1_*_raw.png"))) == len(result.trace)
+    assert len(list(tmp_path.glob("c1a1_*.png"))) == 2 * len(result.trace)
+
+
+def test_gives_up_after_max_moves_nudges():
+    """A cube that keeps not converging (here: the image Jacobian is wrong by 4x after
+    the probes) stops after max_moves alignment nudges instead of wandering."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.575, 0.0), 0.0, start[:2], start[2])
+
+    probes = {"n": 0}
+    move = world.move
+
+    def counting(label, ax, ay, yaw):
+        if label.startswith("probe"):
+            probes["n"] += 1
+            if probes["n"] == 3:  # after both probes, the camera gain changes
+                world.k = world.k * -0.25
+        return move(label, ax, ay, yaw)
+
+    params = TopDownServoParams(target_uv=TARGET, max_moves=5, travel_limit=1.0)
+    result = TopDownCubeServo(world, params).align(start, counting, _tool_axes)
+    assert not result.aligned
+    assert "5 nudges" in result.note
+    assert sum(t.label == "align" for t in result.trace) == 5
+
+
+def test_converges_when_the_arm_covers_only_part_of_each_commanded_move():
+    """The compliant arm stops short of its targets (run 9: the probes moved it less
+    than 1.5 cm, the image gain came out ~2x small and the corrections overshot past
+    the travel limit). With the measured pinch position, the Jacobian is built from
+    how far the arm really moved, and the nudges converge."""
+    start = (0.55, 0.0, 0.1)
+    world = _World((0.568, -0.014), 0.1, start[:2], start[2])
+    commanded = {"xy": np.array(start[:2])}
+
+    def half_way(_label, ax, ay, yaw):
+        target = np.array([ax, ay])
+        step = target - commanded["xy"]
+        commanded["xy"] = target
+        world.pinch = world.pinch + 0.5 * step
+        world.yaw = yaw
+        return True
+
+    result = TopDownCubeServo(world, TopDownServoParams(target_uv=TARGET)).align(
+        start, half_way, _tool_axes, measured_xy=lambda: tuple(world.pinch)
+    )
+    assert result.aligned, result.note
+    assert math.hypot(*(world.pinch - world.cube)) < 0.004
+
+
+def test_a_sudden_change_in_blob_size_is_a_miss_not_a_target():
+    """As in the cylinder servo, a detection whose size jumps from the recent median
+    (a stray blue object entering the view) is not stepped towards."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.555, 0.0), 0.0, start[:2], start[2])
+    real_image = world.get_image
+    looks = {"n": 0}
+
+    def with_a_stray():
+        looks["n"] += 1
+        image = real_image()
+        if looks["n"] == 6:  # the first look after the probes
+            image[:] = 200
+            image = _square(image, (100, 100), 0.0, side=160)
+        return image
+
+    world.get_image = with_a_stray
+    result = TopDownCubeServo(world, TopDownServoParams(target_uv=TARGET)).align(
+        start, world.move, _tool_axes
+    )
+    assert any(t.label.endswith("_outlier") for t in result.trace)
+    assert result.aligned, result.note
+
+
+def test_a_cube_cut_off_by_the_image_edge_is_walked_into_view():
+    """As in the cylinder servo: the hover can leave the cube half out of the image
+    (run 11: v=457 of 480, the ceiling cameras 6 cm off). A probe that pushes it
+    further out is retried the other way, a cut-off blob is not an outlier, and the
+    nudges bring the cube in and onto the target."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.55, 0.0), 0.0, start[:2], start[2])
+    world.k = np.array([[2000.0, 0.0], [0.0, -2000.0]])
+    # 7 cm against tool y puts the cube centre at v = 320 + 140 = 460: cut off, and
+    # the +y probe pushes it further out (as in run 11).
+    _, y_axis = _tool_axes(0.0)
+    world.cube = np.array(start[:2]) - 0.07 * y_axis
+    result = TopDownCubeServo(
+        world, TopDownServoParams(target_uv=TARGET, max_moves=12, travel_limit=0.12)
+    ).align(start, world.move, _tool_axes, measured_xy=lambda: tuple(world.pinch))
+    assert result.aligned, result.note
+    assert math.hypot(*(world.pinch - world.cube)) < 0.004
+    assert result.trace[0].cube is not None and result.trace[0].cube.clipped
+
+
+def test_a_gain_measured_on_a_cut_off_cube_is_remeasured_before_turning_the_wrist():
+    """Probes on a cut-off cube under-read the gain (run 12: 838 vs 2753 px/m) and a
+    wrist turn computed from it went the wrong way. The servo re-probes once the cube
+    is fully in view, turns only then, at most max_turn per nudge, and converges."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.55, 0.0), 0.15, start[:2], start[2])
+    world.k = np.array([[2000.0, 0.0], [0.0, -2000.0]])
+    _, y_axis = _tool_axes(0.0)
+    world.cube = np.array(start[:2]) - 0.07 * y_axis
+    turns = []
+    move = world.move
+
+    def recording(label, ax, ay, yaw):
+        turns.append(abs(yaw - world.yaw))
+        return move(label, ax, ay, yaw)
+
+    params = TopDownServoParams(target_uv=TARGET, max_moves=12, travel_limit=0.12)
+    result = TopDownCubeServo(world, params).align(
+        start, recording, _tool_axes, measured_xy=lambda: tuple(world.pinch)
+    )
+    assert result.aligned, result.note
+    assert math.hypot(*(world.pinch - world.cube)) < 0.004
+    assert max(turns) <= params.max_turn + 1e-9
+    assert sum(t.label == "probe_x" for t in result.trace) == 2
+    turn = (result.yaw - 0.15 + math.pi / 4) % (math.pi / 2) - math.pi / 4
+    assert abs(turn) < math.radians(4)
+
+
+def test_a_sideways_probe_along_the_edge_is_not_mistaken_for_pushing_the_cube_out():
+    """Run 13: the x probe slid the cut-off cube along the image edge, its area
+    wobbled down a little, and the probe was needlessly retried the other way. Only a
+    clear shrink (below pushed_out_frac) counts as pushed out."""
+    start = (0.55, 0.0, 0.0)
+    world = _World((0.55, 0.0), 0.0, start[:2], start[2])
+    world.k = np.array([[2000.0, 0.0], [0.0, -2000.0]])
+    _, y_axis = _tool_axes(0.0)
+    world.cube = np.array(start[:2]) - 0.07 * y_axis
+    real_image = world.get_image
+    looks = {"n": 0}
+
+    def wobbling():
+        looks["n"] += 1
+        image = real_image()
+        if looks["n"] == 2:  # the x probe: shave the top rows off the cut-off blob
+            rows = np.nonzero((image != 200).any(axis=(1, 2)))[0]
+            image[rows.min() : rows.min() + 4] = 200
+        return image
+
+    world.get_image = wobbling
+    params = TopDownServoParams(target_uv=TARGET, travel_limit=0.12)
+    result = TopDownCubeServo(world, params).align(
+        start, world.move, _tool_axes, measured_xy=lambda: tuple(world.pinch)
+    )
+    labels = [t.label for t in result.trace]
+    assert labels[: labels.index("probe_y")] == ["hover", "probe_x", "probe_back"]
+    assert result.aligned, result.note

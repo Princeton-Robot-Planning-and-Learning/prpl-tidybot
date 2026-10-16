@@ -68,12 +68,51 @@ pick:
     grasp_min: 0.2
     grasp_max: 0.9
     close_position: 1.0
-    # angular: hover/grasp/lift/carry under the arm's onboard position controller
-    # (Jimmy Wu's pick_object; lands on target). compliant: streamed through the
-    # torque loop, which settled 24 mm short of the cube on the robot (2026-10-14).
+    # angular: the arm's onboard position controller (Jimmy Wu's pick_object); lands
+    # within 0.1 deg, which the wrist servo's step-and-look needs. compliant: the
+    # torque loop; it settles 4-5 deg short and then creeps for seconds (run 9: the
+    # hover 48 mm short, a 15 mm probe moved 40 mm), so the servo could not converge.
+    # One controller per run.
     arm_controller: angular
+    arrive_deg: 1.0
+    # The compliant descent is corrected: after the arm settles the pinch point is
+    # re-aimed by the measured position error, up to correction_rounds times, until
+    # within correction_tol_mm, at most correction_max_mm past the goal and never
+    # below the grasp height.
+    correction_rounds: 3
+    correction_tol_mm: 2.0
+    correction_max_mm: 60.0
+    correction_tol_deg: 0.3
+    correction_max_deg: 8.0
+    # Align over the cube with the wrist camera at the hover before descending
+    # (prpl_tidybot.visual_servo.top_down_cube). x/y nudges at the hover height and
+    # a wrist turn to square the fingers; never moves the gripper down.
+    wrist_servo:
+      enabled: true
+      # Where the cube sits in the wrist image when the pinch point is above it: the
+      # mean over the 4 held picks of 2026-10-14 (spread +-7, +-14 px).
+      target_uv: [318, 280]
+      probe_step: 0.015
+      tolerance_px: 6.0
+      confirm_looks: 3
+      min_step: 0.002
+      max_step: 0.01
+      max_area_change_frac: 0.3
+      # At 1 cm per nudge a cube ~6 cm off (the camera-overlap strip) needs 7-8.
+      max_moves: 10
+      travel_limit: 0.08
+      align_yaw: true
+      settle_s: 0.3
+    # Refuse a servo nudge whose IK jumps an arm joint by more than max_joint_step rad
+    # (the wrist may turn up to max_wrist_step to square the fingers).
+    max_joint_step: 0.2
+    max_wrist_step: 0.9
     gripper_timeout_s: 4.0
-    max_attempts: 3
+    # One attempt: a miss retracts, returns to the toss pose and ends the run.
+    max_attempts: 1
+    # After a missed pick: retract, ask the person to move the cube, and try again
+    # (this many times; 0 ends the run on a miss as before).
+    ask_to_move_after_miss: 3
     # Record the wrist camera during each pick attempt (real mode).
     record_wrist: true
     # Fake mode only: the gripper reading to pretend after closing.
@@ -81,6 +120,10 @@ pick:
 
 # Stop after the pick, holding the cube (then the reset prompt).
 skip_toss: false
+
+# once: one confirmation before the first action covers the whole run (Ctrl-C still
+# stops the arm); each: confirm every action.
+confirm: once
 
 # Seconds to wait after each toss before anything looks for the cube. Localizing right
 # after the swing caught the cube mid-flight and mid-slide (at rest ~1.6 s after

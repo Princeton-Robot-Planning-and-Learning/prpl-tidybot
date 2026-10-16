@@ -13,11 +13,13 @@ cycle's cube pose before the pick and where its throw landed relative to ``toss_
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import logging
 import math
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,7 +29,8 @@ import hydra
 import kinder
 import numpy as np
 from kinder_bilevel_planning.agent import AgentFailure
-from omegaconf import DictConfig
+from numpy.typing import NDArray
+from omegaconf import DictConfig, OmegaConf
 from prpl_utils.real_sim import Runner
 from relational_structs import ObjectCentricState
 
@@ -45,11 +48,20 @@ from prpl_tidybot.top_down_pick import (
     CARRY_ARM_CONF,
     TopDownPickGeometry,
     arm_frame_target,
+    cube_closing_yaw,
     forward_kinematics,
     geometry_from_config,
+    grasp_search_bounds,
     grasp_succeeded,
+    pointing_down_joints,
     standoff_pose,
     top_down_joint_targets,
+)
+from prpl_tidybot.visual_servo.image_sources import ImageSource, KinovaWristCameraSource
+from prpl_tidybot.visual_servo.top_down_cube import (
+    TopDownCubeServo,
+    TopDownServoParams,
+    TopDownServoResult,
 )
 
 _logger = logging.getLogger(__name__)
@@ -85,6 +97,56 @@ def cube_pose(state: ObjectCentricState) -> dict[str, float]:
     }
 
 
+def _asked_to_move(
+    ask_to_move: PromptFn | None, asks: int, record: dict[str, Any], question: str
+) -> bool:
+    """Ask the person to move the cube (once per remaining ask); False when there is
+    nobody to ask, no asks left, or they typed 'stop'."""
+    if ask_to_move is None or record.get("cube_moved_by_person", 0) >= asks:
+        return False
+    if ask_to_move(question).strip().lower() == "stop":
+        return False
+    record["cube_moved_by_person"] = record.get("cube_moved_by_person", 0) + 1
+    return True
+
+
+def _with_grid_setting(cfg: DictConfig, cycle: int) -> DictConfig:
+    """The run's config with cycle `cycle`'s toss setting from ``toss.grid``, a list of
+    ``[max_vel, gripper_release_ms]`` thrown in turn (a calibration sweep); unchanged
+    without a grid."""
+    grid = cfg.toss.get("grid")
+    if not grid:
+        return cfg
+    speed, release = grid[(cycle - 1) % len(grid)]
+    setting = {"toss": {"max_vel": float(speed), "gripper_release_ms": int(release)}}
+    merged = OmegaConf.merge(cfg, setting)
+    assert isinstance(merged, DictConfig)
+    return merged
+
+
+def _put_back_if_in_bin(
+    cfg: DictConfig, cube_source: Any, record: dict[str, Any], prompt_fn: PromptFn
+) -> None:
+    """A thrown cube that ends up in (or against) the bin is not picked: the hover is
+    below the rim. The person puts it back on the floor (``bin_stop_box`` is the bin's
+    footprint plus a margin, [x_min, x_max, y_min, y_max])."""
+    box = cfg.get("bin_stop_box")
+    if box is None:
+        return
+    try:
+        cube = _localize(cube_source)
+    except RuntimeError:
+        return  # the pick's own localization reports a missing cube
+    if not (box[0] <= cube["x"] <= box[1] and box[2] <= cube["y"] <= box[3]):
+        return
+    record["cube_in_bin"] = {"x": cube["x"], "y": cube["y"]}
+    _logger.info("The cube is in the bin at (%+.3f, %+.3f).", cube["x"], cube["y"])
+    prompt_fn(
+        f"\nThe cube is in the bin at ({cube['x']:+.3f}, {cube['y']:+.3f}): put it on "
+        "the floor clear of the bin, then press Enter. "
+    )
+
+
 def _landing(cube: dict[str, float], toss_pose: list[float]) -> dict[str, float]:
     """Where a throw ended relative to the toss pose: distance and bearing off its
     heading."""
@@ -98,12 +160,16 @@ def _landing(cube: dict[str, float], toss_pose: list[float]) -> dict[str, float]
     }
 
 
-def run_toss_cycles(
+def run_toss_cycles(  # pylint: disable=too-many-locals
     cfg: DictConfig,
     log_dir: Path | str | None = None,
     prompt_fn: PromptFn = input,
+    wrist_camera: Callable[[ArmInterface], ImageSource] | None = None,
 ) -> TossCyclesSummary:
-    """Run ``cfg.cycles`` pick/home/drive/toss cycles (conf/toss_cycles.yaml)."""
+    """Run ``cfg.cycles`` pick/drive/toss/retract cycles (conf/toss_cycles.yaml).
+
+    ``wrist_camera`` builds the wrist image source from the arm; by default the
+    Kinova wrist camera in real mode and none otherwise (no servo)."""
     if cfg.mode == "sim":
         raise ValueError(
             "toss_cycles needs a toss, which the kinematic sim does not have."
@@ -119,32 +185,62 @@ def run_toss_cycles(
     pipeline = cfg.env.pipelines[cfg.mode]
     real_env = hydra.utils.instantiate(pipeline.real_env, _convert_="all")
     perceiver = hydra.utils.instantiate(pipeline.perceiver, _convert_="all")
-    plan_executor = hydra.utils.instantiate(pipeline.plan_executor, _convert_="all")
-    env_models = build_planner_env_models(
-        cfg.env.env_name,
-        hydra.utils.instantiate(cfg.env.make_kwargs, _recursive_=True, _convert_="all"),
-        hydra.utils.instantiate(
-            cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
-        ),
-    )
+    # Only the kinder pick plans; its env models are large and never freed, so a
+    # top-down run does not build them.
+    plan_executor: Any = None
+    env_models: Any = None
+    if cfg.pick.method != "top_down":
+        plan_executor = hydra.utils.instantiate(pipeline.plan_executor, _convert_="all")
+        env_models = build_planner_env_models(
+            cfg.env.env_name,
+            hydra.utils.instantiate(
+                cfg.env.make_kwargs, _recursive_=True, _convert_="all"
+            ),
+            hydra.utils.instantiate(
+                cfg.env.env_model_kwargs, _recursive_=True, _convert_="all"
+            ),
+        )
     arm: ArmInterface = real_env.interface.arm_interface
-    cube_source = hydra.utils.instantiate(
-        pipeline.perceiver.target_source, _convert_="all"
-    )
     geom = geometry_from_config(cfg.pick.get("top_down"))
+    cube_source = hydra.utils.instantiate(
+        pipeline.perceiver.target_source,
+        _convert_="all",
+        **_cube_source_kwargs(cfg, pipeline.perceiver.target_source, resolved_log_dir),
+    )
+    source: ImageSource | None = None
+    if wrist_camera is not None:
+        source = wrist_camera(arm)
+    elif cfg.mode == "real":
+        source = KinovaWristCameraSource()
     wrist = _WristRecorder(
-        cfg.mode == "real" and bool(cfg.pick.top_down.get("record_wrist", True)),
+        source if bool(cfg.pick.top_down.get("record_wrist", True)) else None,
         resolved_log_dir,
     )
+    servo = _build_servo(cfg, source, resolved_log_dir)
     ceiling = _CeilingRecorder(cfg, resolved_log_dir)
+
+    once = str(cfg.get("confirm", "once")) == "once"
+    confirmed = {"done": False}
+
+    def asking() -> bool:
+        """Whether to prompt now: every step, or (confirm=once) only before the first."""
+        return interactive and not (once and confirmed["done"])
 
     def confirm(question: str) -> None:
         ceiling.label = question
-        if not interactive:
+        if not asking():
+            _logger.info("Step: %s", question.rstrip("?"))
             return
+        if once:
+            question = (
+                f"Run all {requested} cycle(s) (pick, drive, toss, retract; asking only "
+                f"if the cube must be moved) without asking again? First: "
+                f"{question}"
+            )
         answer = prompt_fn(f"\n{question} [y/N]: ")
         if answer.strip().lower() not in ("y", "yes"):
             raise _Declined(question)
+        confirmed["done"] = True
 
     records: list[dict[str, Any]] = []
     completed = 0
@@ -156,6 +252,8 @@ def run_toss_cycles(
             record: dict[str, Any] = {"cycle": cycle, "tossed": False}
             records.append(record)
             _logger.info("Cycle %d/%d: localizing the cube.", cycle, requested)
+            if cycle > 1:
+                _put_back_if_in_bin(cfg, cube_source, record, prompt_fn)
             if cfg.pick.method == "top_down":
                 failure = _pick_top_down(
                     cfg,
@@ -168,6 +266,8 @@ def run_toss_cycles(
                     record,
                     wrist,
                     toss_pose,
+                    servo,
+                    prompt_fn if interactive else None,
                 )
             else:
                 failure = _pick_kinder(
@@ -199,8 +299,10 @@ def run_toss_cycles(
             )
             _drive_to(real_env, toss_pose)
 
+            cycle_cfg = _with_grid_setting(cfg, cycle)
+            ask_toss = interactive and bool(cfg.toss.get("confirm_each", False))
             tossed, reason, info, _ = _toss(
-                cfg, arm, resolved_log_dir, interactive, prompt_fn
+                cycle_cfg, arm, resolved_log_dir, asking() or ask_toss, prompt_fn
             )
             record["toss"] = info
             if not tossed:
@@ -232,7 +334,7 @@ def run_toss_cycles(
                 arm,
                 toss_pose,
                 records,
-                interactive,
+                asking(),
                 prompt_fn,
             )
         if resolved_log_dir is not None:
@@ -251,6 +353,8 @@ def run_toss_cycles(
                 encoding="utf-8",
             )
         wrist.close()
+        if source is not None and hasattr(source, "close"):
+            source.close()
         ceiling.close()
         cube_source.close()
         if not aborted:
@@ -338,52 +442,27 @@ def _move_arm(
     return False
 
 
+def _cube_source_kwargs(
+    cfg: DictConfig, target_cfg: Any, log_dir: Path | None = None
+) -> dict[str, Any]:
+    """The ceiling localizer searches everywhere the arm can grasp from inside the
+    drivable box, not just the box itself (a bin just past its edge), and saves the
+    frames of any missed localization beside the run's logs."""
+    if not str(target_cfg["_target_"]).endswith("CeilingCubeTargetSource"):
+        return {}
+    bounds = grasp_search_bounds(
+        tuple(cfg.preview.floor_bounds), geometry_from_config(cfg.pick.get("top_down"))
+    )
+    kwargs: dict[str, Any] = {"floor_bounds": list(bounds)}
+    if log_dir is not None:
+        kwargs["failure_dir"] = str(Path(log_dir) / "localization_failures")
+    return kwargs
+
+
 def _retract(cfg: DictConfig, arm: ArmInterface) -> None:
     """Fold the arm to its retract pose under the compliant loop: it needs no
     precision, and only the grasp itself runs under the stiff onboard controller."""
     _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
-
-
-def _logged_move(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    arm: ArmInterface,
-    name: str,
-    goal: list[float],
-    gripper: float,
-    arm_cfg: DictConfig,
-    geom: TopDownPickGeometry,
-    moves: list[dict[str, Any]],
-) -> None:
-    """`_move_arm`, then record planned vs measured joints and pinch-point heights:
-    the arm's torque loop is compliant, so where it settles (sag, or stopped by the
-    floor) can differ from the target."""
-    reached = _move_arm(arm, goal, gripper, arm_cfg)
-    measured = list(arm.get_arm_state())
-    move = {
-        "name": name,
-        "controller": "compliant",
-        "reached": reached,
-        "planned_deg": np.round(np.degrees(goal), 2).tolist(),
-        "measured_deg": np.round(np.degrees(measured), 2).tolist(),
-        "planned_pinch_z": float(forward_kinematics(goal, geom)[0][2]),
-        "measured_pinch_z": float(forward_kinematics(measured, geom)[0][2]),
-    }
-    moves.append(move)
-    _logger.info(
-        "Move %s: pinch z planned %+.4f measured %+.4f (floor %+.3f); max joint error "
-        "%.2f deg.",
-        name,
-        move["planned_pinch_z"],
-        move["measured_pinch_z"],
-        geom.floor_z,
-        float(
-            np.max(
-                np.abs(
-                    (np.array(move["measured_deg"]) - move["planned_deg"] + 180) % 360
-                    - 180
-                )
-            )
-        ),
-    )
 
 
 def _drive_to(real_env: Any, pose: list[float]) -> tuple[float, float, float]:
@@ -508,23 +587,37 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
     record: dict[str, Any],
     wrist: "_WristRecorder",
     toss_pose: list[float],
+    servo: TopDownCubeServo | None = None,
+    ask_to_move: PromptFn | None = None,
 ) -> str | None:
     """Jimmy Wu's top-down pick (prpl_tidybot.top_down_pick) on the localized cube.
 
     For up to ``max_attempts``: localize the cube, drive to a standoff facing it,
     re-localize, then open, hover 10 cm above, descend, close, and read the gripper.
     After a miss the arm retracts and the base returns to the toss pose, where the
-    ceiling cameras see the (possibly nudged) cube without the robot over it. Returns
-    a stop reason, or None once the cube is held (arm at its carry pose).
+    ceiling cameras see the (possibly nudged) cube without the robot over it. With
+    ``ask_to_move``, a miss instead retracts and asks the person to move the cube (up to
+    ``ask_to_move_after_miss`` times), then tries again. Returns a stop reason, or None
+    once the cube is held (arm at its carry pose).
     """
     td = cfg.pick.top_down
     floor = tuple(cfg.preview.floor_bounds)
     attempts = int(td.get("max_attempts", 3))
-    for attempt in range(1, attempts + 1):
+    asks = int(td.get("ask_to_move_after_miss", 3)) if ask_to_move is not None else 0
+    for attempt in range(1, attempts + asks + 1):
         try:
             cube = _localize(cube_source)
         except RuntimeError as e:
-            return f"{e}; move the cube into the drivable area and rerun"
+            if not _asked_to_move(
+                ask_to_move,
+                asks,
+                record,
+                f"\nCycle {cycle}: I can't find the cube ({e}). Please put it in view "
+                "on the floor, clear of the robot and of the camera overlap strip "
+                "(y -0.15..0.18), then press Enter, or type 'stop' to end the run: ",
+            ):
+                return f"{e}; move the cube into the drivable area and rerun"
+            continue
         record.setdefault("cube_before_pick", cube)
         obs, _ = real_env.reset()
         robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
@@ -543,53 +636,52 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
             cube = _localize(cube_source)  # corrects for where the base parked
         except RuntimeError as e:
             return f"{e}; move the cube and rerun"
-        ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
-        yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
-        try:
-            hover, grasp = top_down_joint_targets(
-                ax, ay, yaw_rel, geom, seed=arm.get_arm_state()
+        # The more confident camera's estimate first; on a miss, the other cameras'
+        # (they disagree by ~3 cm where they overlap).
+        targets = [(cube, "best camera")] + [
+            ({"x": x, "y": y, "yaw_deg": math.degrees(yaw)}, "other camera")
+            for x, y, yaw in cube_source.alternates()
+        ]
+        for k, (cube, label) in enumerate(targets):
+            if k > 0:
+                confirm(
+                    f"Cycle {cycle}: Missed. Try the other ceiling camera's estimate "
+                    f"of the cube, ({cube['x']:+.3f}, {cube['y']:+.3f})?"
+                )
+            held, failure = _grasp_at(
+                cfg,
+                cube,
+                label,
+                base,
+                arm,
+                geom,
+                confirm,
+                cycle,
+                attempt,
+                record,
+                wrist,
+                servo,
+                attempts,
+                f"{attempt}" + (f"_{k + 1}" if k else ""),
             )
-        except ValueError as e:
-            return f"pick_failure: {e}"
-        moves: list[dict[str, Any]] = []
-        record.setdefault("pick_attempts", []).append(
-            {
-                "attempt": attempt,
-                "cube": cube,
-                "arm_target_xy": [ax, ay],
-                "moves": moves,
-            }
-        )
-        confirm(
-            f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: open, arm to 10 cm "
-            f"above the cube (arm frame {ax:+.3f}, {ay:+.3f}), descend, close?"
-        )
-        wrist.start(f"cycle_{cycle:02d}_pick_{attempt}")
-        # The fake gripper closes on nothing; pretend it read fake_grasp_reading.
-        fake = float(td.get("fake_grasp_reading", 0.49))
-        read = functools.partial(_fake_reading, fake) if cfg.mode == "fake" else float
-        if td.get("arm_controller", "angular") == "angular":
-            held, reading, note = _grasp_angular(
-                arm, td, geom, hover, grasp, moves, read
-            )
-        else:
-            held, reading, note = _grasp_compliant(
-                cfg, arm, td, geom, hover, grasp, moves, read
-            )
-        record["pick_attempts"][-1].update({"gripper": reading, "held": held})
-        if note is not None:
-            record["pick_attempts"][-1]["note"] = note
-        _logger.info(
-            "Pick attempt %d: gripper %.3f -> %s%s.",
-            attempt,
-            reading,
-            "held" if held else "missed",
-            f" ({note})" if note else "",
-        )
-        if held:
-            wrist.stop()
-            return None
+            if failure is not None:
+                return failure
+            if held:
+                wrist.stop()
+                return None
         wrist.stop()
+        if ask_to_move is not None and record.get("cube_moved_by_person", 0) < asks:
+            _retract(cfg, arm)
+            if not _asked_to_move(
+                ask_to_move,
+                asks,
+                record,
+                f"\nCycle {cycle}: the pick missed and the arm is retracted. Please "
+                "move the cube (clear of the camera overlap strip, y -0.15..0.18), then "
+                "press Enter, or type 'stop' to end the run: ",
+            ):
+                return "pick missed; the operator stopped the run"
+            continue
         if attempt < attempts:
             confirm(
                 f"Cycle {cycle}: Missed. Retract the arm and drive back to the toss "
@@ -608,125 +700,494 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
 _ANGULAR_ARRIVAL_DEG = 1.0
 
 
-def _angular_move(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    arm: ArmInterface,
-    name: str,
-    goal: list[float],
-    geom: TopDownPickGeometry,
-    moves: list[dict[str, Any]],
-) -> bool:
-    """One ``move_angular``, recorded like `_logged_move`; returns whether it
-    arrived within `_ANGULAR_ARRIVAL_DEG` on every joint."""
-    measured = arm.move_angular(goal)
-    err = np.degrees(
-        np.abs((np.array(measured) - np.array(goal) + np.pi) % (2 * np.pi) - np.pi)
-    )
-    move = {
-        "name": name,
-        "controller": "angular",
-        "reached": bool(np.all(err < _ANGULAR_ARRIVAL_DEG)),
-        "planned_deg": np.round(np.degrees(goal), 2).tolist(),
-        "measured_deg": np.round(np.degrees(measured), 2).tolist(),
-        "planned_pinch_z": float(forward_kinematics(goal, geom)[0][2]),
-        "measured_pinch_z": float(forward_kinematics(measured, geom)[0][2]),
-    }
-    moves.append(move)
-    _logger.info(
-        "Move %s (angular): pinch z planned %+.4f measured %+.4f (floor %+.3f); max "
-        "joint error %.2f deg.",
-        name,
-        move["planned_pinch_z"],
-        move["measured_pinch_z"],
-        geom.floor_z,
-        float(err.max()),
-    )
-    return bool(move["reached"])
+class _Mover:
+    """How the grasp sequence moves the arm and gripper: under the onboard position
+    controller (`_AngularMover`) or the compliant torque loop (`_CompliantMover`).
+    One controller is used for a whole run; nothing switches mid-episode."""
 
+    name = ""
 
-def _grasp_angular(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    arm: ArmInterface,
-    td: Any,
-    geom: TopDownPickGeometry,
-    hover: list[float],
-    grasp: list[float],
-    moves: list[dict[str, Any]],
-    read: Any,
-) -> tuple[bool, float, str | None]:
-    """Jimmy Wu's pick_object sequence under the arm's onboard position controller
-    (the compliant torque loop settled 24 mm short of the cube): open, hover,
-    descend, close, read; then lift and carry, or open and back off. The torque loop
-    is released for the whole sequence and resumed holding the final pose.
+    def __init__(
+        self,
+        arm: ArmInterface,
+        td: Any,
+        geom: TopDownPickGeometry,
+        moves: list[dict[str, Any]],
+    ) -> None:
+        self.arm = arm
+        self.td = td
+        self.geom = geom
+        self.moves = moves
 
-    Returns (held, gripper reading, note); the note says why the gripper was not
-    closed, if it was not.
-    """
-    timeout = float(td.get("gripper_timeout_s", 4.0))
-    arm.release()
-    aborted = False
-    try:
-        arm.set_gripper_angular(0.0, timeout)
-        for name, goal in (("hover", hover), ("grasp", grasp)):
-            if not _angular_move(arm, name, goal, geom, moves):
-                _angular_move(arm, "retreat", hover, geom, moves)
-                return False, arm.get_gripper_state(), f"{name} did not arrive"
-        reading = read(
-            arm.set_gripper_angular(float(td.get("close_position", 1.0)), timeout)
+    def joints(self) -> list[float]:
+        """Where the arm is now (IK seeds, the servo's jump check and position)."""
+        return list(self.arm.get_arm_state())
+
+    def begin(self) -> None:
+        """Take whatever control the controller needs."""
+
+    def end(self) -> None:
+        """Hand the arm back to the compliant loop, holding where it is."""
+
+    def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
+        """Move to `goal`; record it; return whether it arrived. `correct` asks a
+        controller that can settle short of its goal to correct onto it."""
+        raise NotImplementedError
+
+    def gripper(self, position: float) -> float:
+        """Move the gripper; return where it stopped."""
+        raise NotImplementedError
+
+    def _record(
+        self, name: str, goal: list[float], measured: list[float], **extra: Any
+    ) -> dict[str, Any]:
+        err = np.degrees(
+            np.abs((np.array(measured) - np.array(goal) + np.pi) % (2 * np.pi) - np.pi)
         )
+        move = {
+            "name": name,
+            "controller": self.name,
+            "reached": bool(np.all(err < _ANGULAR_ARRIVAL_DEG)),
+            "planned_deg": np.round(np.degrees(goal), 2).tolist(),
+            "measured_deg": np.round(np.degrees(measured), 2).tolist(),
+            "planned_pinch_z": float(forward_kinematics(goal, self.geom)[0][2]),
+            "measured_pinch_z": float(forward_kinematics(measured, self.geom)[0][2]),
+        } | extra
+        self.moves.append(move)
+        _logger.info(
+            "Move %s (%s): pinch z planned %+.4f measured %+.4f (floor %+.3f); max "
+            "joint error %.2f deg.",
+            name,
+            self.name,
+            move["planned_pinch_z"],
+            move["measured_pinch_z"],
+            self.geom.floor_z,
+            float(err.max()),
+        )
+        return move
+
+
+class _AngularMover(_Mover):
+    """Jimmy Wu's pick_object moves: the onboard controller, torque loop released."""
+
+    name = "angular"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._aborted = False
+        self._joints = list(self.arm.get_arm_state())
+
+    def joints(self) -> list[float]:
+        # With the torque loop released the arm server's joint reading is frozen at
+        # the release (run 10: an IK seeded from it flipped branch); each onboard
+        # move reports where the arm stopped, so track that instead.
+        return list(self._joints)
+
+    def begin(self) -> None:
+        self._joints = list(self.arm.get_arm_state())
+        self.arm.release()
+
+    def end(self) -> None:
+        if not self._aborted:
+            self.arm.resume()
+
+    def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
+        try:
+            measured = self.arm.move_angular(goal)
+        except ArmMotionAborted:
+            self._aborted = True
+            raise
+        self._joints = list(measured)
+        return bool(self._record(name, goal, list(measured))["reached"])
+
+    def gripper(self, position: float) -> float:
+        try:
+            return self.arm.set_gripper_angular(
+                position, float(self.td.get("gripper_timeout_s", 4.0))
+            )
+        except ArmMotionAborted:
+            self._aborted = True
+            raise
+
+
+class _CompliantMover(_Mover):
+    """The compliant torque loop.
+
+    As in Tom Silver's cylinder servo, a move streams its joint target and waits for
+    the arm to arrive (or stop): the loop settles a few degrees short wherever its
+    gravity and friction models miss (24 mm at the gripper in run 3), and for the
+    hover and the servo's nudges that does not matter, because the wrist camera
+    measures the cube from wherever the gripper really is. Only the descent, which
+    the camera cannot watch, is corrected (`correct=True`): after the arm settles the
+    pinch point is re-aimed past the goal by the measured error, never below the
+    grasp height, so an arm held up by the floor or the cube is not pushed into it.
+    """
+
+    name = "compliant"
+
+    def __init__(
+        self,
+        arm: ArmInterface,
+        td: Any,
+        geom: TopDownPickGeometry,
+        moves: list[dict[str, Any]],
+        arm_cfg: DictConfig,
+    ) -> None:
+        super().__init__(arm, td, geom, moves)
+        self.arm_cfg = arm_cfg
+        self.command = list(arm.get_arm_state())
+        self.grip = arm.get_gripper_state()
+
+    def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
+        goal_pos, approach, closing = forward_kinematics(goal, self.geom)
+        if correct and approach[2] < -0.99:
+            return self._move_down(name, goal, goal_pos, closing)
+        if correct:
+            return self._move_joints(name, goal)
+        settled = self._settle(list(goal))
+        self._record(name, goal, list(self.arm.get_arm_state()), settled=settled)
+        return settled
+
+    def _move_down(
+        self,
+        name: str,
+        goal: list[float],
+        goal_pos: NDArray[np.float64],
+        closing: NDArray[np.float64],
+    ) -> bool:
+        """A pointing-down move (hover, grasp, lift, servo nudges), corrected in
+        Cartesian space: re-aim the pinch point at goal + (goal - measured), keeping
+        the tool pointing down, until within `correction_tol_mm`. Near the floor the
+        aim never goes below the goal's own height, so an arm held up by the floor
+        or the cube is not pushed into it."""
+        tol = float(self.td.get("correction_tol_mm", 2.0)) / 1000
+        rounds = int(self.td.get("correction_rounds", 3))
+        max_push = float(self.td.get("correction_max_mm", 60.0)) / 1000
+        near_floor = goal_pos[2] < self.geom.floor_z + self.geom.grasp_height + 0.03
+        yaw = math.atan2(closing[1], closing[0])
+        aim = np.array(goal_pos, float)
+        command = list(goal)
+        used = 0
+        for used in range(rounds + 1):
+            self._settle(command)
+            measured_pos = forward_kinematics(self.arm.get_arm_state(), self.geom)[0]
+            err = measured_pos - goal_pos
+            if np.linalg.norm(err) < tol or used == rounds:
+                break
+            aim = aim - err
+            push = aim - goal_pos
+            if np.linalg.norm(push) > max_push:
+                aim = goal_pos + push * (max_push / np.linalg.norm(push))
+            if near_floor and aim[2] < goal_pos[2]:
+                aim[2] = goal_pos[2]
+            command = pointing_down_joints(
+                aim, yaw, self.geom, seed=self.arm.get_arm_state()
+            )
+        measured = list(self.arm.get_arm_state())
+        off = float(
+            np.linalg.norm(forward_kinematics(measured, self.geom)[0] - goal_pos)
+        )
+        return bool(
+            self._record(
+                name,
+                goal,
+                measured,
+                reached=off < 1.5 * tol,
+                pinch_error_mm=round(off * 1000, 1),
+                commanded_deg=np.round(np.degrees(command), 2).tolist(),
+                correction_rounds=used,
+            )["reached"]
+        )
+
+    def _move_joints(self, name: str, goal: list[float]) -> bool:
+        """Any other move (the carry pose): corrected in joint space."""
+        tol = math.radians(float(self.td.get("correction_tol_deg", 0.3)))
+        rounds = int(self.td.get("correction_rounds", 3))
+        max_push = math.radians(float(self.td.get("correction_max_deg", 8.0)))
+        command = np.array(goal, float)
+        used = 0
+        for used in range(rounds + 1):
+            self._settle(list(command))
+            err = _wrap(np.array(self.arm.get_arm_state()) - np.array(goal))
+            if np.all(np.abs(err) < tol) or used == rounds:
+                break
+            push = _wrap(command - err - np.array(goal))
+            command = np.array(goal) + np.clip(push, -max_push, max_push)
+        return bool(
+            self._record(
+                name,
+                goal,
+                list(self.arm.get_arm_state()),
+                commanded_deg=np.round(np.degrees(command), 2).tolist(),
+                correction_rounds=used,
+            )["reached"]
+        )
+
+    def _settle(self, command: list[float]) -> bool:
+        """Stream `command` until the arm is within `arrive_deg` of it, or has moved
+        and stopped (it can settle short of the command), or `max_ticks` pass. The
+        first quiet ticks after a new command are before the arm starts to move, so
+        stillness only counts once it has moved or been streamed for a while."""
+        self.command = command
+        arrive = math.radians(float(self.td.get("arrive_deg", 1.0)))
+        start = np.array(self.arm.get_arm_state())
+        last = start
+        still = 0
+        for tick in range(int(self.arm_cfg.max_ticks)):
+            self.arm.execute_action(command, self.grip)
+            now = np.array(self.arm.get_arm_state())
+            if np.all(np.abs(_wrap(now - np.array(command))) < arrive):
+                return True
+            moving = np.any(np.abs(_wrap(now - last)) > math.radians(0.05))
+            still = 0 if moving else still + 1
+            last = now
+            started = np.any(np.abs(_wrap(now - start)) > math.radians(0.5))
+            if still >= 5 and (started or tick >= 15):
+                return True
+            time.sleep(POLICY_CONTROL_PERIOD)
+        return False
+
+    def gripper(self, position: float) -> float:
+        self.grip = position
+        _set_gripper(self.arm, position, self.td, hold=self.command)
+        self.grip = self.arm.get_gripper_state()
+        return self.grip
+
+
+def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    cfg: DictConfig,
+    cube: dict[str, float],
+    label: str,
+    base: tuple[float, float, float],
+    arm: ArmInterface,
+    geom: TopDownPickGeometry,
+    confirm: Any,
+    cycle: int,
+    attempt: int,
+    record: dict[str, Any],
+    wrist: "_WristRecorder",
+    servo: Any,
+    attempts: int,
+    clip: str,
+) -> tuple[bool, str | None]:
+    """One grasp from where the base parked at `cube`: (held, stop reason or None).
+    The wrist clip is left recording when the cube is held."""
+    td = cfg.pick.top_down
+    ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
+    yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
+    try:
+        top_down_joint_targets(ax, ay, yaw_rel, geom, seed=arm.get_arm_state())
+    except ValueError as e:
+        return False, f"pick_failure: {e}"
+    moves: list[dict[str, Any]] = []
+    record.setdefault("pick_attempts", []).append(
+        {
+            "attempt": attempt,
+            "cube": cube,
+            "target": label,
+            "arm_target_xy": [ax, ay],
+            "moves": moves,
+        }
+    )
+    confirm(
+        f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: open, arm to 10 cm "
+        f"above the cube (arm frame {ax:+.3f}, {ay:+.3f}), "
+        + ("align with the wrist camera, " if servo is not None else "")
+        + "descend, close?"
+    )
+    wrist.start(f"cycle_{cycle:02d}_pick_{clip}")
+    # The fake gripper closes on nothing; pretend it read fake_grasp_reading.
+    fake = float(td.get("fake_grasp_reading", 0.49))
+    read = functools.partial(_fake_reading, fake) if cfg.mode == "fake" else float
+    mover: _Mover = (
+        _AngularMover(arm, td, geom, moves)
+        if td.get("arm_controller", "compliant") == "angular"
+        else _CompliantMover(arm, td, geom, moves, cfg.arm_home)
+    )
+    held, reading, note, servo_log = _grasp(
+        mover,
+        geom,
+        (ax, ay, yaw_rel),
+        read,
+        servo,
+        f"c{cycle}a{clip}",
+    )
+    if servo_log is not None:
+        record["pick_attempts"][-1]["servo"] = servo_log
+    record["pick_attempts"][-1].update({"gripper": reading, "held": held})
+    if note is not None:
+        record["pick_attempts"][-1]["note"] = note
+    _logger.info(
+        "Pick attempt %d: gripper %.3f -> %s%s.",
+        attempt,
+        reading,
+        "held" if held else "missed",
+        f" ({note})" if note else "",
+    )
+    if not held:
+        wrist.stop()
+    return held, None
+
+
+def _wrap(angles: Any) -> Any:
+    return (np.asarray(angles) + np.pi) % (2 * np.pi) - np.pi
+
+
+def _tool_axes(
+    geom: TopDownPickGeometry, yaw_rel: float
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The top-down tool's x and closing (y) axes in the arm frame for a cube yaw
+    `yaw_rel` (the closing yaw is that, modulo the cube's 90-degree symmetry)."""
+    closing = cube_closing_yaw(yaw_rel, geom)
+    c, s = math.cos(closing), math.sin(closing)
+    return np.array([-s, c]), np.array([c, s])
+
+
+def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    mover: _Mover,
+    geom: TopDownPickGeometry,
+    start: tuple[float, float, float],
+    read: Any,
+    servo: TopDownCubeServo | None,
+    name: str,
+) -> tuple[bool, float, str | None, dict[str, Any] | None]:
+    """Jimmy Wu's pick_object sequence: open, hover, (align with the wrist camera),
+    descend, close, read; then lift and carry, or open and back off.
+
+    Returns (held, gripper reading, note, servo log); the note says why the gripper
+    was not closed, if it was not.
+    """
+    td = mover.td
+    ax, ay, yaw = start
+    hover, grasp = top_down_joint_targets(ax, ay, yaw, geom, seed=mover.joints())
+    servo_log: dict[str, Any] | None = None
+    mover.begin()
+    try:
+        mover.gripper(0.0)
+        if not mover.move("hover", hover):
+            mover.move("retreat", hover)
+            return False, mover.arm.get_gripper_state(), "hover did not arrive", None
+        if servo is not None:
+
+            def move_hover(label: str, x: float, y: float, w: float) -> bool:
+                here = mover.joints()
+                joints, _ = top_down_joint_targets(x, y, w, geom, seed=here)
+                if not _servo_step_is_small(here, joints, td):
+                    return False
+                return mover.move(f"servo_{label}", joints)
+
+            def measured_xy() -> tuple[float, float]:
+                pos = forward_kinematics(mover.joints(), geom)[0]
+                return float(pos[0]), float(pos[1])
+
+            result = servo.align(
+                (ax, ay, yaw),
+                move_hover,
+                functools.partial(_tool_axes, geom),
+                name=name,
+                measured_xy=measured_xy,
+            )
+            servo_log = _servo_log(result)
+            ax, ay, yaw = result.ax, result.ay, result.yaw
+            hover, grasp = top_down_joint_targets(
+                ax, ay, yaw, geom, seed=mover.joints()
+            )
+            if not result.aligned:
+                mover.move("retreat", hover)
+                return False, mover.arm.get_gripper_state(), result.note, servo_log
+        if not mover.move("grasp", grasp, correct=True):
+            mover.move("retreat", hover)
+            return (
+                False,
+                mover.arm.get_gripper_state(),
+                "grasp did not arrive",
+                servo_log,
+            )
+        reading = read(mover.gripper(float(td.get("close_position", 1.0))))
         held = grasp_succeeded(reading, geom)
         if held:
-            _angular_move(arm, "lift", hover, geom, moves)
-            _angular_move(arm, "carry", list(CARRY_ARM_CONF), geom, moves)
+            mover.move("lift", hover)
+            mover.move("carry", list(CARRY_ARM_CONF))
         else:
-            arm.set_gripper_angular(0.0, timeout)
-            _angular_move(arm, "retreat", hover, geom, moves)
-        return held, reading, None
-    except ArmMotionAborted:
-        aborted = True
-        raise
+            mover.gripper(0.0)
+            mover.move("retreat", hover)
+        return held, reading, None, servo_log
     finally:
-        if not aborted:
-            arm.resume()
+        mover.end()
 
 
-def _grasp_compliant(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    cfg: DictConfig,
-    arm: ArmInterface,
-    td: Any,
-    geom: TopDownPickGeometry,
-    hover: list[float],
-    grasp: list[float],
-    moves: list[dict[str, Any]],
-    read: Any,
-) -> tuple[bool, float, str | None]:
-    """The same sequence streamed through the compliant torque loop."""
-    _set_gripper(arm, 0.0, td)
-    _logged_move(arm, "hover", hover, 0.0, cfg.arm_home, geom, moves)
-    _logged_move(arm, "grasp", grasp, 0.0, cfg.arm_home, geom, moves)
-    _set_gripper(arm, float(td.get("close_position", 1.0)), td)
-    reading = read(arm.get_gripper_state())
-    held = grasp_succeeded(reading, geom)
-    _finish_grasp(cfg, arm, td, geom, hover, moves, held=held)
-    return held, reading, None
+def _servo_step_is_small(
+    here: Sequence[float], target: Sequence[float], td: Any
+) -> bool:
+    """As in the cylinder servo, refuse a nudge whose IK jumps an arm joint by more
+    than `max_joint_step` (a branch flip near a singularity); the wrist (joint 7) may
+    turn further, up to `max_wrist_step`, to square the fingers to the cube."""
+    jump = np.abs(_wrap(np.asarray(target) - np.asarray(here)))
+    arm_limit = float(td.get("max_joint_step", 0.2))
+    wrist_limit = float(td.get("max_wrist_step", 0.9))
+    if jump[:6].max() > arm_limit or jump[6] > wrist_limit:
+        _logger.warning(
+            "Servo nudge refused: joint change %s rad (limits %.2f arm, %.2f wrist); "
+            "likely an IK branch flip.",
+            np.round(jump, 3).tolist(),
+            arm_limit,
+            wrist_limit,
+        )
+        return False
+    return True
 
 
-def _finish_grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    cfg: DictConfig,
-    arm: ArmInterface,
-    td: Any,
-    geom: TopDownPickGeometry,
-    hover: list[float],
-    moves: list[dict[str, Any]],
-    held: bool,
-) -> None:
-    """Compliant lift and carry after a grasp, or open and back off after a miss."""
-    if held:
-        grip = arm.get_gripper_state()
-        _logged_move(arm, "lift", hover, grip, cfg.arm_home, geom, moves)
-        carry = list(CARRY_ARM_CONF)
-        _logged_move(arm, "carry", carry, grip, cfg.arm_home, geom, moves)
-    else:
-        _set_gripper(arm, 0.0, td)
-        _logged_move(arm, "retreat", hover, 0.0, cfg.arm_home, geom, moves)
+def _servo_log(result: TopDownServoResult) -> dict[str, Any]:
+    return {
+        "aligned": result.aligned,
+        "note": result.note,
+        "final": [result.ax, result.ay, math.degrees(result.yaw)],
+        "jacobian_px_per_m": result.jacobian,
+        "looks": [
+            {
+                "label": t.label,
+                "pinch_xy": list(t.pinch_xy),
+                "cube_uv": None if t.cube is None else [t.cube.u, t.cube.v],
+                "error_px": t.error_px,
+                "delta_tool_m": None if t.delta_tool is None else list(t.delta_tool),
+            }
+            for t in result.trace
+        ],
+    }
+
+
+def _build_servo(
+    cfg: DictConfig, source: ImageSource | None, log_dir: Path | None
+) -> TopDownCubeServo | None:
+    """The wrist servo from ``pick.top_down.wrist_servo``, or None when it is off or
+    there is no wrist camera."""
+    servo_cfg = cfg.pick.top_down.get("wrist_servo")
+    if source is None or servo_cfg is None or not servo_cfg.get("enabled", False):
+        return None
+    names = {f.name for f in dataclasses.fields(TopDownServoParams)}
+    kwargs = {k: servo_cfg[k] for k in names if k in servo_cfg}
+    if "target_uv" in kwargs:
+        kwargs["target_uv"] = tuple(float(v) for v in kwargs["target_uv"])
+    return TopDownCubeServo(
+        _SettledImages(source, float(servo_cfg.get("settle_s", 0.3))),
+        TopDownServoParams(**kwargs),
+        None if log_dir is None else log_dir / "wrist_servo",
+    )
+
+
+class _SettledImages:
+    """Wait `settle_s` after a move before taking the wrist image, so the frame shows
+    where the arm stopped, not where it was moving."""
+
+    def __init__(self, source: ImageSource, settle_s: float) -> None:
+        self._source = source
+        self._settle_s = settle_s
+
+    def get_image(self) -> Any:
+        """The newest frame after the settle delay."""
+        if self._settle_s > 0:
+            time.sleep(self._settle_s)
+        return self._source.get_image()
 
 
 def _fake_reading(value: float, _reading: float) -> float:
@@ -734,14 +1195,19 @@ def _fake_reading(value: float, _reading: float) -> float:
     return value
 
 
-def _set_gripper(arm: ArmInterface, position: float, td: Any) -> None:
-    """Command the gripper and wait until it stops moving."""
-    arm.execute_action(arm.get_arm_state(), position)
+def _set_gripper(
+    arm: ArmInterface, position: float, td: Any, hold: list[float] | None = None
+) -> None:
+    """Command the gripper and wait until it stops moving, holding the arm at `hold`
+    (the last command: re-sending the measured joints would let a sagging arm sag
+    further) or, without it, where it is."""
+    target = list(hold) if hold is not None else arm.get_arm_state()
+    arm.execute_action(target, position)
     deadline = time.monotonic() + float(td.get("gripper_timeout_s", 4.0))
     last = arm.get_gripper_state()
     while time.monotonic() < deadline:
         time.sleep(0.15)
-        arm.execute_action(arm.get_arm_state(), position)
+        arm.execute_action(target, position)
         now = arm.get_gripper_state()
         if abs(now - last) < 0.005:
             return
@@ -823,12 +1289,12 @@ class _CeilingRecorder:
 
 
 class _WristRecorder:
-    """Records the Kinova wrist camera during each pick attempt (real mode only)."""
+    """Records the wrist camera during each pick attempt (when it has a source)."""
 
-    def __init__(self, enabled: bool, log_dir: Path | None) -> None:
-        self._enabled = enabled and log_dir is not None
+    def __init__(self, source: ImageSource | None, log_dir: Path | None) -> None:
+        self._enabled = source is not None and log_dir is not None
         self._log_dir = log_dir
-        self._source: Any = None
+        self._source = source
         self._thread: Any = None
         self._frames: list[Any] = []
         self._name = ""
@@ -840,15 +1306,10 @@ class _WristRecorder:
             return
         import threading  # pylint: disable=import-outside-toplevel
 
-        from prpl_tidybot.visual_servo.image_sources import (  # pylint: disable=import-outside-toplevel
-            KinovaWristCameraSource,
-        )
-
-        if self._source is None:
-            self._source = KinovaWristCameraSource()
         self._frames, self._name, self._running = [], name, True
 
         def grab() -> None:
+            assert self._source is not None
             while self._running:
                 img = self._source.get_image()
                 if img is not None:
@@ -872,7 +1333,5 @@ class _WristRecorder:
             write_mp4(self._frames, self._log_dir / f"{self._name}_wrist.mp4", fps=10)
 
     def close(self) -> None:
-        """Release the camera."""
+        """Stop any clip in progress (the source is closed by its owner)."""
         self.stop()
-        if self._source is not None:
-            self._source.close()

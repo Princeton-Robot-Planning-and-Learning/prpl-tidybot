@@ -1,6 +1,7 @@
 """Tests for the ceiling-camera cube localizer (no markers: colour + 3D silhouette
 fit)."""
 
+import json
 import math
 
 import cv2 as cv
@@ -11,6 +12,7 @@ from prpl_tidybot.cube_localizer import (
     CeilingCubeTargetSource,
     cube_silhouette,
     find_cube_candidates,
+    fit_cube_pose,
     in_calibrated_region,
     load_ceiling_cameras,
     localize_cube,
@@ -122,6 +124,20 @@ def test_inconsistent_cameras_pick_one_view_instead_of_blending(cameras):
     assert fit.camera_disagreement_m == pytest.approx(0.0269, abs=0.006)
 
 
+def test_a_cube_one_camera_sees_well_passes_the_screen(cameras):
+    """The quick screen keeps the better camera's fit rather than averaging both: on
+    the robot (run 17) the top camera fit the cube at 0.84 and the bottom one at 0.52,
+    the average 0.54 fell under the threshold, and the cube was never found."""
+    top_pose, bottom_pose = (-0.184, 0.10, 0.1), (-0.15, 0.065, 0.5)
+    frames = [
+        _render_inconsistent(cameras, top_pose, bottom_pose, seed=s) for s in range(3)
+    ]
+    assert fit_cube_pose(frames, cameras, top_pose[:2], SIDE).iou < 0.6
+    fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE)
+    assert fit is not None
+    assert fit.iou > 0.8
+
+
 def test_prefers_the_camera_whose_calibrated_region_holds_the_cube(cameras):
     """Outside a camera's calibrated region its extrinsics are least trustworthy, so
     when only one camera's calibrated region contains the cube that camera wins, even
@@ -136,6 +152,29 @@ def test_prefers_the_camera_whose_calibrated_region_holds_the_cube(cameras):
     fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE, serials=SERIALS)
     assert fit is not None
     assert fit.camera == inside.index(True)
+
+
+def test_a_calibrated_camera_that_fits_badly_does_not_veto_a_good_one(cameras):
+    """The calibrated-region preference applies among fits that pass the threshold:
+    in run 17 the calibrated camera fit the cube at 0.53 and the other at 0.84, the
+    calibrated one was chosen, failed the threshold, and no cube was reported."""
+    pose = (-0.18, 0.105, 0.0)
+    inside = [
+        in_calibrated_region(c, i, pose[0], pose[1], SERIALS)
+        for i, c in enumerate(cameras)
+    ]
+    good = inside.index(False)
+    frames = []
+    for s in range(3):
+        frame = _render(cameras, [], seed=s)
+        for i, cam in enumerate(cameras):
+            side = SIDE if i == good else SIDE * 0.6  # a poor view of the cube
+            poly = cube_silhouette(cam, *pose, side).astype(np.int32)
+            cv.fillConvexPoly(frame[i * H : (i + 1) * H], poly, CUBE_BGR)
+        frames.append(frame)
+    fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE, serials=SERIALS)
+    assert fit is not None
+    assert fit.camera == good
 
 
 def test_consistent_cameras_agree(cameras):
@@ -184,6 +223,58 @@ def test_candidates_are_found_near_the_cube(cameras):
     frame = _render(cameras, [(0.3, 0.9, 0.2)])
     cands = find_cube_candidates(frame, cameras, FLOOR_BOUNDS, side=SIDE)
     assert any(math.hypot(x - 0.3, y - 0.9) < 0.04 for x, y in cands)
+
+
+def _with_clutter(frame):
+    """Cube-coloured clutter seen on the robot: a slab of shelf, a thin strip of tape,
+    and specks; none is the size and shape a cube would make at its spot."""
+    out = frame.copy()
+    cv.rectangle(out, (900, 150), (1000, 165), CUBE_BGR, -1)  # strip, 100x15
+    cv.rectangle(out, (200, 900), (260, 960), CUBE_BGR, -1)  # slab, 4x a cube
+    for u, v in [(400, 300), (420, 310), (1100, 1200)]:
+        cv.circle(out, (u, v), 3, CUBE_BGR, -1)  # specks
+    return out
+
+
+def test_only_cube_sized_cube_shaped_blobs_are_candidates(cameras):
+    """Each candidate costs a full pose fit, so clutter that cannot be the cube (wrong
+    size for where it lies on the floor, or a thin strip) is not one."""
+    pose = (0.3, 0.9, 0.2)
+    frame = _with_clutter(_render(cameras, [pose]))
+    cands = find_cube_candidates(frame, cameras, (-1.85, 2.05, -1.85, 1.85), side=SIDE)
+    assert cands
+    assert all(math.hypot(x - pose[0], y - pose[1]) < 0.04 for x, y in cands)
+
+
+def test_blobs_cut_by_the_outer_image_border_are_not_candidates(cameras):
+    """The vignetted image border passes the colour test in cube-sized pieces (seen on
+    the robot 2026-10-15: a 'cube' at (-1.86, +1.43) with IoU 0.93). A cube there is
+    only partly in view of every camera, so it is not a candidate."""
+    frame = _render(cameras, [])
+    cv.rectangle(frame, (0, 200), (12, 230), CUBE_BGR, -1)
+    cands = find_cube_candidates(frame, cameras, (-3.0, 3.0, -3.0, 3.0), side=SIDE)
+    assert not cands
+
+
+def test_a_decoy_that_wins_the_quick_screen_does_not_hide_the_cube(cameras):
+    """A blob that looks perfect in the last few frames but is gone from the rest (a
+    flicker) wins the quick screen and then fails the full refit; the localizer moves
+    on to the next candidate instead of giving up (run 16, 2026-10-15)."""
+    cube = (0.3, 0.9, 0.2)
+    decoy = (-0.9, -0.6, 0.0)
+    frames = [_render(cameras, [], seed=s) for s in range(20)]
+    for k, frame in enumerate(frames):
+        for i, cam in enumerate(cameras):
+            half = frame[i * H : (i + 1) * H]
+            # the real cube reads smaller than a perfect silhouette, as on the robot
+            poly = cube_silhouette(cam, *cube, SIDE * 0.8).astype(np.int32)
+            cv.fillConvexPoly(half, poly, CUBE_BGR, lineType=cv.LINE_AA)
+            if k >= 17:  # the decoy is only in the last three frames
+                poly = cube_silhouette(cam, *decoy, SIDE).astype(np.int32)
+                cv.fillConvexPoly(half, poly, CUBE_BGR)
+    fit = localize_cube(frames, cameras, FLOOR_BOUNDS, side=SIDE)
+    assert fit is not None
+    assert math.hypot(fit.x - cube[0], fit.y - cube[1]) < 0.02
 
 
 class _FakeImages:
@@ -245,3 +336,84 @@ def test_target_source_raises_when_no_cube_is_visible(cameras):
     )
     with pytest.raises(RuntimeError, match="no cube"):
         source.get_target()
+
+
+def test_a_failed_localization_saves_its_frames_and_inputs(cameras, tmp_path):
+    """When no cube is found, every attempt (the first and its one retry) leaves the
+    exact frames it fitted and the inputs it used, so the miss can be replayed."""
+    frames = [_render(cameras, [], seed=s) for s in range(2)]
+    source = CeilingCubeTargetSource(
+        serials=SERIALS,
+        image_client=_FakeImages(frames),
+        marker_client=_FakeMarkers((0.49, -0.49, math.pi)),
+        num_frames=2,
+        frame_period_s=0.0,
+        failure_dir=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match="no cube"):
+        source.get_target()
+    attempts = sorted(p for p in tmp_path.iterdir() if p.is_dir())
+    assert len(attempts) == 2
+    for attempt in attempts:
+        saved = sorted(attempt.glob("frame_*.png"))
+        assert len(saved) == 2
+        assert np.array_equal(cv.imread(str(saved[0])), frames[0])
+        info = json.loads((attempt / "localization.json").read_text())
+        assert info["exclusions"] == [[0.49, -0.49, 0.45]]
+        assert info["floor_bounds"] == list(FLOOR_BOUNDS)
+        assert info["min_iou"] == pytest.approx(0.6)
+        assert "candidates" in info
+
+
+def test_a_failed_localization_is_retried_once(cameras, tmp_path):
+    """A miss is retried once with fresh frames before the source gives up."""
+    pose = (-0.5, 0.8, 0.1)
+    empty = [_render(cameras, [], seed=s) for s in range(2)]
+    cube = [_render(cameras, [pose], seed=s) for s in range(2)]
+    source = CeilingCubeTargetSource(
+        serials=SERIALS,
+        image_client=_FakeImages(empty + cube),
+        marker_client=_FakeMarkers((0.49, -0.49, math.pi)),
+        num_frames=2,
+        frame_period_s=0.0,
+        failure_dir=tmp_path,
+    )
+    x, y, _ = source.get_target()
+    assert math.hypot(x - pose[0], y - pose[1]) < 0.006
+    assert len([p for p in tmp_path.iterdir() if p.is_dir()]) == 1
+
+
+def test_the_other_cameras_estimate_is_offered_as_a_fallback(cameras):
+    """When the cameras disagree on the cube, the less confident camera's estimate is
+    kept as a fallback target for a missed grasp; when they agree there is none."""
+    top_pose, bottom_pose = (-0.184, 0.10, 0.1), (-0.15, 0.065, 0.1)
+    source = CeilingCubeTargetSource(
+        serials=SERIALS,
+        image_client=_FakeImages(
+            [
+                _render_inconsistent(cameras, top_pose, bottom_pose, seed=s)
+                for s in range(2)
+            ]
+        ),
+        marker_client=_FakeMarkers((0.49, -0.49, math.pi)),
+        num_frames=2,
+        frame_period_s=0.0,
+    )
+    x, y, _ = source.get_target()
+    ((ax, ay, _),) = source.alternates()
+    _, other = sorted(
+        (top_pose, bottom_pose), key=lambda p: math.hypot(x - p[0], y - p[1])
+    )
+    assert math.hypot(ax - other[0], ay - other[1]) < 0.01
+
+    agree = CeilingCubeTargetSource(
+        serials=SERIALS,
+        image_client=_FakeImages(
+            [_render(cameras, [top_pose], seed=s) for s in range(2)]
+        ),
+        marker_client=_FakeMarkers((0.49, -0.49, math.pi)),
+        num_frames=2,
+        frame_period_s=0.0,
+    )
+    agree.get_target()
+    assert not agree.alternates()

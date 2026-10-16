@@ -22,6 +22,7 @@ import math
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import cv2 as cv
@@ -46,6 +47,11 @@ _AREA_RANGE = (24, 1600)
 # Search window around a candidate (px) and the stitch-line rows to ignore.
 _WINDOW = 50
 _SEAM_PX = 8
+# A candidate blob's area relative to a cube's silhouette at its spot, and its longest
+# over shortest side: the cube measured 1.07-1.27x and square on the robot; shelf
+# edges, tape and specks were 0.05-0.4x or 2.5x, or strips.
+_AREA_RATIO = (0.45, 2.0)
+_MAX_ELONGATION = 2.0
 
 
 @dataclass(frozen=True)
@@ -161,6 +167,51 @@ def _excluded(xy: NDArray[np.float64], exclude: Sequence[Sequence[float]]) -> bo
     )
 
 
+def _cube_like(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    blob: NDArray[np.bool_],
+    stat: NDArray[np.int32],
+    camera: CeilingCamera,
+    xy: NDArray[np.float64],
+    side: float,
+    index: int,
+    rows: int,
+    num_cameras: int,
+) -> bool:
+    """Whether a blob is the size and shape a cube makes at its spot on the floor.
+
+    Each candidate costs a full pose fit, and the clutter in the lab (shelf edges,
+    tape, specks) is never cube-sized and square-ish there. A blob cut by the stitch
+    line is only held to the upper size bound, since part of the cube is hidden; one
+    cut by the outer image border is rejected (the vignetted border passes the colour
+    test in cube-sized pieces, and no camera sees a cube there whole)."""
+    expected = [
+        cv.contourArea(
+            cube_silhouette(camera, xy[0], xy[1], yaw, side).astype(np.float32)
+        )
+        for yaw in (0.0, math.pi / 4)
+    ]
+    area = float(stat[cv.CC_STAT_AREA])
+    if area > _AREA_RATIO[1] * max(expected):
+        return False
+    x, y, w, h = (
+        int(stat[c])
+        for c in (cv.CC_STAT_LEFT, cv.CC_STAT_TOP, cv.CC_STAT_WIDTH, cv.CC_STAT_HEIGHT)
+    )
+    if x <= 0 or x + w >= blob.shape[1] or y <= 0 or y + h >= blob.shape[0]:
+        return False  # cut by the outer border: no camera sees the whole cube
+    top, bottom = index * rows, (index + 1) * rows
+    seam_cut = (index > 0 and y <= top + _SEAM_PX) or (
+        index < num_cameras - 1 and y + h >= bottom - _SEAM_PX
+    )
+    if seam_cut:
+        return True
+    if area < _AREA_RATIO[0] * min(expected):
+        return False
+    points = cv.findNonZero(blob[y : y + h, x : x + w].astype(np.uint8))
+    (_, _), (rw, rh), _ = cv.minAreaRect(points)
+    return max(rw, rh) <= _MAX_ELONGATION * max(min(rw, rh), 1.0)
+
+
 def find_cube_candidates(
     frame: NDArray[np.uint8],
     cameras: Sequence[CeilingCamera],
@@ -173,7 +224,7 @@ def find_cube_candidates(
     mask = cube_mask(frame)
     for i in range(1, len(cameras)):
         mask[i * rows - _SEAM_PX : i * rows + _SEAM_PX, :] = 0
-    num, _, stats, centroids = cv.connectedComponentsWithStats(mask)
+    num, labels, stats, centroids = cv.connectedComponentsWithStats(mask)
     candidates: list[tuple[float, float]] = []
     for k in range(1, num):
         if not _AREA_RANGE[0] <= stats[k, cv.CC_STAT_AREA] <= _AREA_RANGE[1]:
@@ -182,6 +233,10 @@ def find_cube_candidates(
         i = min(int(v // rows), len(cameras) - 1)
         xy = cameras[i].to_floor(u, v - i * rows, z=side / 2)
         if not _in_bounds(xy, floor_bounds) or _excluded(xy, exclude):
+            continue
+        if not _cube_like(
+            labels == k, stats[k], cameras[i], xy, side, i, rows, len(cameras)
+        ):
             continue
         if all(math.hypot(xy[0] - cx, xy[1] - cy) > 2 * side for cx, cy in candidates):
             candidates.append((float(xy[0]), float(xy[1])))
@@ -271,22 +326,53 @@ def localize_cube(
     min_iou: float = 0.6,
     fusion: str = "best_view",
     serials: Sequence[str] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> CubeFit | None:
     """The best-fitting cube in the drivable area, or None if nothing fits well
     enough.
 
     ``fusion="best_view"`` (default) fits each camera on its own and keeps the best;
     ``"fused"`` scores every camera that sees the cube together, which is only right
-    when their calibrations agree.
+    when their calibrations agree. ``diagnostics``, when given, is filled with every
+    candidate and its quick-screen fit.
     """
-    best: CubeFit | None = None
+    screened: list[dict[str, Any]] = []
+    if diagnostics is not None:
+        diagnostics["candidates"] = screened
+    passed: list[CubeFit] = []
     for guess in find_cube_candidates(frames[-1], cameras, floor_bounds, side, exclude):
-        fit = fit_cube_pose(frames[-3:], cameras, guess, side)  # quick screen
-        if fit is not None and (best is None or fit.iou > best.iou):
-            best = fit
-    if best is None or best.iou < min_iou:
-        return None
-    guess = (best.x, best.y)
+        # Quick screen on the last frames, each camera on its own: in the overlap the
+        # cameras' calibrations disagree by ~3 cm, so a fused score can fail a cube one
+        # camera sees perfectly well.
+        fits = [
+            fit_cube_pose(frames[-3:], cameras, guess, side, only=[i])
+            for i in range(len(cameras))
+        ]
+        fit = max((f for f in fits if f is not None), key=lambda f: f.iou, default=None)
+        screened.append({"guess": list(guess), "iou": None if fit is None else fit.iou})
+        if fit is not None and fit.iou >= min_iou:
+            passed.append(fit)
+    # Best screen first, but a winner that fails the full refit (a flicker present
+    # only in the last frames) must not hide the cube behind it.
+    for screen in sorted(passed, key=lambda f: -f.iou):
+        fit = _refine(
+            frames, cameras, (screen.x, screen.y), side, min_iou, fusion, serials
+        )
+        if fit is not None and _in_bounds(np.array([fit.x, fit.y]), floor_bounds):
+            return fit
+    return None
+
+
+def _refine(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    frames: Sequence[NDArray[np.uint8]],
+    cameras: Sequence[CeilingCamera],
+    guess: tuple[float, float],
+    side: float,
+    min_iou: float,
+    fusion: str,
+    serials: Sequence[str] | None,
+) -> CubeFit | None:
+    """The full fit over every frame around a screened guess, or None if it fails."""
     singles = []
     for i in range(len(cameras)):
         fit = fit_cube_pose(frames, cameras, guess, side, only=[i])
@@ -309,14 +395,18 @@ def localize_cube(
         # Prefer cameras whose calibrated region contains the cube (their extrinsics
         # were fitted there); among those, the best fit, a near tie going to the
         # camera that sees the cube more directly from above.
-        pool = singles
+        # Only cameras that see the cube well enough compete: a calibrated camera
+        # with a poor view must not veto a good one.
+        pool = [(i, f) for i, f in singles if f.iou >= min_iou]
+        if not pool:
+            return None
         if serials is not None:
             calibrated = [
                 (i, f)
-                for i, f in singles
+                for i, f in pool
                 if in_calibrated_region(cameras[i], i, f.x, f.y, serials)
             ]
-            pool = calibrated or singles
+            pool = calibrated or pool
         top_iou = max(f.iou for _, f in pool)
         near = [(i, f) for i, f in pool if f.iou >= top_iou - 0.03]
         cam_i, chosen = min(
@@ -366,6 +456,8 @@ class CeilingCubeTargetSource(TargetSource):
         host: str | None = None,
         fusion: str = "best_view",
         warn_disagreement_m: float = 0.01,
+        failure_dir: str | Path | None = None,
+        retries: int = 1,
     ) -> None:
         if image_client is None:
             from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
@@ -393,6 +485,8 @@ class CeilingCubeTargetSource(TargetSource):
         self._min_iou = float(min_iou)
         self._fusion = fusion
         self._warn_m = float(warn_disagreement_m)
+        self._failure_dir = None if failure_dir is None else Path(failure_dir)
+        self._retries = int(retries)
         self.last_fit: CubeFit | None = None
 
     def _frames(self) -> list[NDArray[np.uint8]]:
@@ -413,17 +507,28 @@ class CeilingCubeTargetSource(TargetSource):
         return [(float(p[0]), float(p[1]), self._robot_half) for p in poses.values()]
 
     def localize(self) -> CubeFit:
-        """Run the localizer now and return the fit (raises if there is no cube)."""
-        fit = localize_cube(
-            self._frames(),
-            self._cameras,
-            self._floor_bounds,
-            self._side,
-            exclude=self._exclusions(),
-            min_iou=self._min_iou,
-            fusion=self._fusion,
-            serials=self._serials,
-        )
+        """Run the localizer now and return the fit (raises if there is no cube).
+
+        A miss is retried with fresh frames; each miss saves its frames and inputs
+        under ``failure_dir`` so it can be replayed."""
+        fit = None
+        for _ in range(1 + self._retries):
+            frames, exclude = self._frames(), self._exclusions()
+            diagnostics: dict[str, Any] = {}
+            fit = localize_cube(
+                frames,
+                self._cameras,
+                self._floor_bounds,
+                self._side,
+                exclude=exclude,
+                min_iou=self._min_iou,
+                fusion=self._fusion,
+                serials=self._serials,
+                diagnostics=diagnostics,
+            )
+            if fit is not None:
+                break
+            self._save_failure(frames, exclude, diagnostics)
         if fit is None:
             raise RuntimeError(
                 "CeilingCubeTargetSource: no cube found in the drivable area "
@@ -441,6 +546,32 @@ class CeilingCubeTargetSource(TargetSource):
         self.last_fit = fit
         return fit
 
+    def _save_failure(
+        self,
+        frames: Sequence[NDArray[np.uint8]],
+        exclude: Sequence[Sequence[float]],
+        diagnostics: dict[str, Any],
+    ) -> None:
+        if self._failure_dir is None:
+            return
+        stamp = time.strftime("%H-%M-%S")
+        n = len(list(self._failure_dir.glob("*"))) if self._failure_dir.exists() else 0
+        out = self._failure_dir / f"{n:02d}_{stamp}"
+        out.mkdir(parents=True, exist_ok=True)
+        for i, frame in enumerate(frames):
+            cv.imwrite(str(out / f"frame_{i:02d}.png"), frame)
+        info = {
+            "time": time.time(),
+            "floor_bounds": list(self._floor_bounds),
+            "exclusions": [list(e) for e in exclude],
+            "min_iou": self._min_iou,
+            "side": self._side,
+            "serials": self._serials,
+            **diagnostics,
+        }
+        (out / "localization.json").write_text(json.dumps(info, indent=1))
+        _logger.warning("No cube found; saved the frames and inputs to %s.", out)
+
     def get_target(self) -> tuple[float, float, float]:
         fit = self.localize()
         return (fit.x, fit.y, self._side / 2)
@@ -450,6 +581,22 @@ class CeilingCubeTargetSource(TargetSource):
             self.localize()
         assert self.last_fit is not None
         return self.last_fit.yaw
+
+    def alternates(self) -> list[tuple[float, float, float]]:
+        """The other cameras' estimates of the cube from the last localization, most
+        confident first, where they differ from the chosen one by over 1 cm (the
+        cameras disagree by ~3 cm in their overlap)."""
+        fit = self.last_fit
+        if fit is None:
+            return []
+        others = sorted(
+            (p for p in fit.per_camera if p[0] != fit.camera), key=lambda p: -p[4]
+        )
+        return [
+            (x, y, yaw)
+            for _, x, y, yaw, _ in others
+            if math.hypot(x - fit.x, y - fit.y) > 0.01
+        ]
 
     def close(self) -> None:
         self._images.close()
