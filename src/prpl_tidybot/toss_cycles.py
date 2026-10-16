@@ -57,6 +57,7 @@ from prpl_tidybot.top_down_pick import (
     standoff_pose,
     top_down_joint_targets,
 )
+from prpl_tidybot.toss_sim import TossSim
 from prpl_tidybot.visual_servo.image_sources import ImageSource, KinovaWristCameraSource
 from prpl_tidybot.visual_servo.top_down_cube import (
     TopDownCubeServo,
@@ -169,11 +170,13 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
     """Run ``cfg.cycles`` pick/drive/toss/retract cycles (conf/toss_cycles.yaml).
 
     ``wrist_camera`` builds the wrist image source from the arm; by default the
-    Kinova wrist camera in real mode and none otherwise (no servo)."""
-    if cfg.mode == "sim":
-        raise ValueError(
-            "toss_cycles needs a toss, which the kinematic sim does not have."
-        )
+    Kinova wrist camera in real mode and none otherwise (no servo).
+
+    mode=sim runs the same commands on the kinematic TidyBot of
+    :mod:`prpl_tidybot.sim_robot` (``cfg.sim``) and films it into ``sim.mp4``; its
+    prompts are answered by a scripted operator unless ``interactive=true``."""
+    if cfg.mode == "sim" and cfg.pick.method != "top_down":
+        raise ValueError("toss_cycles mode=sim simulates the top-down pick only.")
     interactive = (
         cfg.mode == "real" if cfg.get("interactive") is None else bool(cfg.interactive)
     )
@@ -182,9 +185,15 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
     toss_pose = [float(v) for v in cfg.toss_pose]
 
     kinder.register_all_environments()
-    pipeline = cfg.env.pipelines[cfg.mode]
-    real_env = hydra.utils.instantiate(pipeline.real_env, _convert_="all")
-    perceiver = hydra.utils.instantiate(pipeline.perceiver, _convert_="all")
+    sim: TossSim | None = None
+    if cfg.mode == "sim":
+        sim = TossSim(cfg, resolved_log_dir, prompt_fn, interactive)
+        prompt_fn = sim.operator
+        real_env, perceiver = sim.real_env, sim.perceiver
+    else:
+        pipeline = cfg.env.pipelines[cfg.mode]
+        real_env = hydra.utils.instantiate(pipeline.real_env, _convert_="all")
+        perceiver = hydra.utils.instantiate(pipeline.perceiver, _convert_="all")
     # Only the kinder pick plans; its env models are large and never freed, so a
     # top-down run does not build them.
     plan_executor: Any = None
@@ -202,11 +211,16 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
         )
     arm: ArmInterface = real_env.interface.arm_interface
     geom = geometry_from_config(cfg.pick.get("top_down"))
-    cube_source = hydra.utils.instantiate(
-        pipeline.perceiver.target_source,
-        _convert_="all",
-        **_cube_source_kwargs(cfg, pipeline.perceiver.target_source, resolved_log_dir),
-    )
+    if sim is not None:
+        cube_source: Any = sim.cube_source
+    else:
+        cube_source = hydra.utils.instantiate(
+            pipeline.perceiver.target_source,
+            _convert_="all",
+            **_cube_source_kwargs(
+                cfg, pipeline.perceiver.target_source, resolved_log_dir
+            ),
+        )
     source: ImageSource | None = None
     if wrist_camera is not None:
         source = wrist_camera(arm)
@@ -217,7 +231,9 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
         resolved_log_dir,
     )
     servo = _build_servo(cfg, source, resolved_log_dir)
-    ceiling = _CeilingRecorder(cfg, resolved_log_dir)
+    ceiling: Any = (
+        sim.recorder if sim is not None else _CeilingRecorder(cfg, resolved_log_dir)
+    )
 
     once = str(cfg.get("confirm", "once")) == "once"
     confirmed = {"done": False}
@@ -313,7 +329,9 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
             confirm(f"Cycle {cycle}: retract the arm after the toss?")
             _retract(cfg, arm)
             settle = float(cfg.get("settle_after_toss_s", 5.0))
-            if settle > 0:
+            if settle > 0 and sim is not None:
+                sim.world.idle(settle)
+            elif settle > 0:
                 _logger.info("Waiting %.1f s for the cube to settle.", settle)
                 time.sleep(settle)
         else:
@@ -462,6 +480,7 @@ def _cube_source_kwargs(
 def _retract(cfg: DictConfig, arm: ArmInterface) -> None:
     """Fold the arm to its retract pose under the compliant loop: it needs no
     precision, and only the grasp itself runs under the stiff onboard controller."""
+    arm.note_step("retract")
     _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
 
 
@@ -792,6 +811,7 @@ class _AngularMover(_Mover):
             self.arm.resume()
 
     def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
+        self.arm.note_step(name)
         try:
             measured = self.arm.move_angular(goal)
         except ArmMotionAborted:
@@ -801,6 +821,7 @@ class _AngularMover(_Mover):
         return bool(self._record(name, goal, list(measured))["reached"])
 
     def gripper(self, position: float) -> float:
+        self.arm.note_step(f"gripper to {position:.2f}")
         try:
             return self.arm.set_gripper_angular(
                 position, float(self.td.get("gripper_timeout_s", 4.0))
@@ -839,6 +860,7 @@ class _CompliantMover(_Mover):
         self.grip = arm.get_gripper_state()
 
     def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
+        self.arm.note_step(name)
         goal_pos, approach, closing = forward_kinematics(goal, self.geom)
         if correct and approach[2] < -0.99:
             return self._move_down(name, goal, goal_pos, closing)
@@ -948,6 +970,7 @@ class _CompliantMover(_Mover):
         return False
 
     def gripper(self, position: float) -> float:
+        self.arm.note_step(f"gripper to {position:.2f}")
         self.grip = position
         _set_gripper(self.arm, position, self.td, hold=self.command)
         self.grip = self.arm.get_gripper_state()
