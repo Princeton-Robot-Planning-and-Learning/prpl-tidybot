@@ -18,6 +18,7 @@ import functools
 import json
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -465,11 +466,17 @@ def _confirm_pick(  # pylint: disable=too-many-arguments,too-many-positional-arg
 
 
 def _move_arm(
-    arm: ArmInterface, goal: list[float], gripper: float, arm_cfg: DictConfig
+    arm: ArmInterface,
+    goal: list[float],
+    gripper: float,
+    arm_cfg: DictConfig,
+    stop: threading.Event | None = None,
 ) -> bool:
     """Stream ``goal`` until every joint is within tolerance (wrapped) or time runs
-    out; returns whether it got there."""
+    out; returns whether it got there. A set ``stop`` ends the move at once
+    (``ArmMotionAborted``), the arm held where it is."""
     for _ in range(int(arm_cfg.max_ticks)):
+        _check_stop(stop, arm)
         arm.execute_action(goal, gripper)
         err = np.array(arm.get_arm_state()) - np.array(goal)
         if np.all(
@@ -500,14 +507,29 @@ def _cube_source_kwargs(
     return kwargs
 
 
-def _retract(cfg: DictConfig, arm: ArmInterface) -> None:
+def _retract(
+    cfg: DictConfig, arm: ArmInterface, stop: threading.Event | None = None
+) -> None:
     """Fold the arm to its retract pose under the compliant loop: it needs no
     precision, and only the grasp itself runs under the stiff onboard controller."""
-    _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home)
+    _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home, stop)
+
+
+def _check_stop(stop: threading.Event | None, arm: ArmInterface | None = None) -> None:
+    """Raise ``ArmMotionAborted`` once ``stop`` is set (the skill server's stop()),
+    holding the arm where it is first."""
+    if stop is None or not stop.is_set():
+        return
+    if arm is not None:
+        arm.execute_action(list(arm.get_arm_state()), arm.get_gripper_state())
+    raise ArmMotionAborted("stopped")
 
 
 def _drive_to(
-    real_env: Any, pose: list[float], workspace: Workspace | None = None
+    real_env: Any,
+    pose: list[float],
+    workspace: Workspace | None = None,
+    stop: threading.Event | None = None,
 ) -> tuple[float, float, float]:
     """Drive the base to the map-frame pose with the kinematic3d executor (as
     hardware_tests/test_base_map_target.py does); returns the reached pose.
@@ -515,7 +537,8 @@ def _drive_to(
     Uses a robot-only perceiver: driving needs no cube, and must still work when the
     cube cannot be found (the reset after a failed localization). With a
     ``workspace`` the straight drive is checked first (drivable box, barrier) and a
-    drive that would leave it raises ``ValueError`` before the base moves.
+    drive that would leave it raises ``ValueError`` before the base moves. A set
+    ``stop`` ends the drive (``ArmMotionAborted``) without another command.
     """
     perceiver = PrplLab3DPerceiver()
     obs, info = real_env.reset()
@@ -541,6 +564,7 @@ def _drive_to(
     executor = Kinematic3DPlanExecutor()
     executor.set_trajectory([(state, delta)])
     for _ in range(_MAX_DRIVE_TICKS):
+        _check_stop(stop)
         if executor.done(state):
             break
         real_action, _ = executor.step(state)
@@ -721,6 +745,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
     servo: TopDownCubeServo | None = None,
     ask_to_move: PromptFn | None = None,
     workspace: Workspace | None = None,
+    stop: threading.Event | None = None,
 ) -> str | None:
     """Jimmy Wu's top-down pick (prpl_tidybot.top_down_pick) on the localized cube.
 
@@ -769,7 +794,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
             f"{geom.standoff:.2f} m from the cube at ({cube['x']:+.3f}, "
             f"{cube['y']:+.3f})?"
         )
-        base = _drive_to(real_env, list(stand), workspace)
+        base = _drive_to(real_env, list(stand), workspace, stop)
         try:
             cube = _localize(cube_source)  # corrects for where the base parked
         except RuntimeError as e:
@@ -801,6 +826,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 servo,
                 attempts,
                 f"{attempt}" + (f"_{k + 1}" if k else ""),
+                stop,
             )
             if failure is not None:
                 return failure
@@ -809,7 +835,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 return None
         wrist.stop()
         if ask_to_move is not None and record.get("cube_moved_by_person", 0) < asks:
-            _retract(cfg, arm)
+            _retract(cfg, arm, stop)
             if not _asked_to_move(
                 ask_to_move,
                 asks,
@@ -825,8 +851,8 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 f"Cycle {cycle}: Missed. Retract the arm and drive back to the toss "
                 "pose to re-localize the cube?"
             )
-            _retract(cfg, arm)
-            _drive_to(real_env, list(toss_pose), workspace)
+            _retract(cfg, arm, stop)
+            _drive_to(real_env, list(toss_pose), workspace, stop)
     return (
         f"pick failed after {attempts} attempts (gripper never closed on the cube); "
         "move the cube and rerun"
@@ -844,6 +870,9 @@ class _Mover:
     One controller is used for a whole run; nothing switches mid-episode."""
 
     name = ""
+    # Set by the skill server: once set, the next move or gripper command raises
+    # ArmMotionAborted instead of moving.
+    stop: threading.Event | None = None
 
     def __init__(
         self,
@@ -856,6 +885,11 @@ class _Mover:
         self.td = td
         self.geom = geom
         self.moves = moves
+
+    def check_stop(self) -> None:
+        """Raise ``ArmMotionAborted`` if ``stop`` is set (nothing more is commanded)."""
+        if self.stop is not None and self.stop.is_set():
+            raise ArmMotionAborted("stopped")
 
     def joints(self) -> list[float]:
         """Where the arm is now (IK seeds, the servo's jump check and position)."""
@@ -931,6 +965,7 @@ class _AngularMover(_Mover):
 
     def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
         try:
+            self.check_stop()
             measured = self.arm.move_angular(goal)
         except ArmMotionAborted:
             self._aborted = True
@@ -940,6 +975,7 @@ class _AngularMover(_Mover):
 
     def gripper(self, position: float) -> float:
         try:
+            self.check_stop()
             return self.arm.set_gripper_angular(
                 position, float(self.td.get("gripper_timeout_s", 4.0))
             )
@@ -977,6 +1013,7 @@ class _CompliantMover(_Mover):
         self.grip = arm.get_gripper_state()
 
     def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
+        self.check_stop()
         goal_pos, approach, closing = forward_kinematics(goal, self.geom)
         if correct and approach[2] < -0.99:
             return self._move_down(name, goal, goal_pos, closing)
@@ -1086,6 +1123,7 @@ class _CompliantMover(_Mover):
         return False
 
     def gripper(self, position: float) -> float:
+        self.check_stop()
         self.grip = position
         _set_gripper(self.arm, position, self.td, hold=self.command)
         self.grip = self.arm.get_gripper_state()
@@ -1107,6 +1145,7 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     servo: Any,
     attempts: int,
     clip: str,
+    stop: threading.Event | None = None,
 ) -> tuple[bool, str | None]:
     """One grasp from where the base parked at `cube`: (held, stop reason or None).
     The wrist clip is left recording when the cube is held."""
@@ -1142,6 +1181,7 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         if td.get("arm_controller", "compliant") == "angular"
         else _CompliantMover(arm, td, geom, moves, cfg.arm_home)
     )
+    mover.stop = stop
     held, reading, note, servo_log = _grasp(
         mover,
         geom,
@@ -1363,7 +1403,6 @@ class _CeilingRecorder:
         self._running = False
         if log_dir is None or video_cfg is None or not video_cfg.enabled:
             return
-        import threading  # pylint: disable=import-outside-toplevel
 
         from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
             CeilingImageClient,
@@ -1442,7 +1481,6 @@ class _WristRecorder:
         """Begin recording a clip called `name`."""
         if not self._enabled:
             return
-        import threading  # pylint: disable=import-outside-toplevel
 
         self._frames, self._name, self._running = [], name, True
 
