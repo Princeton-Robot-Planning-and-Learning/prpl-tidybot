@@ -411,6 +411,7 @@ def _toss(
     try:
         if capture is not None:
             capture.start()
+        info["swing_start_time"] = time.time()
         arm.toss(
             heading=float(toss_cfg.heading),
             max_vel=float(toss_cfg.max_vel),

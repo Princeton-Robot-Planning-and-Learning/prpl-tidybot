@@ -635,3 +635,64 @@ def test_the_top_down_pick_builds_no_planner_models(tmp_path, monkeypatch):
     run_toss_cycles(
         _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
     )
+
+
+def test_each_cycle_throws_the_next_setting_of_the_toss_grid(tmp_path, arm_log):
+    """A calibration grid: cycle k throws grid setting k, and each cycle's record
+    carries the setting it threw and when the swing started (to align other video)."""
+    grid = "[[100,500],[120,675],[140,850]]"
+    run_toss_cycles(
+        _compose(cycles=3, **{"+toss.grid": grid}),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    tosses = [kw for kind, kw, *_ in arm_log if kind == "toss"]
+    assert [(t["max_vel"], t["gripper_release_ms"]) for t in tosses] == [
+        (100.0, 500),
+        (120.0, 675),
+        (140.0, 850),
+    ]
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    for cycle, (speed, release) in zip(
+        log["cycles"], [(100, 500), (120, 675), (140, 850)]
+    ):
+        assert cycle["toss"]["max_vel_deg_s"] == pytest.approx(speed)
+        assert cycle["toss"]["gripper_release_ms"] == release
+        assert cycle["toss"]["swing_start_time"] > 0
+
+
+def test_every_toss_can_ask_even_when_the_run_confirms_once(tmp_path):
+    """Untried throws (the grid's corners) are confirmed one by one, while the rest of
+    the run still asks once."""
+    operator = _Operator()
+    run_toss_cycles(
+        _compose(cycles=2, confirm="once", **{"+toss.confirm_each": "true"}),
+        log_dir=tmp_path,
+        prompt_fn=operator,
+    )
+    assert operator.asked("Toss?") == 2
+    assert operator.asked("without asking again") == 1
+
+
+def test_a_cube_that_ends_up_in_the_bin_is_put_back_by_the_person(
+    tmp_path, monkeypatch
+):
+    """The pick's hover is below the bin's rim, so a cube in (or against) the bin is
+    not picked: the person is asked to put it on the floor, and the record says so."""
+    # Cycle 1's pick localizes twice (before and after its drive); the check before
+    # cycle 2's pick finds the thrown cube in the bin.
+    spots = iter([(0.5, 0.3, 0.025), (0.5, 0.3, 0.025), (0.13, 1.68, 0.025)])
+
+    def get_target(_self):
+        return next(spots, (0.5, 0.3, 0.025))
+
+    monkeypatch.setattr(ConstantTargetSource, "get_target", get_target)
+    operator = _Operator()
+    run_toss_cycles(
+        _compose(cycles=2, **{"+bin_stop_box": "[-0.13,0.39,1.45,1.91]"}),
+        log_dir=tmp_path,
+        prompt_fn=operator,
+    )
+    assert operator.asked("in the bin") == 1
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    assert log["cycles"][1]["cube_in_bin"] == {"x": 0.13, "y": 1.68}
