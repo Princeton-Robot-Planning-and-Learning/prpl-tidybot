@@ -118,6 +118,51 @@ pick:
     # Fake mode only: the gripper reading to pretend after closing.
     fake_grasp_reading: 0.49
 
+# The open cardboard bin the cube is tossed into (prpl_tidybot.bin_localizer). It may
+# stand anywhere on the floor; the ceiling cameras find it by its darkness against
+# the local floor and fit this box's silhouette.
+bin:
+  # PLACEHOLDERS estimated from one ceiling frame (2026-10-15): measure with a tape.
+  # Outer footprint (length along the bin's own x / yaw, width across), rim height,
+  # cardboard thickness, metres. The frame's outline fitted a 0.40 m length on the
+  # near side but may run to ~0.45-0.47 m where it met a dark shelf.
+  length: 0.40
+  width: 0.32
+  height: 0.19
+  wall: 0.005
+  # A cube scores only when its centre is inside the walls by this much on every
+  # side: a scoring region strictly inside the bin, as Tossing3D's.
+  in_bin_margin: 0.05
+  # Where to look for the bin's centre: the drivable box plus 0.3 m.
+  search_bounds: [-1.8, 2.0, -1.8, 1.8]
+  # A pixel is bin when darker than this times the local floor. In the real frame
+  # the lit outer wall read ~0.73 of the floor beside it, the inside ~0.3.
+  darkness: 0.85
+  min_iou: 0.7
+  num_frames: 10
+  pipelines:
+    fake:
+      _target_: prpl_tidybot.bin_localizer.ConstantBinSource
+      x: -1.0
+      y: 0.4
+      yaw: 0.0
+      length: ${bin.length}
+      width: ${bin.width}
+      height: ${bin.height}
+      wall: ${bin.wall}
+    real:
+      _target_: prpl_tidybot.bin_localizer.CeilingBinSource
+      serials: ${lab.camera_serials}
+      host: ${lab.marker_detector_host}
+      length: ${bin.length}
+      width: ${bin.width}
+      height: ${bin.height}
+      wall: ${bin.wall}
+      search_bounds: ${bin.search_bounds}
+      darkness: ${bin.darkness}
+      min_iou: ${bin.min_iou}
+      num_frames: ${bin.num_frames}
+
 # Stop after the pick, holding the cube (then the reset prompt).
 skip_toss: false
 
