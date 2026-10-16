@@ -107,3 +107,24 @@ def test_ctrl_c_during_an_onboard_move_stops_the_arm(monkeypatch, call):
         else:
             arm.set_gripper_angular(1.0)
     assert stops == [1]
+
+
+@pytest.mark.parametrize("left_running", [True, False])
+def test_connecting_warns_when_a_previous_client_left_the_torque_loop_running(
+    monkeypatch, caplog, left_running
+):
+    """A loop already running when a client connects means the last client died without
+    close(); say so before reset() takes the loop over."""
+    server_arm = mock.Mock()
+    server_arm.is_cyclic_running.return_value = left_running
+    manager = mock.Mock()
+    manager.Arm.return_value = server_arm
+    monkeypatch.setattr(
+        "prpl_tidybot.interfaces.real_arm_interface.ArmManager",
+        lambda **kwargs: manager,
+    )
+    with caplog.at_level("WARNING"):
+        RealArmInterface(reset_arm=False)
+    server_arm.reset.assert_called_once_with(reset_arm=False)
+    warned = any("already running" in r.getMessage() for r in caplog.records)
+    assert warned == left_running

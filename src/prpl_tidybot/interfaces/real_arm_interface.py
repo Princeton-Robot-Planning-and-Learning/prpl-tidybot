@@ -1,10 +1,14 @@
 """Real arm interface backed by the Kinova arm RPC server."""
 
+import logging
+
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.third_party.arm_server import ArmManager
 from prpl_tidybot.third_party.constants import ARM_RPC_HOST, ARM_RPC_PORT, RPC_AUTHKEY
 from prpl_tidybot.third_party.kinova import stop_arm_motion
 from prpl_tidybot.toss import TOSS_GRIPPER_RELEASE_MS, TOSS_MAX_VEL
+
+_logger = logging.getLogger(__name__)
 
 
 class RealArmInterface(ArmInterface):
@@ -16,6 +20,11 @@ class RealArmInterface(ArmInterface):
         )
         self.manager.connect()
         self.arm = self.manager.Arm()  # type: ignore # pylint: disable=no-member
+        if self.arm.is_cyclic_running():
+            _logger.warning(
+                "The arm server's torque loop is already running: the last client "
+                "exited without close(). Stopping it before this client takes over."
+            )
         self.arm.reset(reset_arm=reset_arm)
 
     def get_arm_state(self) -> list[float]:
