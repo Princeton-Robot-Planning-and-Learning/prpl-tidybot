@@ -97,6 +97,19 @@ def cube_pose(state: ObjectCentricState) -> dict[str, float]:
     }
 
 
+def _asked_to_move(
+    ask_to_move: PromptFn | None, asks: int, record: dict[str, Any], question: str
+) -> bool:
+    """Ask the person to move the cube (once per remaining ask); False when there is
+    nobody to ask, no asks left, or they typed 'stop'."""
+    if ask_to_move is None or record.get("cube_moved_by_person", 0) >= asks:
+        return False
+    if ask_to_move(question).strip().lower() == "stop":
+        return False
+    record["cube_moved_by_person"] = record.get("cube_moved_by_person", 0) + 1
+    return True
+
+
 def _with_grid_setting(cfg: DictConfig, cycle: int) -> DictConfig:
     """The run's config with cycle `cycle`'s toss setting from ``toss.grid``, a list of
     ``[max_vel, gripper_release_ms]`` thrown in turn (a calibration sweep); unchanged
@@ -220,8 +233,8 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
             return
         if once:
             question = (
-                f"Run all {requested} cycle(s) (pick, drive, toss, retract; on a miss "
-                f"retract and return to the toss pose) without asking again? First: "
+                f"Run all {requested} cycle(s) (pick, drive, toss, retract; asking only "
+                f"if the cube must be moved) without asking again? First: "
                 f"{question}"
             )
         answer = prompt_fn(f"\n{question} [y/N]: ")
@@ -595,7 +608,16 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         try:
             cube = _localize(cube_source)
         except RuntimeError as e:
-            return f"{e}; move the cube into the drivable area and rerun"
+            if not _asked_to_move(
+                ask_to_move,
+                asks,
+                record,
+                f"\nCycle {cycle}: I can't find the cube ({e}). Please put it in view "
+                "on the floor, clear of the robot and of the camera overlap strip "
+                "(y -0.15..0.18), then press Enter, or type 'stop' to end the run: ",
+            ):
+                return f"{e}; move the cube into the drivable area and rerun"
+            continue
         record.setdefault("cube_before_pick", cube)
         obs, _ = real_env.reset()
         robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
@@ -650,14 +672,15 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         wrist.stop()
         if ask_to_move is not None and record.get("cube_moved_by_person", 0) < asks:
             _retract(cfg, arm)
-            answer = ask_to_move(
+            if not _asked_to_move(
+                ask_to_move,
+                asks,
+                record,
                 f"\nCycle {cycle}: the pick missed and the arm is retracted. Please "
                 "move the cube (clear of the camera overlap strip, y -0.15..0.18), then "
-                "press Enter, or type 'stop' to end the run: "
-            )
-            if answer.strip().lower() == "stop":
+                "press Enter, or type 'stop' to end the run: ",
+            ):
                 return "pick missed; the operator stopped the run"
-            record["cube_moved_by_person"] = record.get("cube_moved_by_person", 0) + 1
             continue
         if attempt < attempts:
             confirm(
