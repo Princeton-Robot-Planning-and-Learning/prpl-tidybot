@@ -141,6 +141,29 @@ pick:
       travel_limit: 0.08
       align_yaw: true
       settle_s: 0.3
+    # Instead of wrist_servo (enable at most one): the align phase of Tom Silver's
+    # cylinder servo (conf/env/kinematic-cylinder-shelf3d.yaml's visual_servo) on
+    # both tool axes, no probes; the pick's own descent follows. Gain and sign per
+    # tool axis (x, closing y): the 2026-10-14 probes under the onboard controller
+    # measured J = [[2813, 162], [-91, 2960]] and [[3029, 188], [-116, 2873]] px/m,
+    # i.e. image axes along the tool's, unmirrored, ~2920 px/m (a pinhole of
+    # f = 628 px at Z = 0.215 m gives 2927) at this hover height; Tom's 0.0003 m/px
+    # is 0.88 of that, the slight under-correction his comment intends.
+    lateral_servo:
+      enabled: false
+      target_uv: ${..wrist_servo.target_uv}
+      lateral_gain: [0.0003, 0.0003]
+      lateral_sign: [1.0, 1.0]
+      lateral_tolerance_px: 8.0
+      lateral_max_step: 0.01
+      lateral_min_step: 0.006
+      max_area_change_frac: 0.3
+      area_history: 5
+      align_confirm_ticks: 3
+      max_missed_detections: 10
+      max_ticks: 60
+      lateral_travel_limit: 0.08
+      settle_s: 0.3
     # Refuse a servo nudge whose IK jumps an arm joint by more than max_joint_step rad
     # (the wrist may turn up to max_wrist_step to square the fingers).
     max_joint_step: 0.2

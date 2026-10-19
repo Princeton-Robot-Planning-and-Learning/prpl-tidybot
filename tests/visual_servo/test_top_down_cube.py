@@ -386,7 +386,8 @@ def test_lateral_servo_follows_a_configured_sign_per_axis():
 
 
 @pytest.mark.parametrize(
-    "measured", [((2813.1, 162.1), (-90.6, 2959.5)), ((3028.9, 187.6), (-116.2, 2872.7))]
+    "measured",
+    [((2813.1, 162.1), (-90.6, 2959.5)), ((3028.9, 187.6), (-116.2, 2872.7))],
 )
 def test_lateral_servo_converges_on_the_jacobians_measured_on_the_robot(measured):
     """The probe Jacobians of 2026-10-14 (onboard controller) have off-diagonals

@@ -62,7 +62,9 @@ from prpl_tidybot.top_down_pick import (
 from prpl_tidybot.toss_sim import TossSim
 from prpl_tidybot.visual_servo.image_sources import ImageSource, KinovaWristCameraSource
 from prpl_tidybot.visual_servo.top_down_cube import (
+    LateralServoParams,
     TopDownCubeServo,
+    TopDownLateralServo,
     TopDownServoParams,
     TopDownServoResult,
 )
@@ -246,7 +248,10 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
         source if bool(cfg.pick.top_down.get("record_wrist", True)) else None,
         resolved_log_dir,
     )
-    servo = _build_servo(cfg, source, resolved_log_dir)
+    lateral = _build_lateral_servo(cfg, source, resolved_log_dir)
+    servo: TopDownCubeServo | TopDownLateralServo | None = (
+        _build_servo(cfg, source, resolved_log_dir) or lateral
+    )
     ceiling: Any = (
         sim.recorder if sim is not None else _CeilingRecorder(cfg, resolved_log_dir)
     )
@@ -761,7 +766,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
     record: dict[str, Any],
     wrist: "_WristRecorder",
     toss_pose: list[float],
-    servo: TopDownCubeServo | None = None,
+    servo: TopDownCubeServo | TopDownLateralServo | None = None,
     ask_to_move: PromptFn | None = None,
     workspace: Workspace | None = None,
     stop: threading.Event | None = None,
@@ -1214,7 +1219,8 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         f"c{cycle}a{clip}",
     )
     if servo_log is not None:
-        record["pick_attempts"][-1]["servo"] = servo_log
+        key = "lateral_servo" if isinstance(servo, TopDownLateralServo) else "servo"
+        record["pick_attempts"][-1][key] = servo_log
     record["pick_attempts"][-1].update({"gripper": reading, "held": held})
     if note is not None:
         record["pick_attempts"][-1]["note"] = note
@@ -1249,7 +1255,7 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
     geom: TopDownPickGeometry,
     start: tuple[float, float, float],
     read: Any,
-    servo: TopDownCubeServo | None,
+    servo: TopDownCubeServo | TopDownLateralServo | None,
     name: str,
 ) -> tuple[bool, float, str | None, dict[str, Any] | None]:
     """Jimmy Wu's pick_object sequence: open, hover, (align with the wrist camera),
@@ -1275,19 +1281,27 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
                 joints, _ = top_down_joint_targets(x, y, w, geom, seed=here)
                 if not _servo_step_is_small(here, joints, td):
                     return False
-                return mover.move(f"servo_{label}", joints)
+                prefix = (
+                    "lateral" if isinstance(servo, TopDownLateralServo) else "servo"
+                )
+                return mover.move(f"{prefix}_{label}", joints)
 
             def measured_xy() -> tuple[float, float]:
                 pos = forward_kinematics(mover.joints(), geom)[0]
                 return float(pos[0]), float(pos[1])
 
-            result = servo.align(
-                (ax, ay, yaw),
-                move_hover,
-                functools.partial(_tool_axes, geom),
-                name=name,
-                measured_xy=measured_xy,
-            )
+            if isinstance(servo, TopDownLateralServo):
+                result = servo.align(
+                    (ax, ay, yaw), move_hover, functools.partial(_tool_axes, geom), name
+                )
+            else:
+                result = servo.align(
+                    (ax, ay, yaw),
+                    move_hover,
+                    functools.partial(_tool_axes, geom),
+                    name=name,
+                    measured_xy=measured_xy,
+                )
             servo_log = _servo_log(result)
             ax, ay, yaw = result.ax, result.ay, result.yaw
             hover, grasp = top_down_joint_targets(
@@ -1373,6 +1387,34 @@ def _build_servo(
         _SettledImages(source, float(servo_cfg.get("settle_s", 0.3))),
         TopDownServoParams(**kwargs),
         None if log_dir is None else log_dir / "wrist_servo",
+    )
+
+
+def _build_lateral_servo(
+    cfg: DictConfig, source: ImageSource | None, log_dir: Path | None
+) -> TopDownLateralServo | None:
+    """Tom Silver's align loop from ``pick.top_down.lateral_servo``, or None when it
+    is off or there is no wrist camera."""
+    td = cfg.pick.top_down
+    lateral_cfg = td.get("lateral_servo")
+    if lateral_cfg is None or not lateral_cfg.get("enabled", False):
+        return None
+    if td.get("wrist_servo") is not None and td.wrist_servo.get("enabled", False):
+        raise ValueError(
+            "pick.top_down.wrist_servo and pick.top_down.lateral_servo are both "
+            "enabled; enable at most one."
+        )
+    if source is None:
+        return None
+    names = {f.name for f in dataclasses.fields(LateralServoParams)}
+    kwargs = {k: lateral_cfg[k] for k in names if k in lateral_cfg}
+    for key in ("target_uv", "lateral_gain", "lateral_sign"):
+        if key in kwargs:
+            kwargs[key] = tuple(float(v) for v in kwargs[key])
+    return TopDownLateralServo(
+        _SettledImages(source, float(lateral_cfg.get("settle_s", 0.3))),
+        LateralServoParams(**kwargs),
+        None if log_dir is None else log_dir / "lateral_servo",
     )
 
 
