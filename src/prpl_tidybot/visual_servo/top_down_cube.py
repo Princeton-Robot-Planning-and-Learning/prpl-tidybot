@@ -394,7 +394,7 @@ class LateralServoParams:
     lateral_sign: tuple[float, float] = (1.0, 1.0)
     lateral_tolerance_px: float = 8.0
     lateral_max_step: float = 0.01
-    lateral_min_step: float = 0.006
+    lateral_min_step: float = 0.005
     max_area_change_frac: float = 0.3
     area_history: int = 5
     align_confirm_ticks: int = 3

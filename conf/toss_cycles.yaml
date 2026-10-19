@@ -156,7 +156,10 @@ pick:
       lateral_sign: [1.0, 1.0]
       lateral_tolerance_px: 8.0
       lateral_max_step: 0.01
-      lateral_min_step: 0.006
+      # Tom's 0.006 is under his own rule here (a minimum step below twice the
+      # tolerance in metres: 2 x 8 px / 2920 px/m = 5.5 mm), and his floor was for the
+      # compliant arm ignoring mm targets, which the onboard controller does not.
+      lateral_min_step: 0.005
       max_area_change_frac: 0.3
       area_history: 5
       align_confirm_ticks: 3
