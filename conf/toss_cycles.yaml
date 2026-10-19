@@ -127,9 +127,11 @@ pick:
     # a wrist turn to square the fingers; never moves the gripper down.
     wrist_servo:
       enabled: true
-      # Where the cube sits in the wrist image when the pinch point is above it: the
-      # mean over the 4 held picks of 2026-10-14 (spread +-7, +-14 px).
-      target_uv: [318, 280]
+      # Where the cube sits in the wrist image when the pinch point is above it:
+      # hardware_tests/calibrate_wrist_target.py on 2026-10-19, 5/5 samples, std
+      # (1.1, 0.9) px. The 2026-10-14 value, [318, 280], came from hovers that the
+      # compliant controller stopped short of.
+      target_uv: [334, 411]
       probe_step: 0.015
       tolerance_px: 6.0
       confirm_looks: 3

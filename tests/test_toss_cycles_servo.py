@@ -28,6 +28,8 @@ def _no_control_period_sleep(monkeypatch):
 def _compose(**extra):
     overrides = ["mode=fake", "seed=0", "interactive=true", "settle_after_toss_s=0"]
     overrides += ["cycles=1", "skip_toss=true", "pick.top_down.wrist_servo.settle_s=0"]
+    # The synthetic camera's own target, not the robot's calibrated one.
+    overrides += [f"pick.top_down.wrist_servo.target_uv=[{TARGET[0]},{TARGET[1]}]"]
     overrides.extend(k if v is None else f"{k}={v}" for k, v in extra.items())
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
         return compose(config_name="toss_cycles", overrides=overrides)
