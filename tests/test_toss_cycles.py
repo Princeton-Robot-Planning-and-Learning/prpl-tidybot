@@ -16,7 +16,6 @@ from prpl_tidybot.real_sim.perceivers.target_source import ConstantTargetSource
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
 from prpl_tidybot.top_down_pick import (
     CARRY_ARM_CONF,
-    TopDownPickGeometry,
     forward_kinematics,
     geometry_from_config,
     pointing_down_joints,
