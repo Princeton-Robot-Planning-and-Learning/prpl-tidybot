@@ -330,6 +330,15 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
             if cfg.get("skip_toss"):
                 finish_reason = "picked (toss skipped)"
                 break
+            if cfg.get("place_at") is not None:
+                target = (float(cfg.place_at[0]), float(cfg.place_at[1]))
+                failure = _place_top_down(
+                    cfg, real_env, arm, geom, confirm, cycle, target, record, workspace
+                )
+                finish_reason = (
+                    failure or f"placed at ({target[0]:+.3f}, {target[1]:+.3f})"
+                )
+                break
 
             toss_cfg = cfg
             if aiming:
@@ -881,6 +890,72 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         f"pick failed after {attempts} attempts (gripper never closed on the cube); "
         "move the cube and rerun"
     )
+
+
+def _place_top_down(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    arm: ArmInterface,
+    geom: TopDownPickGeometry,
+    confirm: Any,
+    cycle: int,
+    target: tuple[float, float],
+    record: dict[str, Any],
+    workspace: Workspace | None = None,
+    stop: threading.Event | None = None,
+) -> str | None:
+    """The top-down pick in reverse: carry the held cube to the map point `target` and
+    set it down. The closed gripper is lowered to the grasp height, where it lifted the
+    cube off the floor, so the cube rests on the floor before the gripper opens (the
+    foam cube bounces if dropped). Returns a stop reason, or None once placed."""
+    obs, _ = real_env.reset()
+    robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
+    stand = standoff_pose(
+        robot,
+        target,
+        geom,
+        tuple(cfg.preview.floor_bounds),
+        None if workspace is None else workspace.valid(),
+    )
+    confirm(
+        f"Cycle {cycle}: Carry the cube to the standoff ({stand[0]:+.3f}, "
+        f"{stand[1]:+.3f}, {math.degrees(stand[2]):+.0f} deg) and set it down at "
+        f"({target[0]:+.3f}, {target[1]:+.3f})?"
+    )
+    base = _drive_to(real_env, list(stand), workspace, stop)
+    ax, ay = arm_frame_target(base, target, geom)
+    moves: list[dict[str, Any]] = []
+    record["place"] = {
+        "target": list(target),
+        "base": list(base),
+        "arm_target_xy": [ax, ay],
+        "moves": moves,
+    }
+    try:
+        hover, down = top_down_joint_targets(
+            ax, ay, 0.0, geom, seed=arm.get_arm_state()
+        )
+    except ValueError as e:
+        return f"place_failure: {e}"
+    td = cfg.pick.top_down
+    mover: _Mover = (
+        _AngularMover(arm, td, geom, moves)
+        if td.get("arm_controller", "compliant") == "angular"
+        else _CompliantMover(arm, td, geom, moves, cfg.arm_home)
+    )
+    mover.stop = stop
+    mover.begin()
+    try:
+        if not mover.move("place_hover", hover):
+            return "place: the hover did not arrive"
+        if not mover.move("place_down", down, correct=True):
+            mover.move("place_up", hover)
+            return "place: the set-down did not arrive (the cube is still held)"
+        mover.gripper(0.0)
+        mover.move("place_up", hover)
+    finally:
+        mover.end()
+    return None
 
 
 # An onboard-controller move that ends further than this from its goal has hit

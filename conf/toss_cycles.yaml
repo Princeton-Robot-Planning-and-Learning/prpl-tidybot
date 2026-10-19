@@ -232,6 +232,10 @@ bin:
 # Stop after the pick, holding the cube (then the reset prompt).
 skip_toss: false
 
+# Instead of the toss: carry the picked cube to this map (x, y) and set it down there,
+# e.g. to stage a pick in the camera overlap strip. null tosses as usual.
+place_at: null
+
 # once: one confirmation before the first action covers the whole run (Ctrl-C still
 # stops the arm); each: confirm every action.
 confirm: once

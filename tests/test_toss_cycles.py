@@ -570,6 +570,36 @@ def test_skip_toss_stops_holding_the_cube(tmp_path, arm_log):
     assert not [e for e in arm_log if e[0] == "toss"]
 
 
+def test_place_at_sets_the_cube_down_on_the_target_and_lets_go(tmp_path, arm_log):
+    """place_at carries the picked cube to a map (x, y) instead of throwing it: drive
+    to that point's standoff, lower the closed gripper to the grasp height (the cube's
+    bottom on the floor, so it is never dropped), open there, then lift."""
+    result = run_toss_cycles(
+        _compose(cycles=1, place_at="[0.3,0.0]"),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    assert result.finish_reason == "placed at (+0.300, +0.000)"
+    assert not [e for e in arm_log if e[0] == "toss"]
+    geom = TopDownPickGeometry()
+    place = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0]["place"]
+    assert [m["name"] for m in place["moves"]] == [
+        "place_hover",
+        "place_down",
+        "place_up",
+    ]
+    down = place["moves"][1]
+    assert down["planned_pinch_z"] == pytest.approx(
+        geom.floor_z + geom.grasp_height, abs=0.002
+    )
+    # The base parked so the target is where the arm reaches for every pick.
+    assert place["arm_target_xy"][0] == pytest.approx(geom.reach, abs=0.03)
+    assert place["arm_target_xy"][1] == pytest.approx(0.0, abs=0.03)
+    # Closed on the way down; opened only at the bottom.
+    moves = [e for e in arm_log if e[0] == "angular"][-3:]
+    assert moves[1][2] == pytest.approx(1.0) and moves[2][2] == pytest.approx(0.0)
+
+
 @pytest.mark.usefixtures("arm_log")
 def test_the_kinder_pick_is_still_selectable(tmp_path):
     """pick.method=kinder runs the shelf3d PickController as before."""
