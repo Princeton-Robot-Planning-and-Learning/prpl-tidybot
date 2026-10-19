@@ -28,7 +28,7 @@ def _no_control_period_sleep(monkeypatch):
 def _compose(**extra):
     overrides = ["mode=fake", "seed=0", "interactive=true", "settle_after_toss_s=0"]
     overrides += ["cycles=1", "skip_toss=true", "pick.top_down.wrist_servo.settle_s=0"]
-    overrides.extend(f"{k}={v}" for k, v in extra.items())
+    overrides.extend(k if v is None else f"{k}={v}" for k, v in extra.items())
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
         return compose(config_name="toss_cycles", overrides=overrides)
 
@@ -223,3 +223,120 @@ def test_no_cube_in_the_wrist_camera_means_no_descent_and_no_close(
     assert "not seen" in attempt["note"]
     assert [m["name"] for m in attempt["moves"]] == ["hover", "retreat"]
     assert not [g for _, g in log if g == 1.0]
+
+
+_LATERAL = {
+    "pick.top_down.wrist_servo.enabled": "false",
+    "pick.top_down.lateral_servo.enabled": "true",
+    "pick.top_down.lateral_servo.settle_s": "0",
+}
+
+
+def _run_lateral(tmp_path, monkeypatch, error, visible=True, **extra):
+    """As `_run`, with a camera whose image axes run along the tool's, unmirrored, at
+    2920 px/m (the 2026-10-14 probes)."""
+    k = np.diag([-2920.0, -2920.0])  # the cube moves +u for a gripper move +x
+    cameras = []
+
+    def factory(arm):
+        cameras.append(_WristCamera(arm, error, visible))
+        cameras[-1].k = k
+        return cameras[-1]
+
+    log = []
+    original = FakeArmInterface.execute_action
+
+    def execute_action(self, arm_goal, gripper_goal):
+        log.append((list(arm_goal), gripper_goal))
+        original(self, arm_goal, gripper_goal)
+
+    monkeypatch.setattr(FakeArmInterface, "execute_action", execute_action)
+    result = run_toss_cycles(
+        _compose(**(_LATERAL | extra)),
+        log_dir=tmp_path,
+        prompt_fn=lambda _: "y",
+        wrist_camera=factory,
+    )
+    return result, cameras, log
+
+
+def test_the_lateral_servo_is_off_by_default():
+    """The shipped config leaves the lateral servo off."""
+    assert not _compose().pick.top_down.lateral_servo.enabled
+
+
+def test_with_the_lateral_servo_off_the_pick_is_unchanged(tmp_path, monkeypatch):
+    """lateral_servo.enabled=false commands exactly what a config without the
+    lateral_servo block commands."""
+    _, _, log = _run(
+        tmp_path / "a",
+        monkeypatch,
+        (0.018, -0.012),
+        **{"~pick.top_down.lateral_servo": None},
+    )
+    # The second run's patch wraps the first's, which keeps appending to `log`.
+    without = list(log)
+    _, _, off = _run(tmp_path / "b", monkeypatch, (0.018, -0.012))
+    assert off == without
+
+
+@pytest.mark.parametrize("controller", ["compliant", "angular"])
+def test_the_lateral_servo_moves_the_grasp_onto_a_misplaced_cube(
+    tmp_path, monkeypatch, controller
+):
+    """With the cube 2.2 cm from where the ceiling cameras put it, the lateral servo
+    aligns at the hover and the gripper closes with its pinch point within 4 mm of
+    the cube, after no probe moves."""
+    result, cameras, _ = _run_lateral(
+        tmp_path,
+        monkeypatch,
+        (0.018, -0.012),
+        **{"pick.top_down.arm_controller": controller},
+    )
+    assert result.finish_reason == "picked (toss skipped)"
+    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
+        "pick_attempts"
+    ][0]
+    assert attempt["lateral_servo"]["aligned"], attempt["lateral_servo"]
+    names = [m["name"] for m in attempt["moves"]]
+    assert names[0] == "hover" and "grasp" in names
+    assert set(names[1 : names.index("grasp")]) == {"lateral_align"}
+    grasp = next(m for m in attempt["moves"] if m["name"] == "grasp")
+    pinch, _, _ = forward_kinematics(
+        np.radians(grasp["measured_deg"]), TopDownPickGeometry()
+    )
+    assert math.dist(pinch[:2], cameras[0].cube) < 0.004
+    assert list((tmp_path / "lateral_servo").glob("*_raw.png"))
+
+
+def test_without_the_cube_in_view_the_lateral_servo_does_not_descend(
+    tmp_path, monkeypatch
+):
+    """As Tom's servo fails without a detection, the pick retreats without
+    descending or closing, and the log says why."""
+    result, _, log = _run_lateral(
+        tmp_path,
+        monkeypatch,
+        (0.0, 0.0),
+        visible=False,
+        **{"pick.top_down.max_attempts": 1},
+    )
+    assert "pick failed" in result.finish_reason
+    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
+        "pick_attempts"
+    ][0]
+    assert "lost the cube" in attempt["note"]
+    assert [m["name"] for m in attempt["moves"]] == ["hover", "retreat"]
+    assert not [g for _, g in log if g == 1.0]
+
+
+def test_the_two_servos_cannot_both_be_on(tmp_path):
+    """One wrist alignment per run."""
+    cfg = _compose(**(_LATERAL | {"pick.top_down.wrist_servo.enabled": "true"}))
+    with pytest.raises(ValueError, match="wrist_servo"):
+        run_toss_cycles(
+            cfg,
+            log_dir=tmp_path,
+            prompt_fn=lambda _: "y",
+            wrist_camera=lambda arm: _WristCamera(arm, (0.0, 0.0)),
+        )
