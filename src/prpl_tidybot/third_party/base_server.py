@@ -55,7 +55,21 @@ class BaseManager(MPBaseManager):
     pass
 
 
-BaseManager.register("Base", Base)
+_base = None
+
+
+def _new_base():
+    # Stop the previous client's control loop before the next one starts: a client that
+    # never called close() otherwise leaves its loop driving the base beside the new
+    # one's.
+    global _base
+    if _base is not None:
+        _base.close()
+    _base = Base()
+    return _base
+
+
+BaseManager.register("Base", _new_base)
 
 if __name__ == "__main__":
     manager = BaseManager(address=(BASE_RPC_HOST, BASE_RPC_PORT), authkey=RPC_AUTHKEY)
