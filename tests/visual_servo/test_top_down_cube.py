@@ -487,4 +487,3 @@ def test_lateral_servo_default_min_step_keeps_toms_rule_at_the_hover():
     so the servo cannot bounce across the tolerance band."""
     params = LateralServoParams()
     assert params.lateral_min_step < 2 * params.lateral_tolerance_px / _K_ROBOT
-
