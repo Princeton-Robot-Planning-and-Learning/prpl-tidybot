@@ -3,11 +3,10 @@ frame of recorded wrist clips: what it would have seen and commanded first.
 
 For each pick attempt in a toss_cycles run directory (cycles.json, toss_cycles.log
 and the <clip>_wrist.mp4 recordings), the hover frame is found by tracking the
-cube's blob: the descent from the hover makes it grow ~3.5x (the camera goes from
-~0.215 m to ~0.115 m above the cube's top), so the hover is the last steady frame
-before the area starts rising. The log gives a second, independent estimate: the
-recorder grabs a frame about every 0.1 s from the attempt's confirmation step, and
-the hover arrival is logged.
+cube's blob: the approach to the hover makes it grow, the descent takes it out of
+the bottom of the image, and the hover is the first steady run in between. The log
+gives a second, independent estimate: the recorder grabs a frame about every 0.1 s
+from the attempt's confirmation step, and the hover arrival is logged.
 
 On that frame: the cube's pixel error from target_uv; the servo's first commanded
 step (Tom's clamped proportional step, per tool axis); and the full correction the
@@ -51,6 +50,7 @@ from prpl_tidybot.visual_servo.top_down_cube import (
 # The 2026-10-14 probes (onboard controller): ~2920 px/m per tool axis, unmirrored.
 _PX_PER_M = 2920.0
 _CUBE_SIDE = 0.05
+_STEADY_PX = 4.0
 _TIME = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3})\]")
 
 
@@ -100,33 +100,37 @@ def _read_frames(path: Path) -> list[np.ndarray]:
 
 
 def _hover_index(cubes: list[WristCube | None], prior: int | None) -> int | None:
-    """The last steady, whole-blob frame before the descent makes the blob grow."""
-    areas = np.array([np.nan if c is None or c.clipped else c.area for c in cubes])
-    valid = np.flatnonzero(~np.isnan(areas))
-    if valid.size < 3:
+    """The middle of the longest run of steady frames (the blob moving at most
+    `_STEADY_PX` between frames) with the blob at least half its largest size: the
+    arm parked at the hover. The approach to the hover grows the blob; the descent
+    takes it out of the bottom of the image (the camera is 5.6 cm off the gripper
+    axis), so both are excluded."""
+    largest = max((c.area for c in cubes if c is not None), default=0.0)
+    near = [c is not None and c.area >= 0.5 * largest for c in cubes]
+    runs: list[list[int]] = []
+    for i, ok in enumerate(near):
+        prev = cubes[i - 1] if i > 0 else None
+        cube = cubes[i]
+        steady = (
+            ok
+            and i > 0
+            and near[i - 1]
+            and prev is not None
+            and cube is not None
+            and math.hypot(cube.u - prev.u, cube.v - prev.v) <= _STEADY_PX
+        )
+        if steady and runs and runs[-1][-1] == i - 1:
+            runs[-1].append(i)
+        elif steady:
+            runs.append([i - 1, i])
+    if not runs:
         return None
-    peak = int(valid[np.argmax(areas[valid])])
-    before = valid[valid < peak]
-    if before.size == 0:
-        return None
-    # Walk back from the peak until the area stops falling: the plateau at the hover.
-    base = float(np.median(areas[before[: max(3, before.size // 3)]]))
-    rising = [i for i in before if areas[i] > 1.15 * base]
-    onset = int(rising[0]) if rising else peak
-    steady = [i for i in before if i < onset]
-    if not steady:
-        return None
-    # Of the last few steady frames, the one that moved least since the frame before.
-    window = [i for i in steady[-5:] if i - 1 in steady] or steady[-1:]
-    motion = []
-    for i in window:
-        a, b = cubes[i], cubes[i - 1] if i - 1 in steady else cubes[i]
-        assert a is not None and b is not None
-        motion.append(math.hypot(a.u - b.u, a.v - b.v))
-    best = int(window[int(np.argmin(motion))])
-    if prior is not None and abs(best - prior) > 15:
-        print(f"  note: blob-track hover frame {best} vs log estimate {prior}")
-    return best
+    # The first hover, not the retreat to it after a miss.
+    best = next((r for r in runs if len(r) >= 3), max(runs, key=len))
+    index = best[len(best) // 2]
+    if prior is not None and abs(index - prior) > 15:
+        print(f"  note: blob-track hover frame {index} vs log estimate {prior}")
+    return index
 
 
 def _tool_axes_from_joints(planned_deg: list[float]) -> tuple[np.ndarray, np.ndarray]:
@@ -273,6 +277,20 @@ def _main() -> None:  # pylint: disable=too-many-locals
             cv.cvtColor(frames[index], cv.COLOR_RGB2BGR),
         )
         print(json.dumps(row))
+
+    # The held pick's hover is a measured "cube under the pinch" view: each other
+    # attempt's offset from it is what that attempt was off by.
+    held = next((r for r in rows if r["outcome"] == "held"), None)
+    if held is not None:
+        for row in rows:
+            du = row["cube_uv"][0] - held["cube_uv"][0]
+            dv = row["cube_uv"][1] - held["cube_uv"][1]
+            row["vs_held_px"] = [round(du, 1), round(dv, 1)]
+            row["vs_held_tool_mm"] = [
+                round(-du / _PX_PER_M * 1000, 1),
+                round(-dv / _PX_PER_M * 1000, 1),
+            ]
+            print(f"{row['clip']} vs the held pick: {row['vs_held_px']} px")
 
     reference = []
     if args.reference_frames:
