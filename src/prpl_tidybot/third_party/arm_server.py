@@ -115,7 +115,21 @@ class ArmManager(MPBaseManager):
     pass
 
 
-ArmManager.register("Arm", Arm)
+_arm = None
+
+
+def _new_arm():
+    # Stop the previous client's torque loop before the next one starts: a client that
+    # never called close() (e.g. Ctrl-C) otherwise leaves its loop commanding the arm
+    # beside the new one's.
+    global _arm
+    if _arm is not None:
+        _arm.release()
+    _arm = Arm()
+    return _arm
+
+
+ArmManager.register("Arm", _new_arm)
 
 
 if __name__ == "__main__":
