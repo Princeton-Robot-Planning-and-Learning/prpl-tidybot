@@ -40,8 +40,10 @@ class _CubeArm(FakeArmInterface):
     def _pinch(self):
         pos, approach, closing = forward_kinematics(self.arm_state, GEOM)
         x_axis = np.cross(closing, approach)[:2]
-        return pos, x_axis / np.linalg.norm(x_axis), closing[:2] / np.linalg.norm(
-            closing[:2]
+        return (
+            pos,
+            x_axis / np.linalg.norm(x_axis),
+            closing[:2] / np.linalg.norm(closing[:2]),
         )
 
     def move_angular(self, goal):
@@ -62,7 +64,11 @@ class _CubeArm(FakeArmInterface):
             self.gripper_state = 0.0
             return 0.0
         near_floor = abs(pos[2] - GRASP_Z) < 0.005
-        if self.cube is not None and near_floor and np.linalg.norm(self.cube - pos[:2]) < 0.03:
+        if (
+            self.cube is not None
+            and near_floor
+            and np.linalg.norm(self.cube - pos[:2]) < 0.03
+        ):
             # The fingers push the cube onto the pinch point along the closing axis.
             off = self.cube - pos[:2]
             self.cube = self.cube - (off @ y_axis) * y_axis
@@ -83,6 +89,7 @@ class _Camera:
         self.hover_looks = 0
 
     def get_image(self):
+        """The wrist view from where the fake arm is now."""
         image = np.full((480, 640, 3), 200, np.uint8)
         pos, x_axis, y_axis = self.arm._pinch()  # pylint: disable=protected-access
         if self.arm.cube is None or pos[2] < HOVER_Z - 0.01:
@@ -95,8 +102,10 @@ class _Camera:
         scale = depth_hover / (depth_hover + (pos[2] - HOVER_Z))
         r = self.arm.cube - pos[:2]
         centre = np.array([320.0, 240.0])
-        uv = centre + scale * (TRUE_UV - centre) - scale * K * np.array(
-            [r @ x_axis, r @ y_axis]
+        uv = (
+            centre
+            + scale * (TRUE_UV - centre)
+            - scale * K * np.array([r @ x_axis, r @ y_axis])
         )
         side = 146 * scale
         box = cv.boxPoints(((uv[0], uv[1]), (side, side), 0.0))
