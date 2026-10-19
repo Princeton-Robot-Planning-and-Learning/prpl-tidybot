@@ -18,6 +18,7 @@ from prpl_tidybot.top_down_pick import (
     CARRY_ARM_CONF,
     TopDownPickGeometry,
     forward_kinematics,
+    geometry_from_config,
     pointing_down_joints,
 )
 from prpl_tidybot.toss_cycles import run_toss_cycles
@@ -39,6 +40,11 @@ def _compose(**extra):
     overrides.extend(f"{k}={v}" for k, v in extra.items())
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
         return compose(config_name="toss_cycles", overrides=overrides)
+
+
+def _configured_geometry():
+    """The pick geometry the run uses (conf/toss_cycles.yaml), not the defaults."""
+    return geometry_from_config(_compose().pick.top_down)
 
 
 class _Operator:
@@ -197,7 +203,7 @@ def test_top_down_pick_hovers_then_descends_pointing_down(tmp_path, arm_log):
     run_toss_cycles(
         _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
     )
-    geom = TopDownPickGeometry()
+    geom = _configured_geometry()
     downward = []
     for entry in arm_log:
         if entry[0] not in ("arm", "angular"):
@@ -226,7 +232,7 @@ def test_each_pick_move_logs_planned_and_measured_joints(tmp_path):
         assert {"planned_pinch_z", "measured_pinch_z", "reached"} <= move.keys()
     hover, grasp = moves[0], moves[1]
     assert hover["planned_pinch_z"] - grasp["planned_pinch_z"] == pytest.approx(
-        0.10, abs=0.005
+        _configured_geometry().hover_height, abs=0.005
     )
 
 
@@ -441,7 +447,7 @@ def test_the_correction_never_aims_the_grasp_below_its_planned_height(
 ):
     """An arm held 8 mm up (the floor, the cube) at the grasp is not pushed down: no
     command puts the pinch point below the grasp height measured for the 2F-85 pads."""
-    geom = TopDownPickGeometry()
+    geom = _configured_geometry()
     grasp_z = geom.floor_z + geom.grasp_height
     commanded_z: list[float] = []
 
@@ -581,7 +587,7 @@ def test_place_at_sets_the_cube_down_on_the_target_and_lets_go(tmp_path, arm_log
     )
     assert result.finish_reason == "placed at (+0.300, +0.000)"
     assert not [e for e in arm_log if e[0] == "toss"]
-    geom = TopDownPickGeometry()
+    geom = _configured_geometry()
     place = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0]["place"]
     assert [m["name"] for m in place["moves"]] == [
         "place_hover",

@@ -174,6 +174,24 @@ def test_the_gripper_holds_the_cube_only_when_closed_around_it():
     assert world.cube_position()[2] > 0.1
 
 
+@pytest.mark.parametrize("clearance, holds", [(0.022, True), (0.05, False)])
+def test_the_grasp_holds_when_the_finger_pads_overlap_the_cube(clearance, holds):
+    """The pads reach pad_drop below the pinch point, so a grasp whose pinch point is
+    just above the cube's top still closes on its upper part (2026-10-19: 1 cm higher
+    than before, so the closing pads clear the floor); pads that only graze the top
+    do not hold it."""
+    geom = TopDownPickGeometry(pad_clearance=clearance)
+    world = _world(cube=(0.67, 0.0, 0.0))
+    world._geom = geom  # pylint: disable=protected-access
+    arm = SimArmInterface(world)
+    hover, grasp = top_down_joint_targets(0.55, 0.0, 0.0, geom, seed=RETRACT_ARM_CONF)
+    arm.release()
+    arm.move_angular(hover)
+    arm.move_angular(grasp)
+    arm.set_gripper_angular(1.0)
+    assert world.held == holds
+
+
 def test_the_base_drives_under_the_base_controllers_limits():
     """Position targets go through the base controller's Ruckig limits, in its
     continuous heading (a wrapped target does not spin the base a full turn)."""

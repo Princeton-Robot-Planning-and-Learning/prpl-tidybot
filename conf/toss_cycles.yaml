@@ -97,9 +97,11 @@ pick:
     floor_z: -0.395
     # The finger pads reach 2.95 cm below the IK's pinch point; at the grasp they stop
     # pad_clearance above the floor (aiming the pinch point at the cube's middle put
-    # them 4 mm into it). Hover is above the grasp.
-    pad_clearance: 0.012
-    hover_height: 0.10
+    # them 4 mm into it). Hover is above the grasp. 2026-10-19: 1 cm higher (Josh: the
+    # grasp sat a little too low), the hover 1 cm less above it so the hover pose, and
+    # the wrist target pixel calibrated there, are unchanged.
+    pad_clearance: 0.022
+    hover_height: 0.09
     # Added to the cube's yaw to square the fingers to its faces (tune on the robot).
     wrist_yaw_offset_deg: 0.0
     # Closed on nothing reads ~1.0; on the 5 cm cube it read 0.49.

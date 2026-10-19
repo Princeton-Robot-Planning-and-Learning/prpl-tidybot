@@ -75,6 +75,8 @@ _ANGULAR_TIMEOUT_S = 20.0
 
 _TICK = 0.001
 _CUBE_HALF = 0.025
+# How much of the cube's height the closing pads must cover to hold it.
+_MIN_PAD_OVERLAP = 0.01
 # The 2F-85 crosses its full stroke in about 0.6 s at full speed.
 _GRIPPER_RATE = 1.0 / 0.6
 # Closed on the 5 cm cube the gripper read 0.49 (conf/toss_cycles.yaml).
@@ -313,9 +315,14 @@ class SimWorld:
     def _cube_between_fingers(self) -> bool:
         pinch = self.pinch_world()
         cube = self.cube_position()
+        # The pads span pad_drop below the pinch point, so a pinch point just above
+        # the cube's top still closes on its upper part.
+        overlap = min(pinch[2], cube[2] + _CUBE_HALF) - max(
+            pinch[2] - self._geom.pad_drop, cube[2] - _CUBE_HALF
+        )
         return bool(
             math.hypot(pinch[0] - cube[0], pinch[1] - cube[1]) < 0.02
-            and abs(pinch[2] - cube[2]) < _CUBE_HALF
+            and overlap >= _MIN_PAD_OVERLAP
         )
 
 

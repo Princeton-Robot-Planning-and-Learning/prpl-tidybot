@@ -121,14 +121,15 @@ def test_grasp_check_matches_the_measured_gripper_readings():
 def test_the_configured_grasp_stops_the_finger_pads_just_above_the_floor():
     """The pads reach 3.5 cm below the IK's pinch point; aiming the pinch point at the
     cube's middle drove them 1 cm into the floor on the robot (2026-10-14). The
-    configured grasp leaves them a centimetre or so clear, low enough to grip the cube.
+    configured grasp leaves them a centimetre or two clear, low enough to grip the cube
+    (2026-10-19: raised 1 cm, the closing pads swing below the open ones and touched).
     """
     geom = geometry_from_config(OmegaConf.load(_CONF).pick.top_down)
     _, grasp = top_down_joint_targets(
         geom.standoff - geom.mounting_offset, 0.0, 0.3, geom
     )
     clearance = _pad_bottom_z(grasp) - geom.floor_z
-    assert 0.005 < clearance < 0.02
+    assert 0.005 < clearance < 0.03
 
 
 def test_the_cube_search_covers_what_the_arm_can_grasp_beyond_the_driving_range():
