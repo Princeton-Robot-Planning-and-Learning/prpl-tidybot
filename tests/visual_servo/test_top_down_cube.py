@@ -480,3 +480,11 @@ def test_lateral_servo_saves_every_look_raw_and_annotated(tmp_path):
     )
     assert len(list(tmp_path.glob("c1a1_*_raw.png"))) == len(result.trace)
     assert len(list(tmp_path.glob("c1a1_*.png"))) == 2 * len(result.trace)
+
+
+def test_lateral_servo_default_min_step_keeps_toms_rule_at_the_hover():
+    """The default minimum step is below twice the tolerance in metres at ~2920 px/m,
+    so the servo cannot bounce across the tolerance band."""
+    params = LateralServoParams()
+    assert params.lateral_min_step < 2 * params.lateral_tolerance_px / _K_ROBOT
+

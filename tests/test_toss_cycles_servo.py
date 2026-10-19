@@ -340,3 +340,11 @@ def test_the_two_servos_cannot_both_be_on(tmp_path):
             prompt_fn=lambda _: "y",
             wrist_camera=lambda arm: _WristCamera(arm, (0.0, 0.0)),
         )
+
+
+def test_the_lateral_min_step_keeps_toms_rule_at_the_hover():
+    """Tom's rule: a minimum step below twice the tolerance in metres, so a step from
+    just outside tolerance cannot land outside it on the other side. At the hover the
+    camera sees ~2920 px/m (the 2026-10-14 probes)."""
+    lateral = _compose().pick.top_down.lateral_servo
+    assert lateral.lateral_min_step < 2 * lateral.lateral_tolerance_px / 2920.0
