@@ -4,6 +4,7 @@ and gripper commands the real robot would, with the real arm server's own toss."
 import inspect
 import math
 import queue
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -35,7 +36,9 @@ from prpl_tidybot.toss import plan_toss_swing, toss_release_pose, toss_windup_po
 def _no_release_wait(monkeypatch):
     """The arm server waits 0.75 s of wall time before stopping its torque loop; the
     sim clock still advances by that much."""
-    monkeypatch.setattr(arm_server, "time", SimpleNamespace(sleep=lambda _s: None))
+    monkeypatch.setattr(
+        arm_server, "time", SimpleNamespace(sleep=lambda _s: None, time=time.time)
+    )
 
 
 def _world(**kwargs):
