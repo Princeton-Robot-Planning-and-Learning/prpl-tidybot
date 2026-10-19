@@ -31,10 +31,12 @@ import argparse
 import functools
 import json
 import math
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import cv2 as cv
+import imageio_ffmpeg  # type: ignore[import-untyped]
 import numpy as np
 from kinder.envs.kinematic3d.prpl3d import (
     ObjectCentricPrplLab3DEnv,
@@ -240,7 +242,17 @@ def _media(frames_dir: Path, name: str, out: Path) -> None:
     cv.imwrite(str(out / f"{name}_before.png"), first)
     cv.imwrite(str(out / f"{name}_after.png"), last)
     frames = [cv.cvtColor(cv.imread(str(f)), cv.COLOR_BGR2RGB) for f in annotated]
-    write_mp4(frames + [frames[-1]] * 3, out / f"{name}.mp4", fps=3)
+    mp4 = out / f"{name}.mp4"
+    write_mp4(frames + [frames[-1]] * 3, mp4, fps=3)
+    # OpenCV builds without an H.264 encoder fall back to mp4v, which browsers do
+    # not play; re-encode with imageio's ffmpeg.
+    h264 = mp4.with_suffix(".h264.mp4")
+    subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(mp4)]
+        + ["-c:v", "libx264", "-pix_fmt", "yuv420p", str(h264)],
+        check=True,
+    )
+    h264.replace(mp4)
 
 
 def _figure(rows: list[dict[str, Any]], out: Path) -> None:
