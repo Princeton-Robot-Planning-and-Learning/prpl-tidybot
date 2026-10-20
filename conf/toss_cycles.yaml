@@ -169,7 +169,8 @@ pick:
       align_confirm_ticks: 3
       max_missed_detections: 10
       max_ticks: 60
-      lateral_travel_limit: 0.08
+      # 2026-10-20 run 30: the ceiling was ~11 cm off; 0.08 stopped the servo 2.6 cm short.
+      lateral_travel_limit: 0.20
       settle_s: 0.3
     # Refuse a servo nudge whose IK jumps an arm joint by more than max_joint_step rad
     # (the wrist may turn up to max_wrist_step to square the fingers).
