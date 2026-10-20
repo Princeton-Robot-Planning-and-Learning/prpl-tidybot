@@ -65,17 +65,43 @@ class SimMarkers:
     toss_pose: tuple[float, float, float]
     floor_bounds: tuple[float, float, float, float] | None = None
     bin_box: tuple[float, float, float, float] | None = None
+    # A bin with walls (x, y, yaw, length, width, height, wall): drawn, and the arm's
+    # clearance to its walls reported per step.
+    bin: tuple[float, float, float, float, float, float, float] | None = None
 
     @classmethod
     def from_config(cls, cfg: DictConfig) -> SimMarkers:
-        """From a toss_cycles config."""
+        """From a toss_cycles config (``sim.bin``: x, y, yaw in degrees)."""
         floor = cfg.preview.get("floor_bounds")
         box = cfg.get("bin_stop_box")
+        sim_bin = cfg.get("sim", {}).get("bin")
+        walls = None
+        if sim_bin is not None:
+            b = cfg.bin
+            walls = (
+                float(sim_bin[0]),
+                float(sim_bin[1]),
+                math.radians(float(sim_bin[2])),
+                float(b.length),
+                float(b.width),
+                float(b.height),
+                float(b.wall),
+            )
         return cls(
             toss_pose=tuple(float(v) for v in cfg.toss_pose),  # type: ignore[arg-type]
             floor_bounds=None if floor is None else tuple(float(v) for v in floor),  # type: ignore[arg-type]
             bin_box=None if box is None else tuple(float(v) for v in box),  # type: ignore[arg-type]
+            bin=walls,
         )
+
+    def bin_bounds(self) -> tuple[float, float, float, float] | None:
+        """The axis-aligned floor box around the walled bin."""
+        if self.bin is None:
+            return None
+        x, y, yaw, length, width = self.bin[:5]
+        hx = 0.5 * (abs(length * math.cos(yaw)) + abs(width * math.sin(yaw)))
+        hy = 0.5 * (abs(length * math.sin(yaw)) + abs(width * math.cos(yaw)))
+        return (x - hx, x + hx, y - hy, y + hy)
 
 
 class SimScene:
@@ -150,6 +176,9 @@ class SimScene:
         self.joint_ranges = {
             j: tuple(m.jnt_range[m.joint(_ARM_JOINTS[j]).id]) for j in (1, 3, 5)
         }
+        self.bin_walls = [
+            g for g in range(m.ngeom) if (m.geom(g).name or "").startswith("bin_wall")
+        ]
 
     @staticmethod
     def _add_markers(world: Any, markers: SimMarkers) -> None:
@@ -176,6 +205,28 @@ class SimScene:
                 contype=0,
                 conaffinity=0,
             )
+        if markers.bin is not None:
+            bx, by, yaw, length, width, height, wall = markers.bin
+            c, s = math.cos(yaw), math.sin(yaw)
+            quat = [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]
+            walls = [
+                ((0.0, sign * (width - wall) / 2), (length / 2, wall / 2))
+                for sign in (1, -1)
+            ] + [
+                ((sign * (length - wall) / 2, 0.0), (wall / 2, width / 2))
+                for sign in (1, -1)
+            ]
+            for k, ((lx, ly), (hx, hy)) in enumerate(walls):
+                world.add_geom(
+                    name=f"bin_wall_{k}",
+                    type=mujoco.mjtGeom.mjGEOM_BOX,
+                    pos=[bx + c * lx - s * ly, by + s * lx + c * ly, height / 2],
+                    quat=quat,
+                    size=[hx, hy, height / 2],
+                    rgba=[0.72, 0.55, 0.35, 1.0],
+                    contype=0,
+                    conaffinity=0,
+                )
         x, y, theta = markers.toss_pose
         world.add_geom(
             type=mujoco.mjtGeom.mjGEOM_CYLINDER,
@@ -211,6 +262,30 @@ class SimScene:
         self.data.mocap_pos[0] = pos
         self.data.mocap_quat[0] = [math.cos(yaw / 2), 0, 0, math.sin(yaw / 2)]
         mujoco.mj_forward(self.model, self.data)
+
+
+def _wall_gap(model: Any, data: Any, wall: int, geom: int, fromto: Any) -> float:
+    """The robot geom's least distance to a wall box (negative inside it), up to 0.5
+    m. A mesh is measured from its vertices and a box from its corners:
+    mj_geomDistance returned 0.0 for such pairs ~10 cm apart (MuJoCo 3.3.7)."""
+    mesh = int(model.geom_dataid[geom])
+    rot = data.geom_xmat[geom].reshape(3, 3)
+    if model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_MESH and mesh >= 0:
+        start, count = int(model.mesh_vertadr[mesh]), int(model.mesh_vertnum[mesh])
+        local_points = model.mesh_vert[start : start + count]
+    elif model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_BOX:
+        signs = np.array(
+            [[a, b, c] for a in (-1, 1) for b in (-1, 1) for c in (-1, 1)], float
+        )
+        local_points = signs * model.geom_size[geom]
+    else:
+        return float(mujoco.mj_geomDistance(model, data, wall, geom, 0.5, fromto))
+    points = data.geom_xpos[geom] + local_points @ rot.T
+    wall_rot = data.geom_xmat[wall].reshape(3, 3)
+    local = np.abs((points - data.geom_xpos[wall]) @ wall_rot) - model.geom_size[wall]
+    outside = np.linalg.norm(np.maximum(local, 0.0), axis=1)
+    inside = np.minimum(local.max(axis=1), 0.0)
+    return float(min(0.5, (outside + inside).min()))
 
 
 def _subtree(model: Any, root: int) -> set[int]:
@@ -273,6 +348,7 @@ def safety_summary(world: SimWorld, markers: SimMarkers) -> dict[str, Any]:
                 chosen.append(i)
                 last_t = times[i]
         arm_clear, grip_clear = math.inf, math.inf
+        arm_bin, grip_bin = math.inf, math.inf
         margin, margin_joint = math.inf, 0
         contacts: set[tuple[str, str]] = set()
         outside = 0.0
@@ -288,6 +364,12 @@ def safety_summary(world: SimWorld, markers: SimMarkers) -> dict[str, Any]:
                     grip_clear = min(grip_clear, dist)
                 else:
                     arm_clear = min(arm_clear, dist)
+                for wall in scene.bin_walls:
+                    gap = _wall_gap(m, d, wall, g, fromto)
+                    if body in scene.gripper_bodies:
+                        grip_bin = min(grip_bin, gap)
+                    else:
+                        arm_bin = min(arm_bin, gap)
             for c in d.contact[: d.ncon]:
                 b1, b2 = m.geom_bodyid[c.geom1], m.geom_bodyid[c.geom2]
                 if {b1, b2} <= scene.gripper_bodies or c.dist > 0:
@@ -329,6 +411,12 @@ def safety_summary(world: SimWorld, markers: SimMarkers) -> dict[str, Any]:
                     "gripper": _round(grip_clear),
                 },
                 "contacts": [list(c) for c in sorted(contacts)],
+                # Negative: the arm or gripper inside a wall (within 0.5 m).
+                "min_bin_wall_clearance_m": (
+                    {"arm": _round(arm_bin), "gripper": _round(grip_bin)}
+                    if scene.bin_walls
+                    else None
+                ),
                 "min_joint_limit_margin_deg": {
                     "joint": margin_joint,
                     "margin": _round(margin, 1),
@@ -426,7 +514,7 @@ class _Views:
     def _overhead_camera(self, markers: SimMarkers, world: SimWorld) -> Any:
         xs = [markers.toss_pose[0]] + [s[1][0] for s in world.samples[::50]]
         ys = [markers.toss_pose[1]] + [s[1][1] for s in world.samples[::50]]
-        for box in (markers.floor_bounds, markers.bin_box):
+        for box in (markers.floor_bounds, markers.bin_box, markers.bin_bounds()):
             if box is not None:
                 xs += [box[0], box[1]]
                 ys += [box[2], box[3]]
