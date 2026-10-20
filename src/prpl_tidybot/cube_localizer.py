@@ -426,6 +426,42 @@ def _refine(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     )
 
 
+def find_cube_in_box(
+    frames: Sequence[NDArray[np.uint8]],
+    cameras: Sequence[CeilingCamera],
+    box: Sequence[float],
+    min_area: float = 40.0,
+) -> tuple[float, float] | None:
+    """Where the cube lies inside the floor box ``box`` (x_min, x_max, y_min, y_max),
+    e.g. the bin, or None.
+
+    Inside the bin the cube is in shadow and beyond the floor search (run 31), so this
+    tests hue only, within the box's image: the largest blue blob of the last frame, in
+    the camera that sees it largest, projected to the cube's centre height.
+    """
+    x0, x1, y0, y1 = (float(v) for v in box)
+    corners = np.array([[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]])
+    frame = frames[-1]
+    rows = _camera_rows(frame, len(cameras))
+    best_area, best_xy = 0.0, None
+    for i, camera in enumerate(cameras):
+        tile = frame[i * rows : (i + 1) * rows]
+        region = np.zeros(tile.shape[:2], np.uint8)
+        cv.fillConvexPoly(region, camera.project(corners).astype(np.int32), (1,))
+        hsv = np.asarray(cv.cvtColor(tile, cv.COLOR_BGR2HSV))
+        blue = cv.inRange(hsv, np.array([90, 40, 30]), np.array([135, 255, 255]))
+        blue = np.asarray(blue, np.uint8) & region
+        n, _, stats, centres = cv.connectedComponentsWithStats(blue)
+        for j in range(1, n):
+            area = float(stats[j, cv.CC_STAT_AREA])
+            if area < max(min_area, best_area):
+                continue
+            x, y = camera.to_floor(float(centres[j][0]), float(centres[j][1]), 0.025)
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                best_area, best_xy = area, (float(x), float(y))
+    return best_xy
+
+
 def _off_nadir(camera: CeilingCamera, x: float, y: float) -> float:
     """Horizontal distance from the point under the camera to (x, y)."""
     rot: Any = cv.Rodrigues(camera.rvec)[0]
@@ -545,6 +581,11 @@ class CeilingCubeTargetSource(TargetSource):
             )
         self.last_fit = fit
         return fit
+
+    def find_in_box(self, box: Sequence[float]) -> tuple[float, float] | None:
+        """Where the cube lies inside the floor box ``box`` (the bin), or None (see
+        :func:`find_cube_in_box`)."""
+        return find_cube_in_box(self._frames()[-3:], self._cameras, box)
 
     def _save_failure(
         self,

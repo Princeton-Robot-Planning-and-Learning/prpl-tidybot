@@ -12,6 +12,7 @@ from prpl_tidybot.cube_localizer import (
     CeilingCubeTargetSource,
     cube_silhouette,
     find_cube_candidates,
+    find_cube_in_box,
     fit_cube_pose,
     in_calibrated_region,
     load_ceiling_cameras,
@@ -32,17 +33,30 @@ def _lab_to_bgr(lab: tuple[int, int, int]) -> tuple[int, int, int]:
 
 FLOOR_BGR = _lab_to_bgr((206, 138, 148))  # the lab floor: warm, light
 CUBE_BGR = _lab_to_bgr((185, 135, 126))  # the cube: pale blue-grey
+# Inside the cardboard bin the cube is in shadow (2026-10-20, run 31).
+DIM_CUBE_BGR = (115, 85, 60)
+BIN_INSIDE_BGR = (40, 62, 88)
+BIN_BOX = (0.02, 0.44, 1.85, 2.05)
 
 
-def _render(cameras, cubes, seed=0, noise=3.0):
-    """A stitched (top over bottom) frame of the floor with cubes at `cubes`."""
+def _render(cameras, cubes, seed=0, noise=3.0, cube_bgr=CUBE_BGR, dark_box=None):
+    """A stitched (top over bottom) frame of the floor with cubes at `cubes`; with
+    `dark_box` (x_min, x_max, y_min, y_max) a shadowed bin interior is drawn first."""
     rng = np.random.default_rng(seed)
     halves = []
     for cam in cameras:
         img = np.full((H, W, 3), FLOOR_BGR, np.float32)
+        if dark_box is not None:
+            x0, x1, y0, y1 = dark_box
+            corners = np.array(
+                [[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]]
+            )
+            cv.fillConvexPoly(
+                img, cam.project(corners).astype(np.int32), BIN_INSIDE_BGR
+            )
         for x, y, yaw in cubes:
             poly = cube_silhouette(cam, x, y, yaw, SIDE).astype(np.int32)
-            cv.fillConvexPoly(img, poly, CUBE_BGR, lineType=cv.LINE_AA)
+            cv.fillConvexPoly(img, poly, cube_bgr, lineType=cv.LINE_AA)
         img += rng.normal(0, noise, img.shape)
         halves.append(np.clip(img, 0, 255).astype(np.uint8))
     return np.vstack(halves)
@@ -417,3 +431,26 @@ def test_the_other_cameras_estimate_is_offered_as_a_fallback(cameras):
     )
     agree.get_target()
     assert not agree.alternates()
+
+
+def test_a_dim_cube_inside_the_bin_box_is_found(cameras):
+    """Inside the bin the cube is in shadow and beyond the floor search (run 31): the
+    in-box test still finds it, close to where it lies."""
+    frame = _render(
+        cameras, [(0.33, 1.98, 0.3)], cube_bgr=DIM_CUBE_BGR, dark_box=BIN_BOX
+    )
+    found = find_cube_in_box([frame], cameras, BIN_BOX)
+    assert found is not None
+    assert math.hypot(found[0] - 0.33, found[1] - 1.98) < 0.04
+
+
+def test_an_empty_bin_box_has_no_cube(cameras):
+    """The shadowed bin interior alone is not a cube."""
+    frame = _render(cameras, [], dark_box=BIN_BOX)
+    assert find_cube_in_box([frame], cameras, BIN_BOX) is None
+
+
+def test_a_cube_on_the_floor_outside_the_box_is_not_in_it(cameras):
+    """Only the box is searched: a cube on the floor beside the bin is not in it."""
+    frame = _render(cameras, [(-0.4, 1.2, 0.0)], dark_box=BIN_BOX)
+    assert find_cube_in_box([frame], cameras, BIN_BOX) is None

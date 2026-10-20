@@ -138,12 +138,19 @@ def _put_back_if_in_bin(
     box = cfg.get("bin_stop_box")
     if box is None:
         return
-    try:
-        cube = _localize(cube_source)
-    except RuntimeError:
-        return  # the pick's own localization reports a missing cube
-    if not (box[0] <= cube["x"] <= box[1] and box[2] <= cube["y"] <= box[3]):
-        return
+    # Inside the bin the cube is in shadow and beyond the floor search (run 31): look
+    # inside the box first when the source can.
+    in_box = getattr(cube_source, "find_in_box", None)
+    found = in_box(list(box)) if callable(in_box) else None
+    if found is not None:
+        cube = {"x": float(found[0]), "y": float(found[1])}
+    else:
+        try:
+            cube = _localize(cube_source)
+        except RuntimeError:
+            return  # the pick's own localization reports a missing cube
+        if not (box[0] <= cube["x"] <= box[1] and box[2] <= cube["y"] <= box[3]):
+            return
     record["cube_in_bin"] = {"x": cube["x"], "y": cube["y"]}
     _logger.info("The cube is in the bin at (%+.3f, %+.3f).", cube["x"], cube["y"])
     prompt_fn(

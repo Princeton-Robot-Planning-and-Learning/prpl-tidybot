@@ -745,6 +745,28 @@ def test_a_cube_that_ends_up_in_the_bin_is_put_back_by_the_person(
     assert log["cycles"][1]["cube_in_bin"] == {"x": 0.13, "y": 1.68}
 
 
+def test_a_cube_seen_inside_the_bin_box_is_put_back_by_the_person(
+    tmp_path, monkeypatch
+):
+    """A cube inside the bin lies beyond the floor search and in shadow (run 31), so the
+    in-bin check asks the source to look inside the bin box first."""
+    monkeypatch.setattr(
+        ConstantTargetSource,
+        "find_in_box",
+        lambda _self, box: (0.33, 2.02),
+        raising=False,
+    )
+    operator = _Operator()
+    run_toss_cycles(
+        _compose(cycles=2, **{"+bin_stop_box": "[0.02,0.44,1.85,2.05]"}),
+        log_dir=tmp_path,
+        prompt_fn=operator,
+    )
+    assert operator.asked("in the bin") == 1
+    log = json.loads((tmp_path / "cycles.json").read_text())
+    assert log["cycles"][1]["cube_in_bin"] == {"x": 0.33, "y": 2.02}
+
+
 def test_the_toss_logs_when_its_swing_started_not_when_it_was_called(tmp_path):
     """The arm server's toss winds up first (seconds), then swings; the record carries
     the swing's own start, so the release is swing start + release ms."""
