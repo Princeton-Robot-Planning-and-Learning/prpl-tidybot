@@ -1,6 +1,7 @@
 """Tests for the top-down cube pick ported from Jimmy Wu's TidyBot ``pick_object``."""
 
 import math
+import threading
 from importlib import resources
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from prpl_tidybot.top_down_pick import (
     geometry_from_config,
     grasp_search_bounds,
     grasp_succeeded,
+    pointing_down_joints,
     standoff_pose,
     top_down_joint_targets,
 )
@@ -150,3 +152,41 @@ def test_the_cube_search_covers_what_the_arm_can_grasp_beyond_the_driving_range(
         grasp_search_bounds(FLOOR_BOUNDS, GEOM, base_front=0.274, clearance=0.05)[3]
         > 1.84
     )
+
+
+def test_ik_and_forward_kinematics_are_safe_across_threads():
+    """The wrist recorder's thread (through a camera that reads the arm's pose) runs
+    forward kinematics while the pick's thread solves IK; both share one solver's
+    MuJoCo data, so without a lock one thread's joints corrupt the other's answer
+    (tests/test_toss_cycles_servo.py failed ~1 in 6 runs)."""
+    geom = TopDownPickGeometry()
+    other = [0.3, 0.5, -2.8, -2.0, 0.2, -1.0, 1.0]
+    want = forward_kinematics(other, geom)[0]
+    goals = [(0.5 + 0.002 * k, 0.05, geom.floor_z + 0.1) for k in range(60)]
+    expected = [pointing_down_joints(g, 0.0, geom) for g in goals]
+    done = threading.Event()
+    bad = []
+
+    def hammer():
+        while not done.is_set():
+            got = forward_kinematics(other, geom)[0]
+            if not np.allclose(got, want, atol=1e-9):
+                bad.append(got)
+
+    threads = [threading.Thread(target=hammer, daemon=True) for _ in range(2)]
+    for t in threads:
+        t.start()
+    results = []
+    try:
+        for _ in range(5):
+            for g in goals:
+                try:
+                    results.append(pointing_down_joints(g, 0.0, geom))
+                except ValueError as e:
+                    results.append(str(e))
+    finally:
+        done.set()
+        for t in threads:
+            t.join()
+    assert not bad
+    assert results == expected * 5

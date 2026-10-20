@@ -25,6 +25,7 @@ centre (``MOUNTING_OFFSET`` in ``third_party/constants.py``) and the floor is at
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
@@ -167,6 +168,9 @@ def cube_closing_yaw(cube_yaw_rel: float, geom: TopDownPickGeometry) -> float:
 
 
 _SOLVERS: dict[float, IKSolver] = {}
+# The solvers' MuJoCo data is shared: a thread reading the arm's pose (the wrist
+# recorder's camera) while another solves IK would overwrite its joints mid-solve.
+_SOLVER_LOCK = threading.RLock()
 
 
 def _solver(geom: TopDownPickGeometry) -> IKSolver:
@@ -180,15 +184,16 @@ def forward_kinematics(
     joints: Sequence[float], geom: TopDownPickGeometry
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Pinch-point position, approach axis and closing axis in the arm frame."""
-    solver = _solver(geom)
-    solver.data.qpos[:] = joints
-    mujoco.mj_kinematics(solver.model, solver.data)
-    mat = solver.data.site(solver.site_id).xmat.reshape(3, 3)
-    return (
-        solver.data.site(solver.site_id).xpos.copy(),
-        mat[:, 2].copy(),
-        mat[:, 1].copy(),
-    )
+    with _SOLVER_LOCK:
+        solver = _solver(geom)
+        solver.data.qpos[:] = joints
+        mujoco.mj_kinematics(solver.model, solver.data)
+        mat = solver.data.site(solver.site_id).xmat.reshape(3, 3)
+        return (
+            solver.data.site(solver.site_id).xpos.copy(),
+            mat[:, 2].copy(),
+            mat[:, 1].copy(),
+        )
 
 
 def arm_link_points(
@@ -196,6 +201,13 @@ def arm_link_points(
 ) -> dict[str, NDArray[np.float64]]:
     """Every collision mesh vertex of each arm link at ``joints``, in the arm frame
     (the IK model has no gripper mesh: the 2F-85 is only its pinch-point offset)."""
+    with _SOLVER_LOCK:
+        return _arm_link_points(joints, geom)
+
+
+def _arm_link_points(
+    joints: Sequence[float], geom: TopDownPickGeometry
+) -> dict[str, NDArray[np.float64]]:
     solver = _solver(geom)
     model, data = solver.model, solver.data
     data.qpos[:] = joints
@@ -251,11 +263,12 @@ def pointing_down_joints(
     quat = _down_quat(closing_yaw)
     q = np.asarray(seed if seed is not None else RETRACT_ARM_CONF, float)
     goal = np.asarray(position, float)
-    for _ in range(10):  # the solver takes 20 steps per call; restart from its result
-        q = _solver(geom).solve(goal, quat, q)  # type: ignore[no-untyped-call]
-        pos, approach, _ = forward_kinematics(q, geom)
-        if np.linalg.norm(pos - goal) < 0.005 and approach[2] < -0.9994:
-            return [float(v) for v in q]
+    with _SOLVER_LOCK:
+        for _ in range(10):  # the solver takes 20 steps per call; restart from it
+            q = _solver(geom).solve(goal, quat, q)  # type: ignore[no-untyped-call]
+            pos, approach, _ = forward_kinematics(q, geom)
+            if np.linalg.norm(pos - goal) < 0.005 and approach[2] < -0.9994:
+                return [float(v) for v in q]
     raise ValueError(f"IK did not reach {goal.round(3).tolist()} pointing down.")
 
 
