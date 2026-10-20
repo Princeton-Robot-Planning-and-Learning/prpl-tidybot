@@ -4,9 +4,9 @@ before every action and a reset (retract, back to the toss pose) whenever the ru
 stops."""
 
 import json
-from typing import Any
 import math
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
