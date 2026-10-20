@@ -433,17 +433,33 @@ def find_cube_in_box(
     min_area: float = 40.0,
 ) -> tuple[float, float] | None:
     """Where the cube lies inside the floor box ``box`` (x_min, x_max, y_min, y_max),
-    e.g. the bin, or None.
+    e.g. the bin, or None (see :func:`find_cube_pose_in_box`)."""
+    pose = find_cube_pose_in_box(frames, cameras, box, min_area)
+    return None if pose is None else (pose[0], pose[1])
+
+
+def find_cube_pose_in_box(  # pylint: disable=too-many-locals
+    frames: Sequence[NDArray[np.uint8]],
+    cameras: Sequence[CeilingCamera],
+    box: Sequence[float],
+    min_area: float = 40.0,
+    side: float = 0.05,
+) -> tuple[float, float, float] | None:
+    """The cube's (x, y, yaw) inside the floor box ``box`` (x_min, x_max, y_min,
+    y_max), e.g. the bin, or None.
 
     Inside the bin the cube is in shadow and beyond the floor search (run 31), so this
     tests hue only, within the box's image: the largest blue blob of the last frame, in
-    the camera that sees it largest, projected to the cube's centre height.
+    the camera that sees it largest, projected to the cube's centre height. The yaw is
+    the cube silhouette's that best overlaps the blob (the top-down pick needs it; the
+    lateral servo only moves the gripper sideways).
     """
     x0, x1, y0, y1 = (float(v) for v in box)
     corners = np.array([[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]])
     frame = frames[-1]
     rows = _camera_rows(frame, len(cameras))
-    best_area, best_xy = 0.0, None
+    best_area = 0.0
+    best: tuple[float, float, CeilingCamera, NDArray[np.uint8]] | None = None
     for i, camera in enumerate(cameras):
         tile = frame[i * rows : (i + 1) * rows]
         region = np.zeros(tile.shape[:2], np.uint8)
@@ -451,15 +467,28 @@ def find_cube_in_box(
         hsv = np.asarray(cv.cvtColor(tile, cv.COLOR_BGR2HSV))
         blue = cv.inRange(hsv, np.array([90, 40, 30]), np.array([135, 255, 255]))
         blue = np.asarray(blue, np.uint8) & region
-        n, _, stats, centres = cv.connectedComponentsWithStats(blue)
+        n, labels, stats, centres = cv.connectedComponentsWithStats(blue)
         for j in range(1, n):
             area = float(stats[j, cv.CC_STAT_AREA])
             if area < max(min_area, best_area):
                 continue
             x, y = camera.to_floor(float(centres[j][0]), float(centres[j][1]), 0.025)
             if x0 <= x <= x1 and y0 <= y <= y1:
-                best_area, best_xy = area, (float(x), float(y))
-    return best_xy
+                best_area = area
+                best = (float(x), float(y), camera, np.asarray(labels == j, np.uint8))
+    if best is None:
+        return None
+    x, y, camera, blob = best
+    best_iou, best_yaw = -1.0, 0.0
+    for yaw in np.radians(np.arange(0.0, 90.0, 2.0)):
+        silhouette = np.zeros_like(blob)
+        poly = cube_silhouette(camera, x, y, float(yaw), side).astype(np.int32)
+        cv.fillConvexPoly(silhouette, poly, (1,))
+        union = int(np.count_nonzero(silhouette | blob))
+        iou = int(np.count_nonzero(silhouette & blob)) / union if union else 0.0
+        if iou > best_iou:
+            best_iou, best_yaw = iou, float(yaw)
+    return x, y, best_yaw
 
 
 def _off_nadir(camera: CeilingCamera, x: float, y: float) -> float:
@@ -586,6 +615,13 @@ class CeilingCubeTargetSource(TargetSource):
         """Where the cube lies inside the floor box ``box`` (the bin), or None (see
         :func:`find_cube_in_box`)."""
         return find_cube_in_box(self._frames()[-3:], self._cameras, box)
+
+    def find_pose_in_box(
+        self, box: Sequence[float]
+    ) -> tuple[float, float, float] | None:
+        """The cube's (x, y, yaw) inside the floor box ``box`` (the bin), or None (see
+        :func:`find_cube_pose_in_box`)."""
+        return find_cube_pose_in_box(self._frames()[-3:], self._cameras, box)
 
     def _save_failure(
         self,

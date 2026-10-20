@@ -13,6 +13,7 @@ from prpl_tidybot.cube_localizer import (
     cube_silhouette,
     find_cube_candidates,
     find_cube_in_box,
+    find_cube_pose_in_box,
     fit_cube_pose,
     in_calibrated_region,
     load_ceiling_cameras,
@@ -454,3 +455,16 @@ def test_a_cube_on_the_floor_outside_the_box_is_not_in_it(cameras):
     """Only the box is searched: a cube on the floor beside the bin is not in it."""
     frame = _render(cameras, [(-0.4, 1.2, 0.0)], dark_box=BIN_BOX)
     assert find_cube_in_box([frame], cameras, BIN_BOX) is None
+
+
+@pytest.mark.parametrize("yaw", [0.0, 0.35, 0.7, 1.2])
+def test_a_cube_inside_the_bin_box_is_found_with_its_yaw(cameras, yaw):
+    """The pick out of the bin needs the cube's yaw too (the lateral servo only moves
+    the gripper sideways): the in-box finder fits the cube's silhouette to the blob."""
+    frame = _render(
+        cameras, [(0.30, 1.97, yaw)], cube_bgr=DIM_CUBE_BGR, dark_box=BIN_BOX
+    )
+    found = find_cube_pose_in_box([frame], cameras, BIN_BOX)
+    assert found is not None
+    assert math.hypot(found[0] - 0.30, found[1] - 1.97) < 0.03
+    assert abs(_yaw_err(found[2], yaw)) < math.radians(8)
