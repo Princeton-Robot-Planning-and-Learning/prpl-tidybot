@@ -36,9 +36,6 @@ def _compose(*overrides):
         "mode=sim",
         "seed=0",
         f"toss_pose={TOSS_POSE}",
-        # Written against the onboard controller, the old default. Under compliant
-        # these runs raise a RuckigError in sim_robot's arm (also on 35d785c).
-        "pick.top_down.arm_controller=angular",
         "sim.video.enabled=false",
     ]
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):

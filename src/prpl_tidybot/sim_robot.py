@@ -336,7 +336,9 @@ def _otg_step(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     inp.current_position = list(position)
     inp.current_velocity = list(velocity)
-    inp.current_acceleration = [0.0] * len(position)
+    # Ruckig's own acceleration from the last tick, as the real controllers'
+    # pass_to_input: zeroed mid-brake, Ruckig could not solve the state.
+    inp.current_acceleration = list(out.new_acceleration)
     inp.target_position = list(target)
     inp.target_velocity = [0.0] * len(position)
     otg.update(inp, out)
