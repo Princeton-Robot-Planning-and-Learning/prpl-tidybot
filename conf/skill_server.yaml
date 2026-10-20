@@ -31,6 +31,13 @@ toss:
     robot_side: 0.0
     far_side: -1.5707963267948966
 
+pick:
+  # Attempts per pick() call. After a miss the robot retracts, drives back to
+  # toss_pose (where the ceiling cameras see the cube without the robot over it),
+  # localizes the bin and the cube again and re-plans; missing every attempt, it ends
+  # there. toss_cycles passes 1: it asks its operator between attempts itself.
+  max_attempts: 2
+
 bin:
   # Both spots: the drivable box plus 0.3 m.
   search_bounds: [-1.8, 2.0, -1.8, 1.8]

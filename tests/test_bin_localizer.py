@@ -333,6 +333,55 @@ def test_ceiling_bin_source_raises_when_no_bin_is_visible(cameras):
         _source([_render(cameras)]).get_target()
 
 
+def test_a_missed_bin_saves_its_frames_and_inputs(cameras, tmp_path):
+    """No bin found: the exact frames it fitted and the inputs it used are saved under
+    failure_dir (as the cube's misses are), so the miss can be replayed."""
+    frames = [_render(cameras, seed=s) for s in range(2)]
+    source = CeilingBinSource(
+        serials=SERIALS,
+        image_client=_FakeImages(frames),
+        marker_client=_FakeMarkers((0.49, -0.49, math.pi)),
+        length=MODEL.length,
+        width=MODEL.width,
+        height=MODEL.height,
+        wall=MODEL.wall,
+        search_bounds=SEARCH,
+        num_frames=2,
+        frame_period_s=0.0,
+        min_saturation=130.0,
+        failure_dir=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match="no bin"):
+        source.localize()
+    (saved,) = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert saved.name.endswith("_bin")
+    pngs = sorted(saved.glob("frame_*.png"))
+    assert len(pngs) == 2
+    assert np.array_equal(cv.imread(str(pngs[0])), frames[0])
+    info = json.loads((saved / "localization.json").read_text())
+    assert info["object"] == "bin"
+    assert info["search_bounds"] == list(SEARCH)
+    assert info["exclusions"] == [[0.49, -0.49, 0.45]]
+    assert info["min_iou"] == pytest.approx(0.7)
+    assert info["min_saturation"] == pytest.approx(130.0)
+    assert info["model"] == {
+        "length": MODEL.length,
+        "width": MODEL.width,
+        "height": MODEL.height,
+        "wall": MODEL.wall,
+    }
+    assert info["serials"] == list(SERIALS)
+
+
+def test_a_found_bin_saves_nothing(cameras, tmp_path):
+    """Only misses are saved."""
+    pose = (-0.5, 0.8, math.radians(-12))
+    source = _source([_render(cameras, bins=[pose], seed=s) for s in range(2)])
+    source._failure_dir = tmp_path  # pylint: disable=protected-access
+    source.localize()
+    assert not list(tmp_path.iterdir())
+
+
 def test_constant_bin_source_reports_its_pose():
     """Fake mode's source answers with the configured bin."""
     source = ConstantBinSource(x=-1.0, y=0.5, yaw=0.2, length=0.4, width=0.32)

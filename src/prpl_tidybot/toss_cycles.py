@@ -28,7 +28,12 @@ import prpl_tidybot.config_resolvers  # noqa: F401  # pylint: disable=unused-imp
 from prpl_tidybot.interfaces.arm_interface import ArmInterface
 from prpl_tidybot.pipeline import _resolve_log_dir
 from prpl_tidybot.robot_skills import IN_BIN_PICK_OFF
-from prpl_tidybot.skill_server import SkillStopped, TossingSkills, build_skills
+from prpl_tidybot.skill_server import (
+    BIN_NOT_LOCALIZED,
+    SkillStopped,
+    TossingSkills,
+    build_skills,
+)
 from prpl_tidybot.toss import describe_toss
 from prpl_tidybot.visual_servo.image_sources import ImageSource
 
@@ -273,11 +278,13 @@ def _pick(
     cycle: int,
     record: dict[str, Any],
 ) -> str | None:
-    """Call the pick skill until it holds the cube: a refusal or a miss is handed to
-    the person (``ask_to_move_after_miss`` times); with ``max_attempts`` > 1 a miss
+    """Call the pick skill until it holds the cube: a refusal or a miss is handed to the
+    person (``ask_to_move_after_miss`` times); a miss (the pick skill itself then
     retracts and drives back to the toss pose, where the ceiling cameras see the cube
-    without the robot over it, and tries again. Returns a stop reason, or None once
-    held."""
+    without the robot over it) is tried again up to ``max_attempts``.
+
+    Returns a stop reason, or None once held.
+    """
     td = cfg.pick.top_down
     attempts = int(td.get("max_attempts", 3))
     asks = int(td.get("ask_to_move_after_miss", 3)) if operator.interactive else 0
@@ -288,9 +295,11 @@ def _pick(
         operator.confirm(
             f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: localize the cube, "
             "drive to the pick standoff, open, hover, align with the wrist camera, "
-            "descend, close?"
+            "descend, close (a miss retracts and drives back to the toss pose to "
+            "re-localize the cube)?"
         )
-        reply = skills.pick()
+        # One attempt per call: the retries are this loop's, each confirmed above.
+        reply = skills.pick(max_attempts=1)
         cube = reply.get("cube")
         if cube is not None:
             record.setdefault("cube_before_pick", cube)
@@ -310,6 +319,16 @@ def _pick(
                 )
                 if not operator.ask_to_move(record, asks, question):
                     return f"{reason}; move the cube into the drivable area and rerun"
+                continue
+            if reason == BIN_NOT_LOCALIZED:
+                question = (
+                    f"\nCycle {cycle}: I can't see the bin, and will not pick without "
+                    "its walls. Please make sure it is in view of the ceiling cameras "
+                    "and clear of the robot, then press Enter, or type 'stop' to end "
+                    "the run: "
+                )
+                if not operator.ask_to_move(record, asks, question):
+                    return f"{reason}; put the bin in view and rerun"
                 continue
             assert cube is not None
             if reason == IN_BIN_PICK_OFF and put_backs < _MAX_PUT_BACKS:
@@ -348,13 +367,6 @@ def _pick(
             if not operator.ask_to_move(record, asks, question):
                 return "pick missed; the operator stopped the run"
             continue
-        if attempt < attempts:
-            operator.confirm(
-                f"Cycle {cycle}: Missed. Retract the arm and drive back to the toss "
-                "pose to re-localize the cube?"
-            )
-            skills.retract()
-            skills.go_home()
     return (
         f"pick failed after {attempts} attempts (gripper never closed on the cube); "
         "move the cube and rerun"

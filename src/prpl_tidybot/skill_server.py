@@ -19,15 +19,24 @@ MAP frame, metres and radians; hitl converts frames on its side):
     y, length, thickness, yaw, robot_side} (``length`` along ``yaw``; ``robot_side``
     the unit map-frame direction into the robot's side); ``barrier_x`` (the barrier's
     centre x); ``toss_direction`` (the azimuth ``toss`` uses for this bin when given
-    none, or None). The bin is localized on every call, and the cube looked for
-    inside it first.
+    none, or None); ``can_pick`` {feasible, note, refused, reason}: ``can_pick()``'s
+    answer, decided from this same look. One camera round per call: the bin is
+    localized, then the cube looked for inside it first.
 ``can_pick() -> {"feasible", "note", "refused", "reason"}``
-    A dry run of the pick; moves nothing.
+    A dry run of the pick from a fresh look; moves nothing. ``observe()["can_pick"]``
+    answers the same without a second camera round.
 ``pick() -> {"held", "gripper", "note", "refused", "reason", "cube", "bin",
 "stand", "attempts"}``
-    ``refused``: the pick could not or may not start and NOTHING MOVED (no cube, past
-    the barrier, no standoff, too close to a bin wall, no IK), ``reason`` says why.
-    ``held`` False and ``refused`` False is a real miss: the robot moved.
+    Plans from the latest ``observe``/``can_pick`` look when no motion skill came
+    since (else looks afresh); the cube is re-localized at the standoff.
+    ``refused``: the pick could not or may not start and NOTHING MOVED (no cube, no
+    bin found while the config has one: ``"bin not localized"``, past the barrier, no
+    standoff, too close to a bin wall, no IK), ``reason`` says why. ``held`` False and
+    ``refused`` False is a real miss: the robot moved. After a miss the robot
+    retracts, drives back to its home stand (where the ceiling cameras see the cube),
+    looks again and retries, ``pick.max_attempts`` (2) in all; missing every attempt
+    it ends there, not over the cube. ``attempts``: one entry (or one per camera
+    estimate tried) per attempt, each with its ``attempt`` number.
 ``toss(standoff, speed, release_ms, direction=None) -> {"tossed", "landed",
 "in_bin", "inside_bin", "note", "pose", "direction", "bin", "swing"}``
     ``direction`` None: the bin's spot's fixed direction (``toss.spot_directions``).
@@ -68,6 +77,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from multiprocessing.managers import BaseManager
 from pathlib import Path
 from typing import Any, TypeVar
@@ -126,6 +136,10 @@ EXPOSED = (
 )
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+# Why can_pick/pick refuse when the config has a bin the cameras did not find: never
+# plan as if there were none (that skips the arm's check against its walls).
+BIN_NOT_LOCALIZED = "bin not localized"
 
 
 class SkillBusy(RuntimeError):
@@ -222,6 +236,34 @@ def _spot_directions(cfg: Any) -> dict[str, float | None]:
     }
 
 
+def _bin_source_kwargs(bin_cfg: Any, log_dir: Path | None) -> dict[str, Any]:
+    """The ceiling bin source saves the frames of any missed localization beside the
+    run's logs, as the cube's does."""
+    if log_dir is None or not str(bin_cfg["_target_"]).endswith("CeilingBinSource"):
+        return {}
+    return {"failure_dir": str(Path(log_dir) / "localization_failures")}
+
+
+@dataclass(frozen=True)
+class _Look:
+    """One camera round: the bin and the cube (or why not), and the motion count it was
+    taken at (:attr:`TossingSkills.motions`; odd: during a motion)."""
+
+    bin_fit: BinFit | None
+    cube: dict[str, Any] | None
+    missing: str
+    motions: int
+
+
+def _can_pick_reply(why: str | None) -> dict[str, Any]:
+    return {
+        "feasible": why is None,
+        "note": why,
+        "refused": why is not None,
+        "reason": why,
+    }
+
+
 def _in_bin_pick(cfg: DictConfig) -> Any:
     """``pick.top_down.in_bin`` when the pick out of the bin is on, else None."""
     block = cfg.pick.top_down.get("in_bin")
@@ -281,8 +323,13 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         self.ceiling = (
             ceiling if ceiling is not None else _CeilingRecorder(cfg, log_dir)
         )
+        self.max_attempts = int(cfg.pick.get("max_attempts", 2))
         self._picks = 0
         self._label = "start"
+        # Each motion skill counts up on entry and exit; a look is reused only if no
+        # motion started or ran since it began.
+        self.motions = 0
+        self._look: _Look | None = None
 
     # ----------------------------------------------------------------- perception
 
@@ -310,6 +357,45 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             _logger.info("No bin: %s", e)
             return None
 
+    def _look_now(self) -> _Look:
+        """Localize the bin, then the cube (inside the bin first), and keep the look for
+        a pick that follows with no motion between."""
+        motions = self.motions
+        bin_fit = self._bin()
+        cube, missing = self._find(bin_fit)
+        self._look = _Look(bin_fit, cube, missing, motions)
+        return self._look
+
+    def _last_look(self) -> _Look | None:
+        """The latest look, if it was taken before this motion and after the last one
+        (called inside the motion: the count went up by one on entry)."""
+        look = self._look
+        if look is None or look.motions % 2 or look.motions != self.motions - 1:
+            return None
+        return look
+
+    def _decide(
+        self, look: _Look, robot: Sequence[float]
+    ) -> tuple[tuple[float, float, float] | None, str | None]:
+        """(standoff, why the pick cannot start) from ``look``: can_pick's decision,
+        moves nothing."""
+        if self._held_reading():
+            return None, "already holding the cube"
+        if look.bin_fit is None and self.bin_source is not None:
+            return None, BIN_NOT_LOCALIZED
+        if look.cube is None:
+            return None, f"no cube found ({look.missing})"
+        return plan_pick(
+            robot,
+            look.cube,
+            self.geom,
+            self.floor,
+            self.workspace,
+            look.bin_fit,
+            self.in_bin,
+            self.arm.get_arm_state(),
+        )
+
     def _find(self, bin_fit: BinFit | None) -> tuple[dict[str, Any] | None, str]:
         """The cube (inside the bin first; :func:`_find_cube`), or None and why."""
         try:
@@ -330,14 +416,17 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
 
     @_logged
     def observe(self) -> dict[str, Any]:
-        """The state the planner abstracts (see the module docstring)."""
-        bin_fit = self._bin()
-        cube, _ = self._find(bin_fit)
+        """The state the planner abstracts, and whether the pick could start, from one
+        look (see the module docstring)."""
+        look = self._look_now()
+        bin_fit, cube = look.bin_fit, look.cube
+        robot = self._robot()
+        _, why = self._decide(look, robot)
         barrier = self.workspace.barrier
         xy = None if cube is None else (cube["x"], cube["y"])
         iou = None if cube is None else cube.get("iou")
         return {
-            "robot": list(self._robot()),
+            "robot": list(robot),
             "cube": (
                 None
                 if cube is None
@@ -359,144 +448,198 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             "barrier": None if barrier is None else barrier.as_dict(),
             "barrier_x": None if barrier is None else float(barrier.x),
             "toss_direction": None if bin_fit is None else self.spot_direction(bin_fit),
+            "can_pick": _can_pick_reply(why),
         }
 
     # --------------------------------------------------------------------- skills
 
-    def _plan(
-        self,
-    ) -> tuple[
-        tuple[float, float, float] | None,
-        str | None,
-        dict[str, Any] | None,
-        BinFit | None,
-    ]:
-        """(standoff, why the pick cannot start, cube, bin): moves nothing."""
-        if self._held_reading():
-            return None, "already holding the cube", None, None
-        bin_fit = self._bin()
-        cube, missing = self._find(bin_fit)
-        if cube is None:
-            return None, f"no cube found ({missing})", None, bin_fit
-        stand, why = plan_pick(
-            self._robot(),
-            cube,
-            self.geom,
-            self.floor,
-            self.workspace,
-            bin_fit,
-            self.in_bin,
-            self.arm.get_arm_state(),
-        )
-        return stand, why, cube, bin_fit
-
     @_logged
     def can_pick(self) -> dict[str, Any]:
-        """Whether the pick could start now (see :func:`plan_pick`). Moves nothing."""
-        _, why, _, _ = self._plan()
-        return {
-            "feasible": why is None,
-            "note": why,
-            "refused": why is not None,
-            "reason": why,
-        }
+        """Whether the pick could start now (see :func:`plan_pick`), from a fresh look;
+        ``observe`` answers the same from its own.
+
+        Moves nothing.
+        """
+        look = self._look_now()
+        return _can_pick_reply(self._decide(look, self._robot())[1])
 
     @_logged
-    def pick(self) -> dict[str, Any]:  # pylint: disable=too-many-locals
-        """One pick: localize the bin and the cube (inside the bin first), plan (refuse
-        before moving if it cannot start), drive to the standoff (clear of the bin and
-        the barrier), re-localize, then open, [above the rim], hover, align with the
-        wrist servo, descend, close and read; lift, [above the rim], carry. A miss on
-        the best camera's estimate tries the other cameras' (floor cubes only)."""
+    def pick(self, max_attempts: int | None = None) -> dict[str, Any]:
+        """Pick the cube: plan from the latest look (``observe``'s, when no motion came
+        since; else localize the bin and the cube, inside the bin first) and refuse
+        before moving if the pick cannot start; then up to ``max_attempts`` (None:
+        ``pick.max_attempts``) attempts, each :meth:`_attempt`.
+
+        After a miss the robot retracts and drives back to its home stand, where the
+        ceiling cameras see the cube without the robot over it, looks again and plans
+        again; missing every attempt, it ends there.
+        """
+        tries = self.max_attempts if max_attempts is None else int(max_attempts)
         with self._moving():
-            stand, why, cube, bin_fit = self._plan()
+            look = self._last_look() or self._look_now()
+            stand, why = self._decide(look, self._robot())
             reply: dict[str, Any] = {
                 "held": False,
                 "gripper": float(self.arm.get_gripper_state()),
                 "note": why,
                 "refused": why is not None,
                 "reason": why,
-                "cube": cube,
-                "bin": None if bin_fit is None else bin_fit.as_dict(),
+                "cube": look.cube,
+                "bin": None if look.bin_fit is None else look.bin_fit.as_dict(),
                 "stand": None if stand is None else list(stand),
                 "attempts": [],
             }
             if why is not None:
                 return reply
-            assert stand is not None and cube is not None
-            try:
-                base = _drive_to(
-                    self.real_env, list(stand), self.workspace, self.stop_event, bin_fit
-                )
-            except ValueError as e:  # checked before the base moved
-                return reply | {"note": str(e), "refused": True, "reason": str(e)}
-            found, missing = self._find(bin_fit)
-            if found is None:
-                return reply | {"note": f"{missing} (at the standoff)"}
-            from_bin = bin_fit if found.get("in_bin") else None
-            targets = [(found, "best camera")]
-            if from_bin is None and hasattr(self.cube_source, "alternates"):
-                targets += [
-                    ({"x": x, "y": y, "yaw_deg": math.degrees(yaw)}, "other camera")
-                    for x, y, yaw in self.cube_source.alternates()
-                ]
-            self._picks += 1
-            record: dict[str, Any] = {}
-            held, failure = False, None
-            for k, (target, label) in enumerate(targets):
-                if k > 0:
+            record: dict[str, Any] = {"pick_attempts": []}
+            for attempt in range(1, max(tries, 1) + 1):
+                if attempt > 1:
                     self._step(
-                        "Missed. Try the other ceiling camera's estimate of the cube, "
-                        f"({target['x']:+.3f}, {target['y']:+.3f})"
+                        f"Missed. Attempt {attempt}/{tries}: re-localize the bin "
+                        "and the cube from the retreat"
                     )
-                held, failure = _grasp_at(
-                    self.cfg,
-                    target,
-                    label,
-                    base,
-                    self.arm,
-                    self.geom,
-                    self._step,
-                    1,
-                    record,
-                    self.wrist,
-                    self.servo,
-                    self._read,
-                    f"pick_{self._picks:03d}" + (f"_{k + 1}" if k else ""),
-                    self.stop_event,
-                    from_bin,
-                    self.in_bin,
-                )
-                if failure is not None or held:
+                    look = self._look_now()
+                    stand, why = self._decide(look, self._robot())
+                    if why is not None:
+                        skipped = f"attempt {attempt} not started: {why}"
+                        record["pick_attempts"].append(
+                            {"attempt": attempt, "held": False, "note": skipped}
+                        )
+                        reply |= {"note": skipped}
+                        break
+                assert stand is not None
+                outcome = self._attempt(attempt, stand, look, record)
+                if outcome.get("refused"):
+                    if attempt == 1:
+                        return reply | outcome
+                    # The robot moved before (the first attempt and the retreat).
+                    reply |= {
+                        "note": f"attempt {attempt} not started: {outcome['note']}"
+                    }
                     break
-            self.wrist.stop()
-            attempts = record.get("pick_attempts") or [{}]
-            self.gripper_command = (
-                float(self.cfg.pick.top_down.get("close_position", 1.0))
-                if held
-                else 0.0
+                reply |= outcome
+                if reply["held"]:
+                    break
+                retreat = self._retreat(look.bin_fit)
+                record["pick_attempts"][-1]["retreated_to"] = retreat
+                if isinstance(retreat, str):
+                    reply |= {"note": f"{reply['note']}; {retreat}"}
+                    break
+            return reply | {"attempts": record["pick_attempts"]}
+
+    def _attempt(  # pylint: disable=too-many-locals
+        self,
+        attempt: int,
+        stand: tuple[float, float, float],
+        look: _Look,
+        record: dict[str, Any],
+    ) -> dict[str, Any]:
+        """One attempt: drive to the standoff (clear of the bin and the barrier), look
+        for the cube again there, then open, [above the rim], hover, align with the
+        wrist servo, descend, close and read; lift, [above the rim], carry.
+
+        A miss on the best camera's estimate tries the other cameras' (floor cubes
+        only). Returns the reply's fields it decides (``refused``: the drive was refused
+        before the base moved).
+        """
+        bin_fit = look.bin_fit
+        try:
+            base = _drive_to(
+                self.real_env, list(stand), self.workspace, self.stop_event, bin_fit
             )
-            note = None
-            if not held:
-                reading = attempts[-1].get("gripper")
-                note = (
-                    failure
-                    or attempts[-1].get("note")
-                    or (
-                        "gripper closed on nothing"
-                        + ("" if reading is None else f" (read {float(reading):.3f})")
-                    )
+        except ValueError as e:  # checked before the base moved
+            record["pick_attempts"].append(
+                {"attempt": attempt, "held": False, "note": str(e)}
+            )
+            return {"note": str(e), "refused": True, "reason": str(e)}
+        found, missing = self._find(bin_fit)
+        if found is None:
+            lost = f"{missing} (at the standoff)"
+            record["pick_attempts"].append(
+                {"attempt": attempt, "held": False, "note": lost, "base": list(base)}
+            )
+            return {"held": False, "note": lost, "stand": list(base)}
+        from_bin = bin_fit if found.get("in_bin") else None
+        targets = [(found, "best camera")]
+        if from_bin is None and hasattr(self.cube_source, "alternates"):
+            targets += [
+                ({"x": x, "y": y, "yaw_deg": math.degrees(yaw)}, "other camera")
+                for x, y, yaw in self.cube_source.alternates()
+            ]
+        self._picks += 1
+        start = len(record["pick_attempts"])
+        held, failure = False, None
+        for k, (target, label) in enumerate(targets):
+            if k > 0:
+                self._step(
+                    "Missed. Try the other ceiling camera's estimate of the cube, "
+                    f"({target['x']:+.3f}, {target['y']:+.3f})"
                 )
-            return reply | {
-                "held": held,
-                "gripper": float(
-                    attempts[-1].get("gripper") or self.arm.get_gripper_state()
-                ),
-                "note": note,
-                "cube": found,
-                "stand": list(base),
-                "attempts": record.get("pick_attempts", []),
-            }
+            held, failure = _grasp_at(
+                self.cfg,
+                target,
+                label,
+                base,
+                self.arm,
+                self.geom,
+                self._step,
+                attempt,
+                record,
+                self.wrist,
+                self.servo,
+                self._read,
+                f"pick_{self._picks:03d}" + (f"_{k + 1}" if k else ""),
+                self.stop_event,
+                from_bin,
+                self.in_bin,
+            )
+            if failure is not None or held:
+                break
+        self.wrist.stop()
+        if len(record["pick_attempts"]) == start:  # no grasp was started
+            record["pick_attempts"].append(
+                {"attempt": attempt, "held": False, "note": failure}
+            )
+        last = record["pick_attempts"][-1]
+        self.gripper_command = (
+            float(self.cfg.pick.top_down.get("close_position", 1.0)) if held else 0.0
+        )
+        note: str | None = None
+        if not held:
+            reading = last.get("gripper")
+            note = (
+                failure
+                or last.get("note")
+                or (
+                    "gripper closed on nothing"
+                    + ("" if reading is None else f" (read {float(reading):.3f})")
+                )
+            )
+        return {
+            "held": held,
+            "gripper": float(last.get("gripper") or self.arm.get_gripper_state()),
+            "note": note,
+            "cube": found,
+            "stand": list(base),
+        }
+
+    def _retreat(self, bin_fit: BinFit | None) -> list[float] | str:
+        """After a miss: retract and drive back to the home stand (``toss_pose``), where
+        the ceiling cameras see the cube without the robot over it (as toss_cycles did
+        between attempts).
+
+        Returns the pose reached, or why the drive was refused (the base stays at the
+        standoff).
+        """
+        self._step("Missed. Retract the arm and drive back to re-localize the cube")
+        _retract(self.cfg, self.arm, self.stop_event)
+        try:
+            reached = _drive_to(
+                self.real_env, self.home_pose, self.workspace, self.stop_event, bin_fit
+            )
+        except ValueError as e:
+            return f"retreat refused: {e}"
+        return [float(v) for v in reached]
 
     @_logged
     def toss(
@@ -672,6 +815,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         """Halt the arm (the onboard controller's Stop, as Ctrl-C does in
         ``toss_cycles``) and the base (its target set to where it is), and make the
         skill in progress stop commanding motion."""
+        self.motions += 2
         self.stop_event.set()
         try:
             self._halt_arm()
@@ -719,9 +863,11 @@ class _Motion:
             blocking=False
         ):
             raise SkillBusy("another skill is moving the robot")
+        self._skills.motions += 1
         self._skills.stop_event.clear()
 
     def __exit__(self, kind: Any, value: Any, traceback: Any) -> None:
+        self._skills.motions += 1
         self._skills._motion.release()  # pylint: disable=protected-access
         if kind is not None and issubclass(kind, ArmMotionAborted):
             # A KeyboardInterrupt would kill the RPC server's connection thread;
@@ -795,7 +941,11 @@ def build_skills(
             target_cfg, _convert_="all", **_cube_source_kwargs(cfg, target_cfg, log_dir)
         )
         bin_source = (
-            hydra.utils.instantiate(cfg.bin.pipelines[cfg.mode], _convert_="all")
+            hydra.utils.instantiate(
+                cfg.bin.pipelines[cfg.mode],
+                _convert_="all",
+                **_bin_source_kwargs(cfg.bin.pipelines[cfg.mode], log_dir),
+            )
             if cfg.mode in cfg.bin.pipelines
             else None
         )
@@ -988,13 +1138,15 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
     """The client's interface with no robot, in the real room: deterministic, for
     planner tests.
 
-    The same checks as the real skills (bounds, barrier, drivable box, bin, the pick
-    out of the bin's wall check; :func:`prpl_tidybot.robot_skills.plan_pick`) decide
-    what is allowed; ``pick_outcomes`` (cycled) says whether each pick that starts
-    holds, and ``landing`` maps a toss ``(pose, speed, release_ms)`` to where the cube
-    comes to rest (default: straight ahead of the base, ``0.9 + 0.55 *`` the
-    parameters' position in their box, so the standoff that lands in the bin depends
-    on them).
+    The same checks as the real skills (bounds, barrier, drivable box, bin, the pick out
+    of the bin's wall check; :func:`prpl_tidybot.robot_skills.plan_pick`) decide what is
+    allowed; ``pick_outcomes`` (cycled) says whether each pick that starts holds (each
+    attempt of a pick takes the next; up to ``max_attempts`` per pick, a miss retreating
+    to ``home`` first), ``bin_localized`` False is a bin the cameras miss (can_pick and
+    pick refuse), and ``landing`` maps a toss ``(pose, speed, release_ms)`` to where the
+    cube comes to rest (default: straight ahead of the base, ``0.9 + 0.55 *`` the
+    parameters' position in their box, so the standoff that lands in the bin depends on
+    them).
     """
 
     def __init__(  # pylint: disable=too-many-arguments
@@ -1014,6 +1166,8 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
         ) = None,
         in_bin_margin: float = 0.05,
         home: Sequence[float] = HOME_POSE,
+        max_attempts: int = 2,
+        bin_localized: bool = True,
     ) -> None:
         self.robot = [float(v) for v in robot]
         self.cube = None if cube is None else [float(v) for v in cube]
@@ -1030,6 +1184,8 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
         self._landing = landing or _default_landing(bounds)
         self.in_bin_margin = in_bin_margin
         self.home = [float(v) for v in home]
+        self.max_attempts = int(max_attempts)
+        self.bin_localized = bool(bin_localized)
         self.holding = False
         self.gripper_command = 0.0
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
@@ -1054,6 +1210,8 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
 
         if self.holding:
             return None, "already holding the cube"
+        if not self.bin_localized:
+            return None, BIN_NOT_LOCALIZED
         cube = self._cube()
         if cube is None:
             return None, "no cube found"
@@ -1073,27 +1231,25 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
         self.calls.append(("observe", ()))
         barrier = self.workspace.barrier
         cube = self._cube()
+        seen = self.bin_fit if self.bin_localized else None
         return {
             "robot": list(self.robot),
             "cube": None if cube is None else list(self.cube or []),
-            "bin": None if self.bin_fit is None else self.bin_fit.as_dict(),
+            "bin": None if seen is None else seen.as_dict(),
             "holding": self.holding,
             "gripper": 0.49 if self.holding else (1.0 if self.gripper_command else 0.0),
             "gripper_command": float(self.gripper_command),
             "cube_upright": cube is not None,
             "cube_in_bin": bool(
                 cube is not None
-                and self.bin_fit is not None
-                and cube_in_bin(
-                    (cube["x"], cube["y"]), self.bin_fit, self.in_bin_margin
-                )
+                and seen is not None
+                and cube_in_bin((cube["x"], cube["y"]), seen, self.in_bin_margin)
             ),
             "cube_inside_bin": bool(cube is not None and cube["in_bin"]),
             "barrier": None if barrier is None else barrier.as_dict(),
             "barrier_x": None if barrier is None else float(barrier.x),
-            "toss_direction": (
-                None if self.bin_fit is None else self._spot_direction(self.bin_fit)
-            ),
+            "toss_direction": None if seen is None else self._spot_direction(seen),
+            "can_pick": _can_pick_reply(self._plan()[1]),
         }
 
     def _spot_direction(self, bin_fit: BinFit) -> float | None:
@@ -1102,17 +1258,12 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
     def can_pick(self) -> dict[str, Any]:
         """As the real ``can_pick``."""
         self.calls.append(("can_pick", ()))
-        _, why = self._plan()
-        return {
-            "feasible": why is None,
-            "note": why,
-            "refused": why is not None,
-            "reason": why,
-        }
+        return _can_pick_reply(self._plan()[1])
 
     def pick(self) -> dict[str, Any]:
-        """Refuse as the real pick does, else drive to the standoff and grasp; held
-        per ``pick_outcomes``."""
+        """Refuse as the real pick does, else drive to the standoff and grasp, held per
+        ``pick_outcomes``; a miss retreats to ``home`` and tries again, up to
+        ``max_attempts``."""
         self.calls.append(("pick", ()))
         cube = self._cube()
         stand, why = self._plan()
@@ -1129,16 +1280,30 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
         }
         if why is not None:
             return reply
-        assert stand is not None
-        self.robot = list(stand)
-        held = self._outcomes[self._picks % len(self._outcomes)]
-        self._picks += 1
+        attempts: list[dict[str, Any]] = []
+        held = False
+        for attempt in range(1, max(self.max_attempts, 1) + 1):
+            if attempt > 1:
+                stand, why = self._plan()
+                if why is not None:
+                    attempts.append({"attempt": attempt, "held": False, "note": why})
+                    break
+            assert stand is not None
+            self.robot = list(stand)
+            held = self._outcomes[self._picks % len(self._outcomes)]
+            self._picks += 1
+            attempts.append({"attempt": attempt, "held": held, "base": list(stand)})
+            if held:
+                break
+            self.robot = list(self.home)
         self.holding = held
         self.gripper_command = 1.0 if held else 0.0
         return reply | {
             "held": held,
             "gripper": 0.49 if held else 0.0,
             "note": None if held else "gripper closed on nothing",
+            "stand": attempts[-1].get("base", reply["stand"]),
+            "attempts": attempts,
         }
 
     def toss(
@@ -1161,7 +1326,7 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
         self.bounds.validate(standoff, speed, release_ms)
         if not self.holding:
             return _toss_result(False, note="not holding the cube")
-        if self.bin_fit is None:
+        if self.bin_fit is None or not self.bin_localized:
             return _toss_result(False, note="no bin found")
         if direction is None:
             direction = self._spot_direction(self.bin_fit)
