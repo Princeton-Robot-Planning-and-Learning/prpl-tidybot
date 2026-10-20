@@ -50,13 +50,16 @@ Definitions the planner relies on:
 * The bin's spot: ``far_side`` when its centre is across the barrier, else
   ``robot_side``.
 
-The ceiling cameras film the session into ``ceiling.mp4``, and the wrist camera films
-each pick (``pick_NNN_wrist.mp4``).
+Every call is recorded in ``<log dir>/skill_calls.jsonl`` (arguments, reply or error,
+times), the ceiling cameras film the session into ``ceiling.mp4`` labelled with the
+call in progress, and the wrist camera films each pick (``pick_NNN_wrist.mp4``).
 """
 
 from __future__ import annotations
 
 import functools
+import inspect
+import json
 import logging
 import math
 import threading
@@ -64,7 +67,7 @@ import time
 from collections.abc import Callable, Sequence
 from multiprocessing.managers import BaseManager
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 from omegaconf import DictConfig
@@ -120,6 +123,8 @@ EXPOSED = (
     "stop",
 )
 
+_F = TypeVar("_F", bound=Callable[..., Any])
+
 
 class SkillBusy(RuntimeError):
     """Another skill is already moving the robot."""
@@ -127,6 +132,74 @@ class SkillBusy(RuntimeError):
 
 class SkillStopped(RuntimeError):
     """``stop()`` (or an aborted arm move) ended the skill; the robot is halted."""
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return repr(value)
+
+
+class _CallLog:
+    """One JSON line per skill call in ``<log dir>/skill_calls.jsonl``: its index,
+    name, arguments, reply or error, and start/end times (Unix s)."""
+
+    def __init__(self, log_dir: Path | None) -> None:
+        self._path = None if log_dir is None else Path(log_dir) / "skill_calls.jsonl"
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def next_index(self) -> int:
+        """The next call's 1-based index."""
+        with self._lock:
+            self._count += 1
+            return self._count
+
+    def write(self, entry: dict[str, Any]) -> None:
+        """Append one call."""
+        if self._path is None:
+            return
+        line = json.dumps(entry, default=_jsonable)
+        with self._lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+
+
+def _logged(method: _F) -> _F:
+    """Record the call (skill_calls.jsonl) and label the ceiling video with it."""
+    signature = inspect.signature(method)
+
+    @functools.wraps(method)
+    def wrapper(self: TossingSkills, *args: Any, **kwargs: Any) -> Any:
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        call_args = {k: v for k, v in bound.arguments.items() if k != "self"}
+        index = self.calls.next_index()
+        shown = ", ".join(f"{k}={v}" for k, v in call_args.items())
+        self.label(f"#{index} {method.__name__}({shown})")
+        entry: dict[str, Any] = {
+            "i": index,
+            "call": method.__name__,
+            "args": call_args,
+            "start": time.time(),
+        }
+        try:
+            reply = method(self, *args, **kwargs)
+        except BaseException as e:
+            entry["error"] = f"{type(e).__name__}: {e}"
+            raise
+        else:
+            entry["reply"] = reply
+            return reply
+        finally:
+            entry["end"] = time.time()
+            entry["duration_s"] = entry["end"] - entry["start"]
+            self.calls.write(entry)
+
+    return wrapper  # type: ignore[return-value]
 
 
 def bin_spot(bin_fit: BinFit, barrier: Barrier | None) -> str:
@@ -199,6 +272,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         self._motion = threading.Lock()
         self.stop_event = threading.Event()
         self.gripper_command = 1.0 if arm.get_gripper_state() >= _CLOSED else 0.0
+        self.calls = _CallLog(log_dir)
         self._wrist_source = wrist_source
         record = bool(cfg.pick.top_down.get("record_wrist", True))
         self.wrist = _WristRecorder(wrist_source if record else None, log_dir)
@@ -252,6 +326,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         valid one nearest the robot's bearing)."""
         return self.spot_directions[bin_spot(bin_fit, self.workspace.barrier)]
 
+    @_logged
     def observe(self) -> dict[str, Any]:
         """The state the planner abstracts (see the module docstring)."""
         bin_fit = self._bin()
@@ -313,6 +388,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         )
         return stand, why, cube, bin_fit
 
+    @_logged
     def can_pick(self) -> dict[str, Any]:
         """Whether the pick could start now (see :func:`plan_pick`). Moves nothing."""
         _, why, _, _ = self._plan()
@@ -323,6 +399,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             "reason": why,
         }
 
+    @_logged
     def pick(self) -> dict[str, Any]:  # pylint: disable=too-many-locals
         """One pick: localize the bin and the cube (inside the bin first), plan (refuse
         before moving if it cannot start), drive to the standoff (clear of the bin and
@@ -419,6 +496,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
                 "attempts": record.get("pick_attempts", []),
             }
 
+    @_logged
     def toss(
         self,
         standoff: float,
@@ -536,17 +614,20 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             | base
         )
 
+    @_logged
     def open_gripper(self) -> None:
         """Open the gripper where the arm is."""
         with self._moving():
             _set_gripper(self.arm, 0.0, self.cfg.pick.top_down)
             self.gripper_command = 0.0
 
+    @_logged
     def retract(self) -> None:
         """Fold the arm to its retract pose (the gripper as it is)."""
         with self._moving():
             _retract(self.cfg, self.arm, self.stop_event)
 
+    @_logged
     def go_home(self) -> list[float]:
         """Retract, then drive (clear of the bin and the barrier) to the home pose
         (``toss_pose``); returns the pose reached. Not called before a human reset:
@@ -584,6 +665,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
                 self.gripper_command = 0.0
             return {"placed": failure is None, "note": failure, **record}
 
+    @_logged
     def stop(self) -> None:
         """Halt the arm (the onboard controller's Stop, as Ctrl-C does in
         ``toss_cycles``) and the base (its target set to where it is), and make the

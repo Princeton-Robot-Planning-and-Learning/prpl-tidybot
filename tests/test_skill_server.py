@@ -427,6 +427,35 @@ def test_one_skill_moves_at_a_time(skills):
 # ------------------------------------------------------------------ recording
 
 
+def test_every_call_is_logged_with_its_arguments_reply_and_timing(tmp_path):
+    """skill_calls.jsonl: one line per call, in order, with the arguments, the reply
+    (or the error) and how long it took."""
+    skills = build_skills(_cfg(), log_dir=tmp_path)
+    skills.observe()
+    skills.pick()
+    with pytest.raises(ValueError):
+        skills.toss(2.0, 120.0, 700.0, 0.0)
+    skills.toss(1.2, 120.0, 700.0, None)
+    skills.close()
+    lines = [
+        json.loads(line)
+        for line in (tmp_path / "skill_calls.jsonl").read_text().splitlines()
+    ]
+    assert [line["call"] for line in lines] == ["observe", "pick", "toss", "toss"]
+    assert [line["i"] for line in lines] == [1, 2, 3, 4]
+    assert lines[2]["args"] == {
+        "standoff": 2.0,
+        "speed": 120.0,
+        "release_ms": 700.0,
+        "direction": 0.0,
+    }
+    assert "ValueError" in lines[2]["error"] and "reply" not in lines[2]
+    assert lines[1]["reply"]["held"] is True
+    assert lines[3]["args"]["direction"] is None and lines[3]["reply"]["tossed"]
+    for line in lines:
+        assert line["end"] >= line["start"] and line["duration_s"] >= 0
+
+
 def test_each_pick_films_the_wrist_and_the_session_films_the_ceiling(tmp_path):
     """A wrist clip per pick, named by the pick; one ceiling video for the session,
     labelled by the call in progress."""
