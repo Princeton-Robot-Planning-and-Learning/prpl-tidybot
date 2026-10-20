@@ -6,13 +6,19 @@
 #   python scripts/toss_cycles.py mode=fake
 #   python scripts/toss_cycles.py mode=real
 #
-# Everything in pick_and_toss.yaml (pick, toss, env floor-cube-o1, preview) applies.
+# Everything in config.yaml (seed, preview, lab) still applies; the env is
+# floor-cube-o1 (the lab's 5 cm cube, localized from the ceiling cameras) and its
+# fake/real pipelines.
 
 defaults:
-  - pick_and_toss
+  - config
+  - override env: floor-cube-o1
   - _self_
 
 cycles: 2
+
+# Stdin prompts. null = only in mode=real.
+interactive: null
 
 # Where every throw starts: map-frame (x, y, heading rad). 2026-10-20 opposite-side
 # layout: facing +y across the taped barrier (y = 0.349 + 0.0267 x, robot on -y; the
@@ -32,6 +38,11 @@ toss_pose: [0.23, 0.01, 1.5708]
 bin_stop_box: [0.03, 0.45, 1.24, 1.56]
 
 toss:
+  # Kortex degrees of joint 1 at the throw.
+  heading: 0.0
+  # Peak speed of the joint that moves furthest (joint 6), deg/s, and the cycle (ms)
+  # of the 1 kHz swing at which the gripper opens: a fixed cycle, so the release
+  # point moves along the swing with max_vel.
   max_vel: 140.0
   gripper_release_ms: 600
   # Toss at the localized bin (`bin` below) instead of from toss_pose, with
@@ -84,11 +95,6 @@ barrier:
   # The cube's half side; 0 checks only its centre.
   cube_half: 0.0
 
-# The cube carries no markers, so the marker-based landing capture is off; the next
-# localization (or the final one) records where each throw landed.
-capture:
-  enabled: false
-
 # Whole-run video from the ceiling cameras (both, stitched), labelled with the current
 # step: <log dir>/ceiling.mp4.
 ceiling_video:
@@ -104,9 +110,7 @@ arm_home:
   max_ticks: 100
 
 pick:
-  # top_down: Jimmy Wu's TidyBot pick_object, ported (prpl_tidybot.top_down_pick).
-  # kinder: the kinder shelf3d PickController through the planner pipeline.
-  method: top_down
+  # Jimmy Wu's TidyBot pick_object, ported (prpl_tidybot.top_down_pick).
   top_down:
     # Gripper reach from the arm mount at the grasp; the base parks reach +
     # mounting_offset (0.67 m) from the cube, facing it.
@@ -129,12 +133,12 @@ pick:
     grasp_min: 0.2
     grasp_max: 0.9
     close_position: 1.0
-    # angular: the arm's onboard position controller (Jimmy Wu's pick_object); lands
-    # within 0.1 deg, which the wrist servo's step-and-look needs. compliant: the
-    # torque loop; it settles 4-5 deg short and then creeps for seconds (run 9: the
-    # hover 48 mm short, a 15 mm probe moved 40 mm), so the servo could not converge.
-    # One controller per run.
-    arm_controller: angular
+    # compliant: the torque loop for every pick move (runs 37-40, 2026-10-20: the
+    # descent from the measured hover x, y, closing within the per-axis limits below);
+    # the toss keeps the arm server's own wind-up and swing. angular: the arm's onboard
+    # position controller (Jimmy Wu's pick_object), which lands within 0.1 deg. One
+    # controller per run.
+    arm_controller: compliant
     arrive_deg: 1.0
     # The compliant descent is corrected: after the arm settles the pinch point is
     # re-aimed by the measured position error, up to correction_rounds times, until
@@ -155,38 +159,20 @@ pick:
     correction_max_mm: 60.0
     correction_tol_deg: 0.3
     correction_max_deg: 8.0
-    # Align over the cube with the wrist camera at the hover before descending
-    # (prpl_tidybot.visual_servo.top_down_cube). x/y nudges at the hover height and
-    # a wrist turn to square the fingers; never moves the gripper down.
-    wrist_servo:
-      enabled: true
-      # Where the cube sits in the wrist image when the pinch point is above it:
-      # hardware_tests/calibrate_wrist_target.py on 2026-10-19, 5/5 samples, std
-      # (1.1, 0.9) px. The 2026-10-14 value, [318, 280], came from hovers that the
-      # compliant controller stopped short of.
-      target_uv: [334, 411]
-      probe_step: 0.015
-      tolerance_px: 6.0
-      confirm_looks: 3
-      min_step: 0.002
-      max_step: 0.01
-      max_area_change_frac: 0.3
-      # At 1 cm per nudge a cube ~6 cm off (the camera-overlap strip) needs 7-8.
-      max_moves: 10
-      travel_limit: 0.08
-      align_yaw: true
-      settle_s: 0.3
-    # Instead of wrist_servo (enable at most one): the align phase of Tom Silver's
-    # cylinder servo (conf/env/kinematic-cylinder-shelf3d.yaml's visual_servo) on
-    # both tool axes, no probes; the pick's own descent follows. Gain and sign per
-    # tool axis (x, closing y): the 2026-10-14 probes under the onboard controller
+    # Align over the cube with the wrist camera at the hover before descending: the
+    # align phase of Tom Silver's cylinder servo (conf/env/kinematic-cylinder-shelf3d.yaml's
+    # visual_servo) on both tool axes; the pick's own descent follows. Gain and sign
+    # per tool axis (x, closing y): the 2026-10-14 probes under the onboard controller
     # measured J = [[2813, 162], [-91, 2960]] and [[3029, 188], [-116, 2873]] px/m,
     # i.e. image axes along the tool's, unmirrored, ~2920 px/m (a pinhole of
     # f = 628 px at Z = 0.215 m gives 2927) at this hover height; Tom's 0.0003 m/px
     # is 0.88 of that, the slight under-correction his comment intends.
     lateral_servo:
-      enabled: false
-      target_uv: ${..wrist_servo.target_uv}
+      enabled: true
+      # Where the cube sits in the wrist image when the pinch point is above it:
+      # hardware_tests/calibrate_wrist_target.py on 2026-10-19, 5/5 samples, std
+      # (1.1, 0.9) px.
+      target_uv: [334, 411]
       lateral_gain: [0.0003, 0.0003]
       lateral_sign: [1.0, 1.0]
       lateral_tolerance_px: 8.0
@@ -292,7 +278,7 @@ settle_after_toss_s: 5.0
 # cube rides in a closed gripper and a thrown one lands landing_offset (m, forward
 # and left of the base) away. Prompts are answered automatically unless
 # interactive=true; a cube found in the bin is put back at put_back.
-#   python scripts/toss_cycles.py mode=sim pick.top_down.wrist_servo.enabled=false
+#   python scripts/toss_cycles.py mode=sim
 sim:
   start_base_pose: ${toss_pose}
   # Where the cube starts: map-frame x, y (m) and yaw (deg).

@@ -11,7 +11,7 @@ action asks y/N first; Ctrl-C stops the arm.
     python hardware_tests/calibrate_wrist_target.py [--samples 5] [--max-offset 0.01]
 
 Prints the mean target pixel, its per-axis spread and the line to paste into
-``pick.top_down.wrist_servo.target_uv``; the samples and every look (raw and
+``pick.top_down.lateral_servo.target_uv``; the samples and every look (raw and
 annotated) go to --out (default hardware_tests/artifacts/wrist_target_<time>/).
 """
 
@@ -107,7 +107,7 @@ def main() -> int:
         )
         if result.gain:
             print(f"gain from the higher look: {result.gain}")
-        print(f"Paste into pick.top_down.wrist_servo:\n  {data['yaml']}")
+        print(f"Paste into pick.top_down.lateral_servo:\n  {data['yaml']}")
     return 0 if result.note is None else 1
 
 

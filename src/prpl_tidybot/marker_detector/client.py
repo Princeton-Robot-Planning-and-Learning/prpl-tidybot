@@ -6,7 +6,7 @@ each one re-implementing the socket dance.
 """
 
 from multiprocessing.connection import Client, Connection
-from typing import Any, Sequence
+from typing import Any
 
 from prpl_tidybot.marker_detector.constants import MARKER_DETECTOR_PORT
 from prpl_tidybot.third_party.constants import CONN_AUTHKEY, SERVER_HOSTNAME
@@ -48,33 +48,3 @@ class MarkerDetectorClient:
     def close(self) -> None:
         """Close the underlying connection."""
         self._conn.close()
-
-
-class FakeMarkerDetectorClient:
-    """Stand-in for `MarkerDetectorClient` in fake mode: a fixed payload.
-
-    ``robot_pose`` is the map-frame ``(x, y, theta)`` published for robot 0 (None to
-    publish no robot), and ``targets`` a list of ``[marker_id, x, y]`` (a list rather
-    than a mapping so a Hydra yaml can spell it).
-    """
-
-    def __init__(
-        self,
-        robot_pose: Sequence[float] | None = (0.0, 0.0, 0.0),
-        targets: Sequence[Sequence[float]] = (),
-    ) -> None:
-        self._payload: dict[str, Any] = {
-            "poses": (
-                {} if robot_pose is None else {0: tuple(float(v) for v in robot_pose)}
-            ),
-            "targets": {
-                int(marker_id): (float(x), float(y)) for marker_id, x, y in targets
-            },
-        }
-
-    def get_latest(self) -> dict[str, Any]:
-        """Return the fixed payload."""
-        return self._payload
-
-    def close(self) -> None:
-        """Nothing to close."""

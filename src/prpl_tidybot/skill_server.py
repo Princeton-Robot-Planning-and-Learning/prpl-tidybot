@@ -84,7 +84,6 @@ from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.robot_skills import (
     InBinPick,
     _build_lateral_servo,
-    _build_servo,
     _CeilingRecorder,
     _cube_source_kwargs,
     _drive_to,
@@ -810,8 +809,7 @@ def build_skills(
         from prpl_tidybot.third_party.kinova import stop_arm_motion
 
         halt = stop_arm_motion
-    lateral = _build_lateral_servo(cfg, source, log_dir)
-    servo = _build_servo(cfg, source, log_dir) or lateral
+    servo = _build_lateral_servo(cfg, source, log_dir)
     read: Callable[[float], float] = float
     if cfg.mode == "fake":
         # The fake gripper closes on nothing; pretend it read fake_grasp_reading.

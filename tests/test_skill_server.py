@@ -108,7 +108,7 @@ def _still(skills):
 
 def test_the_server_config_is_the_real_room():
     """The measured tape, the measured bin searched for at both spots, the pick out
-    of the bin on, the lateral servo on and the probe servo off, the compliant arm
+    of the bin on, the lateral servo on, the compliant arm
     (the toss keeps its own swing), and each spot's fixed toss direction."""
     cfg = _cfg()
     workspace = Workspace.from_config(cfg.barrier, cfg.preview.floor_bounds)
@@ -124,7 +124,7 @@ def test_the_server_config_is_the_real_room():
         assert x0 < spot[0] < x1 and y0 < spot[1] < y1, spot
     td = cfg.pick.top_down
     assert td.arm_controller == "compliant"
-    assert td.lateral_servo.enabled and not td.wrist_servo.enabled
+    assert td.lateral_servo.enabled and "wrist_servo" not in td
     assert td.in_bin.enabled
     assert cfg.toss.spot_directions.robot_side == pytest.approx(0.0)
     assert cfg.toss.spot_directions.far_side == pytest.approx(-math.pi / 2)
@@ -132,8 +132,7 @@ def test_the_server_config_is_the_real_room():
 
 
 def test_with_a_wrist_camera_the_server_uses_the_lateral_servo():
-    """The servo that worked on the robot on 2026-10-20 (runs 37-40), not the probe
-    servo the server used to build."""
+    """The servo that worked on the robot on 2026-10-20 (runs 37-40)."""
     skills = build_skills(_cfg(), wrist_camera=lambda arm: object())
     assert isinstance(skills.servo, TopDownLateralServo)
 

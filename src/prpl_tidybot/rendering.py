@@ -34,16 +34,6 @@ class Renderer(Protocol):
         """Release any underlying resources."""
 
 
-class ImageClient(Protocol):
-    """Anything with `CeilingImageClient`'s `get_image` / `close`."""
-
-    def get_image(self) -> np.ndarray | None:
-        """Return the latest BGR frame, or None."""
-
-    def close(self) -> None:
-        """Release the connection."""
-
-
 class CeilingCameraRenderer:
     """Top-camera-backed `Renderer` for off-host recording.
 
@@ -64,9 +54,9 @@ class CeilingCameraRenderer:
         host: str = SERVER_HOSTNAME,
         port: int = CEILING_IMAGE_PORT,
         poll_timeout_s: float = 1.0,
-        client: ImageClient | None = None,
+        client: CeilingImageClient | None = None,
     ) -> None:
-        self._client: ImageClient = (
+        self._client = (
             client
             if client is not None
             else CeilingImageClient(host=host, port=port, poll_timeout_s=poll_timeout_s)

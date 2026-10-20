@@ -1,7 +1,7 @@
 """The robot's motions behind the skill server (:mod:`prpl_tidybot.skill_server`), its
 only caller: driving (straight, checked against the drivable box, the barrier and the
 bin), retracting, the top-down pick (off the floor, or out of the bin through a waypoint
-above its rim, every arm pose checked against its walls), the wrist servos, the place,
+above its rim, every arm pose checked against its walls), the wrist servo, the place,
 and the ceiling and wrist recorders.
 
 ``scripts/toss_cycles.py`` and hitl-pmp both reach these through the skills
@@ -48,9 +48,7 @@ from prpl_tidybot.top_down_pick import (
 from prpl_tidybot.visual_servo.image_sources import ImageSource
 from prpl_tidybot.visual_servo.top_down_cube import (
     LateralServoParams,
-    TopDownCubeServo,
     TopDownLateralServo,
-    TopDownServoParams,
     TopDownServoResult,
 )
 
@@ -937,8 +935,7 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         clear,
     )
     if servo_log is not None:
-        key = "lateral_servo" if isinstance(servo, TopDownLateralServo) else "servo"
-        record["pick_attempts"][-1][key] = servo_log
+        record["pick_attempts"][-1]["lateral_servo"] = servo_log
     record["pick_attempts"][-1].update({"gripper": reading, "held": held})
     if note is not None:
         record["pick_attempts"][-1]["note"] = note
@@ -973,7 +970,7 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
     geom: TopDownPickGeometry,
     start: tuple[float, float, float],
     read: Any,
-    servo: TopDownCubeServo | TopDownLateralServo | None,
+    servo: TopDownLateralServo | None,
     name: str,
     above: list[float] | None = None,
     clear: Callable[[Sequence[float]], str | None] | None = None,
@@ -1019,27 +1016,15 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
                 if clear is not None and clear(joints) is not None:
                     _logger.warning("Servo step refused: %s.", clear(joints))
                     return False
-                prefix = (
-                    "lateral" if isinstance(servo, TopDownLateralServo) else "servo"
-                )
-                return mover.move(f"{prefix}_{label}", joints)
+                return mover.move(f"lateral_{label}", joints)
 
             def measured_xy() -> tuple[float, float]:
                 pos = forward_kinematics(mover.joints(), geom)[0]
                 return float(pos[0]), float(pos[1])
 
-            if isinstance(servo, TopDownLateralServo):
-                result = servo.align(
-                    (ax, ay, yaw), move_hover, functools.partial(_tool_axes, geom), name
-                )
-            else:
-                result = servo.align(
-                    (ax, ay, yaw),
-                    move_hover,
-                    functools.partial(_tool_axes, geom),
-                    name=name,
-                    measured_xy=measured_xy,
-                )
+            result = servo.align(
+                (ax, ay, yaw), move_hover, functools.partial(_tool_axes, geom), name
+            )
             servo_log = _servo_log(result)
             ax, ay, yaw = result.ax, result.ay, result.yaw
             if result.aligned and isinstance(mover, _CompliantMover):
@@ -1110,7 +1095,6 @@ def _servo_log(result: TopDownServoResult) -> dict[str, Any]:
         "aligned": result.aligned,
         "note": result.note,
         "final": [result.ax, result.ay, math.degrees(result.yaw)],
-        "jacobian_px_per_m": result.jacobian,
         "looks": [
             {
                 "label": t.label,
@@ -1124,25 +1108,6 @@ def _servo_log(result: TopDownServoResult) -> dict[str, Any]:
     }
 
 
-def _build_servo(
-    cfg: DictConfig, source: ImageSource | None, log_dir: Path | None
-) -> TopDownCubeServo | None:
-    """The wrist servo from ``pick.top_down.wrist_servo``, or None when it is off or
-    there is no wrist camera."""
-    servo_cfg = cfg.pick.top_down.get("wrist_servo")
-    if source is None or servo_cfg is None or not servo_cfg.get("enabled", False):
-        return None
-    names = {f.name for f in dataclasses.fields(TopDownServoParams)}
-    kwargs = {k: servo_cfg[k] for k in names if k in servo_cfg}
-    if "target_uv" in kwargs:
-        kwargs["target_uv"] = tuple(float(v) for v in kwargs["target_uv"])
-    return TopDownCubeServo(
-        _SettledImages(source, float(servo_cfg.get("settle_s", 0.3))),
-        TopDownServoParams(**kwargs),
-        None if log_dir is None else log_dir / "wrist_servo",
-    )
-
-
 def _build_lateral_servo(
     cfg: DictConfig, source: ImageSource | None, log_dir: Path | None
 ) -> TopDownLateralServo | None:
@@ -1152,11 +1117,6 @@ def _build_lateral_servo(
     lateral_cfg = td.get("lateral_servo")
     if lateral_cfg is None or not lateral_cfg.get("enabled", False):
         return None
-    if td.get("wrist_servo") is not None and td.wrist_servo.get("enabled", False):
-        raise ValueError(
-            "pick.top_down.wrist_servo and pick.top_down.lateral_servo are both "
-            "enabled; enable at most one."
-        )
     if source is None:
         return None
     names = {f.name for f in dataclasses.fields(LateralServoParams)}

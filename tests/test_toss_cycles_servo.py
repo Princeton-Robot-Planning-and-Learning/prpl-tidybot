@@ -1,6 +1,6 @@
-"""The wrist-camera servo inside scripts/toss_cycles.py's top-down pick (fake mode,
-with a synthetic wrist camera that renders the cube where it really is relative to
-the gripper)."""
+"""The lateral wrist-camera servo inside scripts/toss_cycles.py's top-down pick (fake
+mode, with a synthetic wrist camera that renders the cube where it really is relative
+to the gripper)."""
 
 import json
 import math
@@ -31,9 +31,7 @@ def _no_control_period_sleep(monkeypatch):
 
 def _compose(**extra):
     overrides = ["mode=fake", "seed=0", "interactive=true", "settle_after_toss_s=0"]
-    overrides += ["cycles=1", "skip_toss=true", "pick.top_down.wrist_servo.settle_s=0"]
-    # The synthetic camera's own target, not the robot's calibrated one.
-    overrides += [f"pick.top_down.wrist_servo.target_uv=[{TARGET[0]},{TARGET[1]}]"]
+    overrides += ["cycles=1", "skip_toss=true"]
     overrides.extend(k if v is None else f"{k}={v}" for k, v in extra.items())
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
         return compose(config_name="toss_cycles", overrides=overrides)
@@ -88,155 +86,10 @@ class _WristCamera:
         return image
 
 
-def _run(tmp_path, monkeypatch, error, visible=True, **extra):
-    cameras = []
-
-    def factory(arm):
-        cameras.append(_WristCamera(arm, error, visible))
-        return cameras[-1]
-
-    log = []
-    original = FakeArmInterface.execute_action
-
-    def execute_action(self, arm_goal, gripper_goal):
-        log.append((list(arm_goal), gripper_goal))
-        original(self, arm_goal, gripper_goal)
-
-    monkeypatch.setattr(FakeArmInterface, "execute_action", execute_action)
-    result = run_toss_cycles(
-        _compose(**extra),
-        log_dir=tmp_path,
-        prompt_fn=lambda _: "y",
-        wrist_camera=factory,
-    )
-    return result, cameras, log
-
-
-@pytest.mark.parametrize("controller", ["compliant", "angular"])
-def test_the_servo_moves_the_grasp_onto_a_cube_the_ceiling_misplaced(
-    tmp_path, monkeypatch, controller
-):
-    """With the cube 2.2 cm from where the ceiling cameras put it, the gripper closes
-    with its pinch point within 3 mm of the cube."""
-    result, cameras, _ = _run(
-        tmp_path,
-        monkeypatch,
-        (0.018, -0.012),
-        **{"pick.top_down.arm_controller": controller},
-    )
-    assert result.finish_reason == "picked (toss skipped)"
-    log = json.loads((tmp_path / "cycles.json").read_text())
-    attempt = log["cycles"][0]["pick_attempts"][0]
-    assert attempt["servo"]["aligned"], attempt["servo"]
-    grasp = next(m for m in attempt["moves"] if m["name"] == "grasp")
-    pinch, _, _ = forward_kinematics(
-        np.radians(grasp["measured_deg"]), TopDownPickGeometry()
-    )
-    assert math.dist(pinch[:2], cameras[0].cube) < 0.003
-    _, _, closing = forward_kinematics(
-        np.radians(grasp["measured_deg"]), TopDownPickGeometry()
-    )
-    turn = math.atan2(closing[1], closing[0]) - cameras[0].cube_yaw
-    assert abs((turn + math.pi / 4) % (math.pi / 2) - math.pi / 4) < math.radians(4)
-    assert list((tmp_path / "wrist_servo").glob("*_raw.png"))
-
-
-def test_the_servo_under_the_onboard_controller_ignores_stale_joint_readings(
-    tmp_path, monkeypatch
-):
-    """With the torque loop released the arm server reports the joints from before
-    the release (run 10: the servo seeded its IK from the retract pose, got another
-    branch and its first probe was refused). The onboard-controller moves report
-    where the arm is; those are used instead."""
-    stale = {}
-
-    def release(self):
-        stale["joints"] = list(self.arm_state)
-        self.released = True
-
-    def resume(self):
-        stale.pop("joints", None)
-        self.released = False
-
-    def get_arm_state(self):
-        return list(stale.get("joints", self.arm_state))
-
-    monkeypatch.setattr(FakeArmInterface, "release", release)
-    monkeypatch.setattr(FakeArmInterface, "resume", resume)
-    monkeypatch.setattr(FakeArmInterface, "get_arm_state", get_arm_state)
-    result, cameras, _ = _run(
-        tmp_path,
-        monkeypatch,
-        (0.018, -0.012),
-        **{"pick.top_down.arm_controller": "angular"},
-    )
-    assert result.finish_reason == "picked (toss skipped)"
-    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
-        "pick_attempts"
-    ][0]
-    assert attempt["servo"]["aligned"], attempt["servo"]
-    grasp = next(m for m in attempt["moves"] if m["name"] == "grasp")
-    pinch, _, _ = forward_kinematics(
-        np.radians(grasp["measured_deg"]), TopDownPickGeometry()
-    )
-    assert math.dist(pinch[:2], cameras[0].cube) < 0.003
-
-
-def test_a_nudge_whose_ik_flips_branch_is_refused(tmp_path, monkeypatch):
-    """As in the cylinder servo, a nudge whose IK would swing an arm joint by more
-    than max_joint_step is not commanded; the servo stops and nothing descends."""
-    import prpl_tidybot.robot_skills as rs  # pylint: disable=import-outside-toplevel
-
-    real = rs.top_down_joint_targets
-    calls = {"n": 0}
-
-    def flipping(ax, ay, yaw, geom, seed=None):
-        calls["n"] += 1
-        hover, grasp = real(ax, ay, yaw, geom, seed=seed)
-        # The pick's plan and the grasp's own check and targets come first; then the
-        # servo's probes and nudges.
-        if calls["n"] >= 4:
-            hover = list(hover)
-            hover[3] += 1.0
-        return hover, grasp
-
-    monkeypatch.setattr(rs, "top_down_joint_targets", flipping)
-    result, _, log = _run(
-        tmp_path, monkeypatch, (0.01, 0.0), **{"pick.top_down.max_attempts": 1}
-    )
-    assert "pick failed" in result.finish_reason
-    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
-        "pick_attempts"
-    ][0]
-    assert "did not arrive" in attempt["note"]
-    assert not [g for _, g in log if g == 1.0]
-
-
-def test_no_cube_in_the_wrist_camera_means_no_descent_and_no_close(
-    tmp_path, monkeypatch
-):
-    """The cube must be seen before the gripper goes down: otherwise the attempt is a
-    miss without descending or closing."""
-    result, _, log = _run(
-        tmp_path,
-        monkeypatch,
-        (0.0, 0.0),
-        visible=False,
-        **{"pick.top_down.max_attempts": 1},
-    )
-    assert "pick failed" in result.finish_reason
-    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
-        "pick_attempts"
-    ][0]
-    assert "not seen" in attempt["note"]
-    assert [m["name"] for m in attempt["moves"]] == ["hover", "retreat"]
-    assert not [g for _, g in log if g == 1.0]
-
-
 _LATERAL = {
-    "pick.top_down.wrist_servo.enabled": "false",
-    "pick.top_down.lateral_servo.enabled": "true",
     "pick.top_down.lateral_servo.settle_s": "0",
+    # The synthetic camera's own target, not the robot's calibrated one.
+    "pick.top_down.lateral_servo.target_uv": f"[{TARGET[0]},{TARGET[1]}]",
 }
 
 
@@ -268,15 +121,10 @@ def _run_lateral(tmp_path, monkeypatch, error, visible=True, **extra):
     return result, cameras, log
 
 
-def test_the_lateral_servo_is_off_by_default():
-    """The shipped config leaves the lateral servo off."""
-    assert not _compose().pick.top_down.lateral_servo.enabled
-
-
 def test_with_the_lateral_servo_off_the_pick_is_unchanged(tmp_path, monkeypatch):
     """lateral_servo.enabled=false commands exactly what a config without the
     lateral_servo block commands."""
-    _, _, log = _run(
+    _, _, log = _run_lateral(
         tmp_path / "a",
         monkeypatch,
         (0.018, -0.012),
@@ -284,7 +132,12 @@ def test_with_the_lateral_servo_off_the_pick_is_unchanged(tmp_path, monkeypatch)
     )
     # The second run's patch wraps the first's, which keeps appending to `log`.
     without = list(log)
-    _, _, off = _run(tmp_path / "b", monkeypatch, (0.018, -0.012))
+    _, _, off = _run_lateral(
+        tmp_path / "b",
+        monkeypatch,
+        (0.018, -0.012),
+        **{"pick.top_down.lateral_servo.enabled": "false"},
+    )
     assert off == without
 
 
@@ -338,18 +191,6 @@ def test_without_the_cube_in_view_the_lateral_servo_does_not_descend(
     assert not [g for _, g in log if g == 1.0]
 
 
-def test_the_two_servos_cannot_both_be_on(tmp_path):
-    """One wrist alignment per run."""
-    cfg = _compose(**(_LATERAL | {"pick.top_down.wrist_servo.enabled": "true"}))
-    with pytest.raises(ValueError, match="wrist_servo"):
-        run_toss_cycles(
-            cfg,
-            log_dir=tmp_path,
-            prompt_fn=lambda _: "y",
-            wrist_camera=lambda arm: _WristCamera(arm, (0.0, 0.0)),
-        )
-
-
 def test_the_lateral_min_step_keeps_toms_rule_at_the_hover():
     """Tom's rule: a minimum step below twice the tolerance in metres, so a step from
     just outside tolerance cannot land outside it on the other side. At the hover the
@@ -396,3 +237,74 @@ def test_a_compliant_descent_starts_where_the_servo_left_the_gripper(
     grasp = next(m for m in attempt["moves"] if m["name"] == "grasp")
     pinch, _, _ = forward_kinematics(np.radians(grasp["measured_deg"]), geom)
     assert math.dist(pinch[:2], cameras[0].cube) < 0.004
+
+
+def test_the_servo_under_the_onboard_controller_ignores_stale_joint_readings(
+    tmp_path, monkeypatch
+):
+    """With the torque loop released the arm server reports the joints from before
+    the release (run 10: the probe servo seeded its IK from the retract pose, got
+    another branch and its first probe was refused). The onboard-controller moves report
+    where the arm is; those are used instead."""
+    stale = {}
+
+    def release(self):
+        stale["joints"] = list(self.arm_state)
+        self.released = True
+
+    def resume(self):
+        stale.pop("joints", None)
+        self.released = False
+
+    def get_arm_state(self):
+        return list(stale.get("joints", self.arm_state))
+
+    monkeypatch.setattr(FakeArmInterface, "release", release)
+    monkeypatch.setattr(FakeArmInterface, "resume", resume)
+    monkeypatch.setattr(FakeArmInterface, "get_arm_state", get_arm_state)
+    result, cameras, _ = _run_lateral(
+        tmp_path,
+        monkeypatch,
+        (0.018, -0.012),
+        **{"pick.top_down.arm_controller": "angular"},
+    )
+    assert result.finish_reason == "picked (toss skipped)"
+    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
+        "pick_attempts"
+    ][0]
+    assert attempt["lateral_servo"]["aligned"], attempt["lateral_servo"]
+    grasp = next(m for m in attempt["moves"] if m["name"] == "grasp")
+    pinch, _, _ = forward_kinematics(
+        np.radians(grasp["measured_deg"]), TopDownPickGeometry()
+    )
+    assert math.dist(pinch[:2], cameras[0].cube) < 0.003
+
+
+def test_a_nudge_whose_ik_flips_branch_is_refused(tmp_path, monkeypatch):
+    """As in the cylinder servo, a nudge whose IK would swing an arm joint by more
+    than max_joint_step is not commanded; the servo stops and nothing descends."""
+    import prpl_tidybot.robot_skills as rs  # pylint: disable=import-outside-toplevel
+
+    real = rs.top_down_joint_targets
+    calls = {"n": 0}
+
+    def flipping(ax, ay, yaw, geom, seed=None):
+        calls["n"] += 1
+        hover, grasp = real(ax, ay, yaw, geom, seed=seed)
+        # The pick's plan and the grasp's own check and targets come first; then the
+        # servo's nudges.
+        if calls["n"] >= 4:
+            hover = list(hover)
+            hover[3] += 1.0
+        return hover, grasp
+
+    monkeypatch.setattr(rs, "top_down_joint_targets", flipping)
+    result, _, log = _run_lateral(
+        tmp_path, monkeypatch, (0.01, 0.0), **{"pick.top_down.max_attempts": 1}
+    )
+    assert "pick failed" in result.finish_reason
+    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
+        "pick_attempts"
+    ][0]
+    assert "did not arrive" in attempt["note"]
+    assert not [g for _, g in log if g == 1.0]

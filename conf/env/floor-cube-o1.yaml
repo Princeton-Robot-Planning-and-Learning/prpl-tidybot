@@ -1,7 +1,8 @@
 # The PRPL lab's floor cube: kinematic-shelf3d-o1 with the real 5 cm cube, the base
 # planner held to the drivable floor box, and the cube localized from the ceiling
-# cameras (prpl_tidybot.cube_localizer) instead of an ArUco marker. Used by
-# scripts/pick_and_toss.py. The shelf stays in the planner's model only; nothing in
+# cameras (prpl_tidybot.cube_localizer) instead of an ArUco marker. The skill server
+# (scripts/skill_server.py, scripts/toss_cycles.py) builds its real env and cube
+# source from these pipelines. The shelf stays in the planner's model only; nothing in
 # the lab stands at shelf_pose.
 # kinder/KinematicShelf3D-o1-v0 — pick a cube off the floor and place it on a shelf.
 # Bilevel-planning env model lives in

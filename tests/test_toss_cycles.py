@@ -236,10 +236,21 @@ def test_each_pick_move_logs_planned_and_measured_joints(tmp_path):
     )
 
 
-def test_the_pick_runs_under_the_onboard_controller_by_default(tmp_path, arm_log):
-    """Hover, grasp, lift and carry are onboard-controller moves by default (the
-    compliant loop creeps too much for the wrist servo, run 9), with the torque loop
-    released around them."""
+def test_the_shipped_config_is_the_real_setup_of_2026_10_20():
+    """Plain conf/toss_cycles.yaml is the setup the robot ran on 2026-10-20 (runs
+    37-40): the lateral wrist servo at the calibrated target pixel and the compliant
+    torque loop for the pick (the toss keeps the arm server's own swing). The probe
+    servo it replaced is gone."""
+    td = _compose().pick.top_down
+    assert td.arm_controller == "compliant"
+    assert td.lateral_servo.enabled
+    assert list(td.lateral_servo.target_uv) == [334, 411]
+    assert "wrist_servo" not in td
+
+
+def test_the_onboard_controller_pick_is_selectable(tmp_path, arm_log):
+    """arm_controller=angular makes hover, grasp, lift and carry onboard-controller
+    moves, with the torque loop released around them."""
     run_toss_cycles(
         _compose(
             cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "angular"}
@@ -254,12 +265,10 @@ def test_the_pick_runs_under_the_onboard_controller_by_default(tmp_path, arm_log
     assert all(m["controller"] == "angular" for m in moves)
 
 
-def test_the_compliant_pick_is_selectable(tmp_path, arm_log):
-    """arm_controller=compliant streams every grasp move through the torque loop."""
+def test_the_pick_runs_under_the_compliant_loop_by_default(tmp_path, arm_log):
+    """By default every grasp move streams through the torque loop."""
     run_toss_cycles(
-        _compose(
-            cycles=1, skip_toss="true", **{"pick.top_down.arm_controller": "compliant"}
-        ),
+        _compose(cycles=1, skip_toss="true"),
         log_dir=tmp_path,
         prompt_fn=_Operator(),
     )
@@ -653,7 +662,11 @@ def test_place_at_sets_the_cube_down_on_the_target_and_lets_go(tmp_path, arm_log
     to that point's standoff, lower the closed gripper to the grasp height (the cube's
     bottom on the floor, so it is never dropped), open there, then lift."""
     result = run_toss_cycles(
-        _compose(cycles=1, place_at="[0.3,0.0]"),
+        _compose(
+            cycles=1,
+            place_at="[0.3,0.0]",
+            **{"pick.top_down.arm_controller": "angular"},
+        ),
         log_dir=tmp_path,
         prompt_fn=_Operator(),
     )
@@ -676,18 +689,6 @@ def test_place_at_sets_the_cube_down_on_the_target_and_lets_go(tmp_path, arm_log
     # Closed on the way down; opened only at the bottom.
     moves = [e for e in arm_log if e[0] == "angular"][-3:]
     assert moves[1][2] == pytest.approx(1.0) and moves[2][2] == pytest.approx(0.0)
-
-
-def test_the_kinder_pick_is_left_to_pick_and_toss(tmp_path):
-    """toss_cycles calls the skill server's skills, whose pick is the top-down one;
-    pick.method=kinder (the shelf3d PickController) is scripts/pick_and_toss.py's, and
-    is refused before anything is built or moves."""
-    with pytest.raises(ValueError, match="pick_and_toss"):
-        run_toss_cycles(
-            _compose(cycles=1, **{"pick.method": "kinder"}),
-            log_dir=tmp_path,
-            prompt_fn=_Operator(),
-        )
 
 
 def test_the_real_cube_source_searches_the_graspable_range():
@@ -745,8 +746,8 @@ def test_a_missed_grasp_tries_the_other_cameras_estimate(tmp_path, monkeypatch):
 
 
 def test_the_top_down_pick_builds_no_planner_models(tmp_path, monkeypatch):
-    """The KINDER planner's env models (~480 MB each, never freed) are only needed by
-    the kinder pick; building them on every top-down run ran CI out of memory."""
+    """The KINDER planner's env models (~480 MB each, never freed) are not needed by
+    the top-down pick; building them on every run ran CI out of memory."""
     from prpl_tidybot import real_sim  # pylint: disable=import-outside-toplevel
 
     def refuse(*_args, **_kwargs):

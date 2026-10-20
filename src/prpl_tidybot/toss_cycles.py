@@ -26,7 +26,6 @@ from omegaconf import DictConfig
 
 import prpl_tidybot.config_resolvers  # noqa: F401  # pylint: disable=unused-import
 from prpl_tidybot.interfaces.arm_interface import ArmInterface
-from prpl_tidybot.pick_and_toss import PromptFn
 from prpl_tidybot.pipeline import _resolve_log_dir
 from prpl_tidybot.robot_skills import IN_BIN_PICK_OFF
 from prpl_tidybot.skill_server import SkillStopped, TossingSkills, build_skills
@@ -34,6 +33,8 @@ from prpl_tidybot.toss import describe_toss
 from prpl_tidybot.visual_servo.image_sources import ImageSource
 
 _logger = logging.getLogger(__name__)
+
+PromptFn = Callable[[str], str]
 
 _STRIP = "clear of the camera overlap strip (y -0.15..0.18)"
 # A cube still seen in the bin after this many requests to put it back ends the run.
@@ -149,11 +150,6 @@ def run_toss_cycles(  # pylint: disable=too-many-locals,too-many-branches,too-ma
     mode=sim runs the same skills on the kinematic TidyBot of
     :mod:`prpl_tidybot.sim_robot` (``cfg.sim``) and films it into ``sim.mp4``; its
     prompts are answered by a scripted operator unless ``interactive=true``."""
-    if cfg.pick.method != "top_down":
-        raise ValueError(
-            "toss_cycles runs the skill server's top-down pick only; the kinder pick "
-            "is scripts/pick_and_toss.py's."
-        )
     aimed = cfg.toss.get("aimed")
     aiming = aimed is not None and bool(aimed.get("enabled", False))
     if cfg.toss.get("grid") and aiming:
