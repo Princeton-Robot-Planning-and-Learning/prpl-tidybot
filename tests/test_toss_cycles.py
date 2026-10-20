@@ -23,7 +23,7 @@ from prpl_tidybot.top_down_pick import (
 from prpl_tidybot.toss_cycles import run_toss_cycles
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
-TOSS_POSE = (1.326, -0.493, -3.132)
+TOSS_POSE = (0.23, 0.01, 1.5708)
 
 
 @pytest.fixture(autouse=True)
@@ -342,18 +342,20 @@ def test_ceiling_video_can_be_turned_off(tmp_path):
     assert not (tmp_path / "ceiling.mp4").exists()
 
 
-def test_a_throw_from_the_toss_pose_lands_where_it_can_be_found_again():
-    """The first real throw (140 deg/s, 600 ms) came to rest 2.34 m from the base,
-    0.31 m beyond the localizer's search box, so the cube was lost. From the toss
-    pose that throw must land at least 0.3 m inside the box, and the base (its
-    collision box reaches 0.274 m behind its centre) must stop 0.1 m inside the box's
-    back edge."""
+def test_the_toss_pose_faces_the_bin_out_of_reach_and_behind_the_tape():
+    """The 2026-10-20 opposite-side layout: the base faces +y at the bin, whose near
+    wall is beyond the arm's 1.14 m reach from the base centre (so it has to be
+    tossed), whose centre is inside the real toss standoffs, and whose base front
+    edge stays `barrier.clearance` behind the measured tape (y = 0.349 + 0.0267 x)."""
     cfg = _compose()
-    x, _, heading = cfg.toss_pose
-    x_min, x_max = cfg.preview.floor_bounds[0], cfg.preview.floor_bounds[1]
-    assert math.cos(heading) < -0.99  # throwing towards -x
-    assert x - 2.34 >= x_min + 0.3
-    assert x + 0.274 == pytest.approx(x_max - 0.1, abs=0.005)
+    x, y, heading = cfg.toss_pose
+    x0, x1, y0, y1 = cfg.bin_stop_box
+    assert math.sin(heading) > 0.99  # throwing towards +y
+    assert x0 < x < x1
+    assert y0 - y > 1.14
+    lo, hi = cfg.real_toss_bounds.standoff
+    assert lo <= math.hypot((x0 + x1) / 2 - x, (y0 + y1) / 2 - y) <= hi
+    assert y + 0.274 + cfg.barrier.clearance <= 0.349 + 0.0267 * x
 
 
 def test_each_toss_waits_for_the_cube_to_settle_before_it_is_localized(
@@ -736,7 +738,7 @@ def test_a_cube_that_ends_up_in_the_bin_is_put_back_by_the_person(
     monkeypatch.setattr(ConstantTargetSource, "get_target", get_target)
     operator = _Operator()
     run_toss_cycles(
-        _compose(cycles=2, **{"+bin_stop_box": "[-0.13,0.39,1.45,1.91]"}),
+        _compose(cycles=2, **{"bin_stop_box": "[-0.13,0.39,1.45,1.91]"}),
         log_dir=tmp_path,
         prompt_fn=operator,
     )
@@ -758,7 +760,7 @@ def test_a_cube_seen_inside_the_bin_box_is_put_back_by_the_person(
     )
     operator = _Operator()
     run_toss_cycles(
-        _compose(cycles=2, **{"+bin_stop_box": "[0.02,0.44,1.85,2.05]"}),
+        _compose(cycles=2, **{"bin_stop_box": "[0.02,0.44,1.85,2.05]"}),
         log_dir=tmp_path,
         prompt_fn=operator,
     )

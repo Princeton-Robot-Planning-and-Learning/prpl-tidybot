@@ -17,6 +17,10 @@ interactive: false
 
 barrier:
   enabled: true
+# The barrier is still the +x placeholder line at x = 0, which the 2026-10-20 real
+# layout's toss pose (toss_cycles.yaml) is across; until the barrier is the measured
+# y-line, the server keeps the earlier toss pose on the placeholder's robot side.
+toss_pose: [1.326, -0.493, -3.132]
 
 skill_server:
   # Bind address on the NUC (all interfaces, so agni can reach it) and port, next to

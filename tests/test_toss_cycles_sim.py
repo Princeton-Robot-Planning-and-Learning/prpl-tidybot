@@ -105,7 +105,7 @@ def test_a_cube_thrown_into_the_bin_is_put_back_by_the_scripted_operator(tmp_pat
     result = run_toss_cycles(
         _compose(
             "cycles=2",
-            "+bin_stop_box=[-0.13,0.39,1.45,1.91]",
+            "bin_stop_box=[-0.13,0.39,1.45,1.91]",
             "sim.landing_offset=[2.7,0.0]",
         ),
         log_dir=tmp_path,
