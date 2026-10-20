@@ -31,7 +31,7 @@ TOSS_POSE = (0.23, 0.01, 1.5708)
 def _no_control_period_sleep(monkeypatch):
     """The fake arm needs no real-time ticks; a lagging or sagging fake would
     otherwise sleep through every settle."""
-    monkeypatch.setattr("prpl_tidybot.toss_cycles.POLICY_CONTROL_PERIOD", 0.0)
+    monkeypatch.setattr("prpl_tidybot.robot_skills.POLICY_CONTROL_PERIOD", 0.0)
 
 
 def _compose(**extra):
@@ -365,11 +365,11 @@ def test_each_toss_waits_for_the_cube_to_settle_before_it_is_localized(
     """Localizing right after the swing caught the cube mid-flight and mid-slide (the
     fit fell to 0.11 of the 0.6 needed) and the run stopped; every toss now waits
     settle_after_toss_s before anything looks for the cube."""
-    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+    import time  # pylint: disable=import-outside-toplevel
 
     events: list[str] = []
     monkeypatch.setattr(
-        tc.time, "sleep", lambda s: events.append(f"sleep {s}") if s >= 1 else None
+        time, "sleep", lambda s: events.append(f"sleep {s}") if s >= 1 else None
     )
     original = ConstantTargetSource.get_target
 
@@ -603,16 +603,16 @@ def test_a_missed_grasp_drives_back_to_the_toss_pose_to_relocalize(
 ):
     """Between attempts the arm retracts and the base returns to the toss pose, where
     the ceiling cameras see the cube unoccluded, before driving to a fresh standoff."""
-    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+    import prpl_tidybot.skill_server as ss  # pylint: disable=import-outside-toplevel
 
     drives: list[tuple[float, ...]] = []
-    original = tc._drive_to  # pylint: disable=protected-access
+    original = ss._drive_to  # pylint: disable=protected-access
 
     def drive_to(real_env, pose, *args):
         drives.append(tuple(round(v, 3) for v in pose))
         return original(real_env, pose, *args)
 
-    monkeypatch.setattr(tc, "_drive_to", drive_to)
+    monkeypatch.setattr(ss, "_drive_to", drive_to)
     operator = _Operator()
     cfg = _compose(
         **{
@@ -627,8 +627,14 @@ def test_a_missed_grasp_drives_back_to_the_toss_pose_to_relocalize(
         for p in operator.prompts
         if "standoff" in p or "Pick attempt" in p or "re-localize" in p
     ]
-    assert ["standoff" in p for p in order] == [True, False, False, True, False]
-    assert "re-localize" in order[2]
+    # One confirmation per pick call (it drives to the standoff and grasps), and the
+    # drive back to re-localize between them.
+    assert ["Pick attempt" in p and "standoff" in p for p in order] == [
+        True,
+        False,
+        True,
+    ]
+    assert "re-localize" in order[1]
     toss = tuple(round(v, 3) for v in TOSS_POSE)
     assert drives[0] != toss and drives[1] == toss and drives[2] != toss
 
@@ -672,21 +678,22 @@ def test_place_at_sets_the_cube_down_on_the_target_and_lets_go(tmp_path, arm_log
     assert moves[1][2] == pytest.approx(1.0) and moves[2][2] == pytest.approx(0.0)
 
 
-@pytest.mark.usefixtures("arm_log")
-def test_the_kinder_pick_is_still_selectable(tmp_path):
-    """pick.method=kinder runs the shelf3d PickController as before."""
-    result = run_toss_cycles(
-        _compose(cycles=1, **{"pick.method": "kinder"}),
-        log_dir=tmp_path,
-        prompt_fn=_Operator(),
-    )
-    assert result.completed == 1
+def test_the_kinder_pick_is_left_to_pick_and_toss(tmp_path):
+    """toss_cycles calls the skill server's skills, whose pick is the top-down one;
+    pick.method=kinder (the shelf3d PickController) is scripts/pick_and_toss.py's, and
+    is refused before anything is built or moves."""
+    with pytest.raises(ValueError, match="pick_and_toss"):
+        run_toss_cycles(
+            _compose(cycles=1, **{"pick.method": "kinder"}),
+            log_dir=tmp_path,
+            prompt_fn=_Operator(),
+        )
 
 
 def test_the_real_cube_source_searches_the_graspable_range():
     """The ceiling cube localizer is built with the graspable search box, not the
     drivable box; other target sources (fake mode) are built unchanged."""
-    from prpl_tidybot.toss_cycles import (  # pylint: disable=import-outside-toplevel
+    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
         _cube_source_kwargs,
     )
 
@@ -702,7 +709,7 @@ def test_the_real_cube_source_searches_the_graspable_range():
 
 def test_the_real_cube_source_saves_failed_localizations_in_the_run_log(tmp_path):
     """A missed localization lands beside the run's own logs."""
-    from prpl_tidybot.toss_cycles import (  # pylint: disable=import-outside-toplevel
+    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
         _cube_source_kwargs,
     )
 
@@ -715,10 +722,10 @@ def test_the_real_cube_source_saves_failed_localizations_in_the_run_log(tmp_path
 def test_a_missed_grasp_tries_the_other_cameras_estimate(tmp_path, monkeypatch):
     """Josh, 2026-10-15: when both ceiling cameras see the cube, grasp at the more
     confident estimate first and, if that misses, at the other one, before giving up."""
-    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+    import prpl_tidybot.skill_server as ss  # pylint: disable=import-outside-toplevel
 
     readings = iter([1.0, 0.49])  # fully closed on nothing, then closed on the cube
-    monkeypatch.setattr(tc, "_fake_reading", lambda _v, _r: next(readings))
+    monkeypatch.setattr(ss, "_fake_reading", lambda _v, _r: next(readings))
     monkeypatch.setattr(
         ConstantTargetSource,
         "alternates",
@@ -740,12 +747,12 @@ def test_a_missed_grasp_tries_the_other_cameras_estimate(tmp_path, monkeypatch):
 def test_the_top_down_pick_builds_no_planner_models(tmp_path, monkeypatch):
     """The KINDER planner's env models (~480 MB each, never freed) are only needed by
     the kinder pick; building them on every top-down run ran CI out of memory."""
-    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+    from prpl_tidybot import real_sim  # pylint: disable=import-outside-toplevel
 
     def refuse(*_args, **_kwargs):
         raise AssertionError("the top-down pick built the planner's env models")
 
-    monkeypatch.setattr(tc, "build_planner_env_models", refuse)
+    monkeypatch.setattr(real_sim, "build_planner_env_models", refuse)
     run_toss_cycles(
         _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
     )
@@ -793,15 +800,24 @@ def test_a_cube_that_ends_up_in_the_bin_is_put_back_by_the_person(
 ):
     """The pick's hover is below the bin's rim, so a cube in (or against) the bin is
     not picked: the person is asked to put it on the floor, and the record says so."""
-    # Cycle 1's pick localizes twice (before and after its drive); the check before
-    # cycle 2's pick finds the thrown cube in the bin.
-    spots = iter([(0.5, 0.3, 0.025), (0.5, 0.3, 0.025), (0.13, 1.68, 0.025)])
+    # The first throw lands in the bin box; the person puts it back on the floor.
+    world = {"cube": (0.5, 0.3, 0.025)}
+    original_toss = FakeArmInterface.toss
 
-    def get_target(_self):
-        return next(spots, (0.5, 0.3, 0.025))
+    def toss(self, **kwargs):
+        world["cube"] = (0.13, 1.68, 0.025)
+        return original_toss(self, **kwargs)
 
-    monkeypatch.setattr(ConstantTargetSource, "get_target", get_target)
-    operator = _Operator()
+    monkeypatch.setattr(FakeArmInterface, "toss", toss)
+    monkeypatch.setattr(ConstantTargetSource, "get_target", lambda _s: world["cube"])
+
+    class _PutsBack(_Operator):
+        def __call__(self, prompt):
+            if "in the bin" in prompt:
+                world["cube"] = (0.5, 0.3, 0.025)
+            return super().__call__(prompt)
+
+    operator = _PutsBack()
     run_toss_cycles(
         _compose(cycles=2, **{"bin_stop_box": "[-0.13,0.39,1.45,1.91]"}),
         log_dir=tmp_path,
@@ -810,6 +826,7 @@ def test_a_cube_that_ends_up_in_the_bin_is_put_back_by_the_person(
     assert operator.asked("in the bin") == 1
     log = json.loads((tmp_path / "cycles.json").read_text())
     assert log["cycles"][1]["cube_in_bin"] == {"x": 0.13, "y": 1.68}
+    assert log["completed"] == 2
 
 
 def test_a_cube_seen_inside_the_bin_box_is_put_back_by_the_person(
@@ -817,13 +834,28 @@ def test_a_cube_seen_inside_the_bin_box_is_put_back_by_the_person(
 ):
     """A cube inside the bin lies beyond the floor search and in shadow (run 31), so the
     in-bin check asks the source to look inside the bin box first."""
+    world = {"in_box": None}
+    original_toss = FakeArmInterface.toss
+
+    def toss(self, **kwargs):
+        world["in_box"] = (0.33, 2.02)
+        return original_toss(self, **kwargs)
+
+    monkeypatch.setattr(FakeArmInterface, "toss", toss)
     monkeypatch.setattr(
         ConstantTargetSource,
         "find_in_box",
-        lambda _self, box: (0.33, 2.02),
+        lambda _self, box: world["in_box"],
         raising=False,
     )
-    operator = _Operator()
+
+    class _PutsBack(_Operator):
+        def __call__(self, prompt):
+            if "in the bin" in prompt:
+                world["in_box"] = None
+            return super().__call__(prompt)
+
+    operator = _PutsBack()
     run_toss_cycles(
         _compose(cycles=2, **{"bin_stop_box": "[0.02,0.44,1.85,2.05]"}),
         log_dir=tmp_path,
@@ -852,10 +884,10 @@ def test_a_missed_pick_asks_the_person_to_move_the_cube_then_retries(
 ):
     """Josh, 2026-10-16: on a missed pick, ask the person to move the cube (e.g. out
     of the camera overlap strip) and try again, instead of ending the run."""
-    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+    import prpl_tidybot.skill_server as ss  # pylint: disable=import-outside-toplevel
 
     readings = iter([1.0, 0.49])  # closed on nothing, then on the cube
-    monkeypatch.setattr(tc, "_fake_reading", lambda _v, _r: next(readings))
+    monkeypatch.setattr(ss, "_fake_reading", lambda _v, _r: next(readings))
     operator = _Operator()
     summary = run_toss_cycles(
         _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=operator

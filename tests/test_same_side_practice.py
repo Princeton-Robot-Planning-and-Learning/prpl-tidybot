@@ -17,8 +17,9 @@ from prpl_tidybot.bin_localizer import BinFit
 from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
 from prpl_tidybot.interfaces.base_interface import FakeBaseInterface
 from prpl_tidybot.real_sim.perceivers.target_source import ConstantTargetSource
+from prpl_tidybot.robot_skills import arm_bin_collision
 from prpl_tidybot.top_down_pick import forward_kinematics, geometry_from_config
-from prpl_tidybot.toss_cycles import arm_bin_collision, run_toss_cycles
+from prpl_tidybot.toss_cycles import run_toss_cycles
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
 BIN = (-0.29, -0.77)  # the fake bin: the same-side spot, long side along y
@@ -28,7 +29,7 @@ IN_BIN = "[-0.27,-0.75,0.025]"
 @pytest.fixture(autouse=True)
 def _fast(monkeypatch):
     """The fake arm needs no real-time ticks."""
-    monkeypatch.setattr("prpl_tidybot.toss_cycles.POLICY_CONTROL_PERIOD", 0.0)
+    monkeypatch.setattr("prpl_tidybot.robot_skills.POLICY_CONTROL_PERIOD", 0.0)
 
 
 @pytest.fixture(autouse=True)
@@ -309,11 +310,11 @@ def test_the_grasp_on_the_other_faces_is_used_when_only_it_clears():
     fit = _bin_fit()
     base = (fit.x + 0.67, fit.y, math.pi)
     cube = {"x": fit.x, "y": fit.y + fit.length / 2 - fit.wall - 0.10, "yaw_deg": 0.0}
+    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
+        _bin_grasp_geometry,
+    )
     from prpl_tidybot.third_party.constants import (  # pylint: disable=import-outside-toplevel
         RETRACT_ARM_CONF,
-    )
-    from prpl_tidybot.toss_cycles import (  # pylint: disable=import-outside-toplevel
-        _bin_grasp_geometry,
     )
 
     chosen, problem = _bin_grasp_geometry(

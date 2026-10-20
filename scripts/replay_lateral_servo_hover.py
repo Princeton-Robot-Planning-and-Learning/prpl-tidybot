@@ -83,7 +83,9 @@ def _clips(cycles: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
             counts[n] = counts.get(n, 0) + 1
             k = counts[n]
             clip = f"{n}" + (f"_{k}" if k > 1 else "")
-            out.append((f"cycle_{cycle['cycle']:02d}_pick_{clip}", attempt))
+            # Since the skill server: the record names its own clip.
+            name = attempt.get("wrist_clip", f"cycle_{cycle['cycle']:02d}_pick_{clip}")
+            out.append((name, attempt))
     return out
 
 

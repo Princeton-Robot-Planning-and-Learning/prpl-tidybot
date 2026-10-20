@@ -4,23 +4,36 @@
 #
 #   python scripts/skill_server.py mode=real
 #   python scripts/skill_server.py mode=fake      # no robot: the same skills, faked
+#   python scripts/skill_server.py mode=sim       # the kinematic TidyBot (cfg.sim)
 #
-# Everything in toss_cycles.yaml (pick, bin, real_toss_bounds, toss_pose,
-# settle_after_toss_s) applies; the barrier is on.
+# The real room of 2026-10-20: everything in same_side_practice.yaml (the measured
+# tape, the pick out of the bin, the lateral wrist servo, the compliant arm) and
+# toss_cycles.yaml (the measured bin and its saturation mask, real_toss_bounds,
+# settle_after_toss_s), with the bin searched for at both of its spots.
 
 defaults:
-  - toss_cycles
+  - same_side_practice
   - _self_
 
 # The planner confirms nothing on stdin; the server never prompts.
 interactive: false
 
-barrier:
-  enabled: true
-# The barrier is still the +x placeholder line at x = 0, which the 2026-10-20 real
-# layout's toss pose (toss_cycles.yaml) is across; until the barrier is the measured
-# y-line, the server keeps the earlier toss pose on the placeholder's robot side.
-toss_pose: [1.326, -0.493, -3.132]
+# Home (go_home's goal): the close-side toss stand, 1.39 m +x of that spot's bin.
+toss_pose: [1.10, -0.78, 3.141592653589793]
+
+toss:
+  # The real robot throws at each bin spot from one fixed side (toss(direction=None)):
+  # the close spot (bin about (-0.29, -0.77), on the robot's side of the tape) from
+  # +x, the far spot (bin box x 0.03..0.45, y 1.24..1.56, across the tape) from -y,
+  # i.e. from the stand (0.24, 0.01, +90 deg) at 1.39 m. Azimuths, map frame, bin
+  # centre -> robot, rad.
+  spot_directions:
+    robot_side: 0.0
+    far_side: -1.5707963267948966
+
+bin:
+  # Both spots: the drivable box plus 0.3 m.
+  search_bounds: [-1.8, 2.0, -1.8, 1.8]
 
 skill_server:
   # Bind address on the NUC (all interfaces, so agni can reach it) and port, next to

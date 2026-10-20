@@ -1,6 +1,7 @@
-"""Pick the cube, arm to home, drive to the toss pose, toss; repeat.
+"""Pick the cube, drive to the toss pose, toss; repeat: the skill server's skills
+(prpl_tidybot.skill_server.TossingSkills) called in a fixed order.
 
-Config: conf/toss_cycles.yaml.
+Config: conf/toss_cycles.yaml (or --config-name same_side_practice).
 
 Every action asks for confirmation in mode=real, and whenever the run stops the arm
 retracts and the base drives back to the toss pose (after one more confirmation).

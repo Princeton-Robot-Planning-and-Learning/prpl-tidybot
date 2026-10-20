@@ -58,6 +58,10 @@ bin:
 
 pick:
   top_down:
+    # The compliant torque loop for every pick move (runs 37-40, 2026-10-20: the
+    # descent from the measured hover x, y, closing within the per-axis limits); the
+    # toss keeps the arm server's own swing.
+    arm_controller: compliant
     wrist_servo:
       enabled: false
     lateral_servo:

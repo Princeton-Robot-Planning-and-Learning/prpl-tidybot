@@ -55,15 +55,16 @@ class RealTossBounds:
     speed: tuple[float, float] = (100.0, 140.0)
     release_ms: tuple[float, float] = (500.0, 850.0)
 
-    def validate(self, standoff: float, speed: float, release_ms: float) -> None:
+    def validate(self, standoff: float | None, speed: float, release_ms: float) -> None:
         """Raise ``ValueError`` naming every parameter outside the box (or not a finite
-        number)."""
+        number). ``standoff`` None checks the swing alone (a toss from a fixed pose)."""
         bad = []
-        for name, value, (lo, hi) in (
+        checks = [
             ("standoff", standoff, self.standoff),
             ("speed", speed, self.speed),
             ("release_ms", release_ms, self.release_ms),
-        ):
+        ]
+        for name, value, (lo, hi) in checks[1:] if standoff is None else checks:
             if not (isinstance(value, (int, float)) and math.isfinite(value)):
                 bad.append(f"{name}={value!r} is not a number")
             elif not lo <= value <= hi:

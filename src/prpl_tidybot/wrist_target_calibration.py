@@ -36,13 +36,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from prpl_tidybot.interfaces.arm_interface import ArmInterface
+from prpl_tidybot.robot_skills import _AngularMover  # pylint: disable=protected-access
 from prpl_tidybot.top_down_pick import (
     TopDownPickGeometry,
     cube_closing_yaw,
     grasp_succeeded,
     pointing_down_joints,
 )
-from prpl_tidybot.toss_cycles import _AngularMover  # pylint: disable=protected-access
 from prpl_tidybot.visual_servo.image_sources import ImageSource
 from prpl_tidybot.visual_servo.top_down_cube import WristCube, detect_wrist_cube
 

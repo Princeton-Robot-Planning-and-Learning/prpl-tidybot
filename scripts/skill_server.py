@@ -5,6 +5,7 @@ Config: conf/skill_server.yaml. Run it ON the NUC, after the base and arm server
 
     python scripts/skill_server.py mode=real
     python scripts/skill_server.py mode=fake     # no robot
+    python scripts/skill_server.py mode=sim      # the kinematic TidyBot (cfg.sim)
 
 Connect from another machine with
 ``prpl_tidybot.skill_server.TossingRobotClient(<nuc ip>, 50002, RPC_AUTHKEY)``. Ctrl-C
@@ -17,6 +18,7 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig
 
+from prpl_tidybot.pipeline import _resolve_log_dir
 from prpl_tidybot.skill_server import build_skills, serve
 from prpl_tidybot.third_party.constants import RPC_AUTHKEY
 
@@ -29,8 +31,22 @@ from prpl_tidybot.third_party.constants import RPC_AUTHKEY
 def main(cfg: DictConfig) -> None:
     """Build the skills for cfg.mode and serve them until Ctrl-C."""
     logging.basicConfig(level=logging.INFO)
-    skills = build_skills(cfg)
-    serve(skills, str(cfg.skill_server.host), int(cfg.skill_server.port), RPC_AUTHKEY)
+    log_dir = _resolve_log_dir(None)
+    sim = None
+    if cfg.mode == "sim":
+        from prpl_tidybot.toss_sim import (  # pylint: disable=import-outside-toplevel
+            TossSim,
+        )
+
+        sim = TossSim(cfg, log_dir, input, False)
+    skills = build_skills(cfg, log_dir, sim=sim)
+    try:
+        serve(
+            skills, str(cfg.skill_server.host), int(cfg.skill_server.port), RPC_AUTHKEY
+        )
+    finally:
+        # The recordings, and the robot's clients (the arm's torque loop).
+        skills.close()
 
 
 if __name__ == "__main__":

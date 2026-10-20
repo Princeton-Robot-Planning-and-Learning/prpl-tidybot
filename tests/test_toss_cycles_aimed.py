@@ -37,7 +37,7 @@ def _base_log(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_control_period_sleep(monkeypatch):
     """The fake arm needs no real-time ticks."""
-    monkeypatch.setattr("prpl_tidybot.toss_cycles.POLICY_CONTROL_PERIOD", 0.0)
+    monkeypatch.setattr("prpl_tidybot.robot_skills.POLICY_CONTROL_PERIOD", 0.0)
 
 
 class _Operator:
@@ -103,6 +103,9 @@ def _aimed(**extra):
         "cycles": 1,
         # The pick on the robot's side, so the drive to the toss is clear of the bin.
         "env.cube_pose": "[0.8,0.8,0.025]",
+        # The placeholder layout's bin (toss_cycles.yaml's fake bin is the far spot).
+        "bin.pipelines.fake.x": FAKE_BIN[0],
+        "bin.pipelines.fake.y": FAKE_BIN[1],
     }
     overrides.update(extra)
     return _compose(**overrides)

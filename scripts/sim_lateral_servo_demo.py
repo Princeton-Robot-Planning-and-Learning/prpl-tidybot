@@ -44,8 +44,8 @@ from kinder.envs.kinematic3d.prpl3d import (
 )
 from pybullet_helpers.geometry import matrix_from_quat
 
+from prpl_tidybot.robot_skills import _servo_step_is_small, _tool_axes
 from prpl_tidybot.top_down_pick import TopDownPickGeometry, top_down_joint_targets
-from prpl_tidybot.toss_cycles import _servo_step_is_small, _tool_axes
 from prpl_tidybot.video import write_mp4
 from prpl_tidybot.visual_servo.image_sources import KinderEECameraSource
 from prpl_tidybot.visual_servo.top_down_cube import (

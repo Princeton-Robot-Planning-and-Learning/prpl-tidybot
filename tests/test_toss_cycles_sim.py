@@ -25,7 +25,7 @@ TOSS_POSE = "[0.13,-1.13,1.5708]"
 @pytest.fixture(autouse=True)
 def _no_wall_clock_waits(monkeypatch):
     """The sim keeps its own clock; skip the real-time waits around it."""
-    monkeypatch.setattr("prpl_tidybot.toss_cycles.POLICY_CONTROL_PERIOD", 0.0)
+    monkeypatch.setattr("prpl_tidybot.robot_skills.POLICY_CONTROL_PERIOD", 0.0)
     monkeypatch.setattr(
         arm_server, "time", SimpleNamespace(sleep=lambda _s: None, time=time.time)
     )

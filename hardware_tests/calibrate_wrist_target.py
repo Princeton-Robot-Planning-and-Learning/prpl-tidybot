@@ -25,8 +25,8 @@ from pathlib import Path
 from hydra import compose, initialize_config_dir
 
 from prpl_tidybot.interfaces.real_arm_interface import RealArmInterface
+from prpl_tidybot.robot_skills import _SettledImages  # pylint: disable=protected-access
 from prpl_tidybot.top_down_pick import geometry_from_config
-from prpl_tidybot.toss_cycles import _SettledImages  # pylint: disable=protected-access
 from prpl_tidybot.visual_servo.image_sources import KinovaWristCameraSource
 from prpl_tidybot.wrist_target_calibration import (
     CalibrationParams,

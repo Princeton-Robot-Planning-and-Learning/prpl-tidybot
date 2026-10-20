@@ -46,6 +46,12 @@ toss:
     speed: 120.0
     release_ms: 600.0
     direction: null
+  # The skills' toss(direction=None) per bin spot (robot_side: the bin on the robot's
+  # side of the barrier; far_side: across it), azimuths as `direction`; null: the
+  # valid one nearest the robot's bearing. conf/skill_server.yaml fixes both.
+  spot_directions:
+    robot_side: null
+    far_side: null
 
 # The box of real toss parameters (prpl_tidybot.aimed_toss.RealTossBounds). From
 # this arm's swing (prpl_tidybot.toss: trapezoidal, at most 140 deg/s, fixed release
@@ -240,10 +246,11 @@ bin:
   min_iou: 0.7
   num_frames: 10
   pipelines:
+    # The far spot of the 2026-10-20 layout (bin_stop_box above).
     fake:
       _target_: prpl_tidybot.bin_localizer.ConstantBinSource
-      x: -0.45
-      y: 0.4
+      x: 0.24
+      y: 1.40
       yaw: 0.0
       length: ${bin.length}
       width: ${bin.width}

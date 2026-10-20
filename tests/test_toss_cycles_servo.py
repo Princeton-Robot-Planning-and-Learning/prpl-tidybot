@@ -26,7 +26,7 @@ TARGET = (318.0, 280.0)
 def _no_control_period_sleep(monkeypatch):
     """The fake arm needs no real-time ticks; a lagging or sagging fake would
     otherwise sleep through every settle."""
-    monkeypatch.setattr("prpl_tidybot.toss_cycles.POLICY_CONTROL_PERIOD", 0.0)
+    monkeypatch.setattr("prpl_tidybot.robot_skills.POLICY_CONTROL_PERIOD", 0.0)
 
 
 def _compose(**extra):
@@ -185,20 +185,22 @@ def test_the_servo_under_the_onboard_controller_ignores_stale_joint_readings(
 def test_a_nudge_whose_ik_flips_branch_is_refused(tmp_path, monkeypatch):
     """As in the cylinder servo, a nudge whose IK would swing an arm joint by more
     than max_joint_step is not commanded; the servo stops and nothing descends."""
-    import prpl_tidybot.toss_cycles as tc  # pylint: disable=import-outside-toplevel
+    import prpl_tidybot.robot_skills as rs  # pylint: disable=import-outside-toplevel
 
-    real = tc.top_down_joint_targets
+    real = rs.top_down_joint_targets
     calls = {"n": 0}
 
     def flipping(ax, ay, yaw, geom, seed=None):
         calls["n"] += 1
         hover, grasp = real(ax, ay, yaw, geom, seed=seed)
-        if calls["n"] >= 3:  # the servo's probes and nudges
+        # The pick's plan and the grasp's own check and targets come first; then the
+        # servo's probes and nudges.
+        if calls["n"] >= 4:
             hover = list(hover)
             hover[3] += 1.0
         return hover, grasp
 
-    monkeypatch.setattr(tc, "top_down_joint_targets", flipping)
+    monkeypatch.setattr(rs, "top_down_joint_targets", flipping)
     result, _, log = _run(
         tmp_path, monkeypatch, (0.01, 0.0), **{"pick.top_down.max_attempts": 1}
     )
