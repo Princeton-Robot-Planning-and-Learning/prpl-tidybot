@@ -183,6 +183,30 @@ def forward_kinematics(
     )
 
 
+def arm_link_points(
+    joints: Sequence[float], geom: TopDownPickGeometry
+) -> dict[str, NDArray[np.float64]]:
+    """Every collision mesh vertex of each arm link at ``joints``, in the arm frame
+    (the IK model has no gripper mesh: the 2F-85 is only its pinch-point offset)."""
+    solver = _solver(geom)
+    model, data = solver.model, solver.data
+    data.qpos[:] = joints
+    mujoco.mj_kinematics(model, data)
+    links: dict[str, NDArray[np.float64]] = {}
+    for g in range(model.ngeom):
+        mesh = int(model.geom_dataid[g])
+        if mesh < 0 or not model.geom_contype[g]:
+            continue
+        start, count = int(model.mesh_vertadr[mesh]), int(model.mesh_vertnum[mesh])
+        local = np.asarray(model.mesh_vert[start : start + count], np.float64)
+        rot = data.geom_xmat[g].reshape(3, 3)
+        name = str(
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, model.geom_bodyid[g])
+        )
+        links[name] = data.geom_xpos[g] + local @ rot.T
+    return links
+
+
 def top_down_joint_targets(
     ax: float,
     ay: float,

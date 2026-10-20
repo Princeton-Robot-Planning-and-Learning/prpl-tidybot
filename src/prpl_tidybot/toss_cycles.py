@@ -37,6 +37,7 @@ from relational_structs import ObjectCentricState
 
 import prpl_tidybot.config_resolvers  # noqa: F401  # pylint: disable=unused-import
 from prpl_tidybot.aimed_toss import RealTossBounds, Workspace, plan_aimed_toss
+from prpl_tidybot.bin_localizer import BinFit, ConstantBinSource, cube_in_bin
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.pick_and_toss import PickSkillAgent, PromptFn, _toss
 from prpl_tidybot.pipeline import _resolve_log_dir
@@ -50,6 +51,7 @@ from prpl_tidybot.top_down_pick import (
     CARRY_ARM_CONF,
     TopDownPickGeometry,
     arm_frame_target,
+    arm_link_points,
     cube_closing_yaw,
     forward_kinematics,
     geometry_from_config,
@@ -159,6 +161,158 @@ def _put_back_if_in_bin(
     )
 
 
+def _bin_box(bin_fit: BinFit) -> list[float]:
+    """The axis-aligned floor box (x_min, x_max, y_min, y_max) around the bin."""
+    c, s = math.cos(bin_fit.yaw), math.sin(bin_fit.yaw)
+    hx = 0.5 * (abs(bin_fit.length * c) + abs(bin_fit.width * s))
+    hy = 0.5 * (abs(bin_fit.length * s) + abs(bin_fit.width * c))
+    return [bin_fit.x - hx, bin_fit.x + hx, bin_fit.y - hy, bin_fit.y + hy]
+
+
+def _find_cube(source: Any, bin_fit: BinFit | None) -> dict[str, Any]:
+    """The cube's pose, and with a bin whether it lies inside it (``in_bin``): inside
+    the bin it is in shadow and beyond the floor search, so the bin is looked in
+    first when the source can (run 31)."""
+    if bin_fit is not None:
+        finder = getattr(source, "find_pose_in_box", None)
+        found = finder(_bin_box(bin_fit)) if callable(finder) else None
+        if found is not None and cube_in_bin(found[:2], bin_fit, margin=0.0):
+            return {
+                "x": float(found[0]),
+                "y": float(found[1]),
+                "yaw_deg": math.degrees(found[2]),
+                "in_bin": True,
+            }
+    cube: dict[str, Any] = dict(_localize(source))
+    if bin_fit is not None:
+        cube["in_bin"] = cube_in_bin((cube["x"], cube["y"]), bin_fit, margin=0.0)
+    return cube
+
+
+def _overlaps(poly: NDArray[np.float64], half: tuple[float, float]) -> bool:
+    """Whether the convex polygon ``poly`` (N x 2) overlaps the rectangle centred on
+    the origin with half extents ``half`` (separating axes)."""
+    rect = np.array(
+        [
+            [-half[0], -half[1]],
+            [half[0], -half[1]],
+            [half[0], half[1]],
+            [-half[0], half[1]],
+        ]
+    )
+    axes = [np.array([1.0, 0.0]), np.array([0.0, 1.0])]
+    for k in range(len(poly)):
+        edge = poly[(k + 1) % len(poly)] - poly[k]
+        axes.append(np.array([-edge[1], edge[0]]))
+    for axis in axes:
+        a, b = poly @ axis, rect @ axis
+        if a.max() < b.min() or b.max() < a.min():
+            return False
+    return True
+
+
+def arm_bin_collision(
+    joints: Sequence[float],
+    geom: TopDownPickGeometry,
+    base: Sequence[float],
+    bin_fit: BinFit,
+    in_bin: Any,
+) -> str | None:
+    """Why the arm at ``joints``, its base at map pose ``base``, would touch the bin's
+    walls, or None.
+
+    Each arm link's collision mesh, and the 2F-85 as a box (the IK model has no
+    gripper mesh), is cut below the rim (plus ``wall_margin``); a part touches a wall
+    unless that cut lies wholly inside the bin's inner footprint or wholly outside its
+    outer one, both by ``wall_margin``.
+    """
+    margin = float(in_bin.wall_margin)
+    pos, approach, closing = forward_kinematics(joints, geom)
+    across = np.cross(closing, approach)
+    corners = [
+        pos
+        + a * approach
+        + b * float(in_bin.gripper_half_closing) * closing
+        + c * float(in_bin.gripper_half_across) * across
+        for a in (float(in_bin.fingertip_drop), -float(in_bin.gripper_length))
+        for b in (-1.0, 1.0)
+        for c in (-1.0, 1.0)
+    ]
+    parts = dict(arm_link_points(joints, geom))
+    parts["gripper"] = np.asarray(corners)
+    # Arm frame -> the bin's own frame (its x along its length).
+    x, y, theta = base
+    mx = x + geom.mounting_offset * math.cos(theta)
+    my = y + geom.mounting_offset * math.sin(theta)
+    rim = geom.floor_z + bin_fit.height + margin
+    outer = (0.5 * bin_fit.length + margin, 0.5 * bin_fit.width + margin)
+    inner = (
+        0.5 * bin_fit.length - bin_fit.wall - margin,
+        0.5 * bin_fit.width - bin_fit.wall - margin,
+    )
+    ct, st = math.cos(theta), math.sin(theta)
+    cb, sb = math.cos(bin_fit.yaw), math.sin(bin_fit.yaw)
+    for name, points in parts.items():
+        low = points[points[:, 2] < rim]
+        if len(low) == 0:
+            continue
+        wx = mx + ct * low[:, 0] - st * low[:, 1] - bin_fit.x
+        wy = my + st * low[:, 0] + ct * low[:, 1] - bin_fit.y
+        local = np.c_[cb * wx + sb * wy, -sb * wx + cb * wy]
+        if np.all(np.abs(local[:, 0]) <= inner[0]) and np.all(
+            np.abs(local[:, 1]) <= inner[1]
+        ):
+            continue
+        hull = cv.convexHull(local.astype(np.float32)).reshape(-1, 2).astype(np.float64)
+        if _overlaps(hull, outer):
+            depth = (bin_fit.height + geom.floor_z) - float(low[:, 2].min())
+            return f"the {name} would touch the bin wall ({depth:.3f} m below the rim)"
+    return None
+
+
+def _bin_pick_targets(
+    geom: TopDownPickGeometry,
+    target: tuple[float, float, float],
+    bin_fit: BinFit,
+    in_bin: Any,
+    seed: Sequence[float],
+) -> list[float]:
+    """The waypoint above the cube with the fingertips ``rim_clearance`` above the
+    bin's rim: where the pick into the bin starts and ends."""
+    above_hover = (
+        bin_fit.height
+        + float(in_bin.rim_clearance)
+        + float(in_bin.fingertip_drop)
+        - geom.grasp_height
+    )
+    high = dataclasses.replace(geom, hover_height=max(above_hover, geom.hover_height))
+    return top_down_joint_targets(*target, high, seed=seed)[0]
+
+
+def _bin_pick_problem(
+    geom: TopDownPickGeometry,
+    base: Sequence[float],
+    cube: dict[str, Any],
+    bin_fit: BinFit,
+    in_bin: Any,
+    seed: Sequence[float],
+) -> str | None:
+    """Why the pick of the cube inside the bin, from ``base``, would touch a wall at
+    the waypoint above the rim, the hover or the grasp, or None."""
+    ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
+    yaw = math.radians(cube["yaw_deg"]) - base[2]
+    try:
+        above = _bin_pick_targets(geom, (ax, ay, yaw), bin_fit, in_bin, seed)
+        hover, grasp = top_down_joint_targets(ax, ay, yaw, geom, seed=above)
+    except ValueError as e:
+        return f"no top-down pick into the bin: {e}"
+    for name, joints in (("above", above), ("hover", hover), ("grasp", grasp)):
+        problem = arm_bin_collision(joints, geom, base, bin_fit, in_bin)
+        if problem is not None:
+            return f"{name}: {problem}"
+    return None
+
+
 def _landing(cube: dict[str, float], toss_pose: list[float]) -> dict[str, float]:
     """Where a throw ended relative to the toss pose: distance and bearing off its
     heading."""
@@ -170,6 +324,20 @@ def _landing(cube: dict[str, float], toss_pose: list[float]) -> dict[str, float]
         "distance_m": math.hypot(dx, dy),
         "off_heading_deg": math.degrees((bearing + math.pi) % (2 * math.pi) - math.pi),
     }
+
+
+def _scored_landing(
+    cube: dict[str, Any], toss_pose: list[float], bin_fit: BinFit | None, margin: float
+) -> dict[str, Any]:
+    """Where a throw ended, and with a localized bin whether the cube is inside it
+    (``in_bin``) and inside its scoring region, ``margin`` inside the walls
+    (``scored``, as Tossing3D scores)."""
+    landing: dict[str, Any] = dict(_landing(cube, toss_pose))
+    if bin_fit is not None:
+        xy = (cube["x"], cube["y"])
+        landing["in_bin"] = bool(cube.get("in_bin", cube_in_bin(xy, bin_fit, 0.0)))
+        landing["scored"] = cube_in_bin(xy, bin_fit, margin)
+    return landing
 
 
 def run_toss_cycles(  # pylint: disable=too-many-locals
@@ -241,11 +409,26 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
     workspace = Workspace.from_config(cfg.get("barrier"), cfg.preview.floor_bounds)
     aimed = cfg.toss.get("aimed")
     aiming = aimed is not None and bool(aimed.get("enabled", False))
-    bin_source = (
-        hydra.utils.instantiate(cfg.bin.pipelines[cfg.mode], _convert_="all")
-        if aiming
-        else None
-    )
+    # Same-side practice: the bin is localized every cycle and a cube inside it picked.
+    in_bin_cfg = cfg.pick.get("top_down", {}).get("in_bin")
+    bin_pick = aiming and in_bin_cfg is not None and bool(in_bin_cfg.get("enabled"))
+    score_margin = float(cfg.bin.get("in_bin_margin", 0.05))
+    bin_source: Any = None
+    if aiming and sim is not None and cfg.sim.get("bin") is not None:
+        x, y, yaw_deg = (float(v) for v in cfg.sim.bin)
+        bin_source = ConstantBinSource(
+            x,
+            y,
+            math.radians(yaw_deg),
+            float(cfg.bin.length),
+            float(cfg.bin.width),
+            float(cfg.bin.height),
+            float(cfg.bin.wall),
+        )
+    elif aiming:
+        bin_source = hydra.utils.instantiate(
+            cfg.bin.pipelines[cfg.mode], _convert_="all"
+        )
     source: ImageSource | None = None
     if wrist_camera is not None:
         source = wrist_camera(arm)
@@ -295,6 +478,12 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
         for cycle in range(1, requested + 1):
             record: dict[str, Any] = {"cycle": cycle, "tossed": False}
             records.append(record)
+            bin_fit: BinFit | None = None
+            if bin_pick:
+                assert bin_source is not None
+                _logger.info("Cycle %d/%d: localizing the bin.", cycle, requested)
+                bin_fit = bin_source.localize()
+                record["bin"] = bin_fit.as_dict()
             _logger.info("Cycle %d/%d: localizing the cube.", cycle, requested)
             if cycle > 1:
                 _put_back_if_in_bin(cfg, cube_source, record, prompt_fn)
@@ -313,6 +502,8 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
                     servo,
                     prompt_fn if interactive else None,
                     workspace,
+                    bin_fit=bin_fit,
+                    in_bin=in_bin_cfg if bin_pick else None,
                 )
             else:
                 failure = _pick_kinder(
@@ -329,7 +520,12 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
                     record,
                 )
             if cycle > 1 and "cube_before_pick" in record:
-                records[-2]["landing"] = _landing(record["cube_before_pick"], toss_pose)
+                records[-2]["landing"] = _scored_landing(
+                    record["cube_before_pick"],
+                    records[-2].get("aimed", {}).get("pose", toss_pose),
+                    bin_fit,
+                    score_margin,
+                )
             if failure is not None:
                 finish_reason = failure
                 break
@@ -364,7 +560,9 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
                     f"{math.degrees(throw_from[2]):+.0f} deg), "
                     f"{float(aimed.standoff):.2f} m from the bin?"
                 )
-                _drive_to(real_env, list(throw_from), workspace)
+                _drive_to(
+                    real_env, list(throw_from), workspace, None, bin_source.last_fit
+                )
             else:
                 confirm(
                     f"Cycle {cycle}: Drive to the toss pose ({toss_pose[0]:+.3f}, "
@@ -394,6 +592,18 @@ def run_toss_cycles(  # pylint: disable=too-many-locals
                 time.sleep(settle)
         else:
             finish_reason = f"completed {completed}/{requested} cycles"
+            if bin_pick and records and records[-1].get("tossed"):
+                assert bin_source is not None
+                try:
+                    last_fit = bin_source.localize()
+                    records[-1]["landing"] = _scored_landing(
+                        _find_cube(cube_source, last_fit),
+                        records[-1].get("aimed", {}).get("pose", toss_pose),
+                        last_fit,
+                        score_margin,
+                    )
+                except RuntimeError as e:
+                    records[-1]["landing"] = {"error": str(e)}
     except _Declined as e:
         finish_reason = f"declined: {e}"
     except ValueError as e:
@@ -570,6 +780,7 @@ def _drive_to(
     pose: list[float],
     workspace: Workspace | None = None,
     stop: threading.Event | None = None,
+    bin_fit: BinFit | None = None,
 ) -> tuple[float, float, float]:
     """Drive the base to the map-frame pose with the kinematic3d executor (as
     hardware_tests/test_base_map_target.py does); returns the reached pose.
@@ -587,7 +798,7 @@ def _drive_to(
     if workspace is not None:
         here = obs.map_base_pose
         problem = workspace.path_problem(
-            (float(here.x), float(here.y), float(here.theta())), pose
+            (float(here.x), float(here.y), float(here.theta())), pose, bin_fit
         )
         if problem is not None:
             raise ValueError(f"Drive refused: {problem}.")
@@ -706,6 +917,7 @@ def pick_problem(
     geom: TopDownPickGeometry,
     floor: Sequence[float],
     workspace: Workspace | None,
+    bin_fit: BinFit | None = None,
 ) -> str | None:
     """Why the top-down pick of ``cube`` cannot even start from ``robot``, or None:
 
@@ -725,12 +937,12 @@ def pick_problem(
             (cube["x"], cube["y"]),
             geom,
             floor,
-            None if workspace is None else workspace.valid(),
+            None if workspace is None else workspace.valid(bin_fit),
         )
     except ValueError as e:
         return str(e)
     if workspace is not None:
-        problem = workspace.path_problem(robot, stand)
+        problem = workspace.path_problem(robot, stand, bin_fit)
         if problem is not None:
             return f"pick standoff unreachable: {problem}"
     return None
@@ -787,6 +999,8 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
     ask_to_move: PromptFn | None = None,
     workspace: Workspace | None = None,
     stop: threading.Event | None = None,
+    bin_fit: BinFit | None = None,
+    in_bin: Any = None,
 ) -> str | None:
     """Jimmy Wu's top-down pick (prpl_tidybot.top_down_pick) on the localized cube.
 
@@ -797,6 +1011,12 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
     ``ask_to_move``, a miss instead retracts and asks the person to move the cube (up to
     ``ask_to_move_after_miss`` times), then tries again. Returns a stop reason, or None
     once the cube is held (arm at its carry pose).
+
+    With a localized ``bin_fit`` and ``in_bin`` (same-side practice) the cube is looked
+    for inside the bin first and picked from there through a waypoint above the rim;
+    every standoff and drive keeps the base clear of the bin; and a cube the robot may
+    not or cannot pick (past the barrier, or too close to a bin wall to grasp without
+    touching it) is handed to the person instead of ending the run.
     """
     td = cfg.pick.top_down
     floor = tuple(cfg.preview.floor_bounds)
@@ -804,7 +1024,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
     asks = int(td.get("ask_to_move_after_miss", 3)) if ask_to_move is not None else 0
     for attempt in range(1, attempts + asks + 1):
         try:
-            cube = _localize(cube_source)
+            cube = _find_cube(cube_source, bin_fit)
         except RuntimeError as e:
             if not _asked_to_move(
                 ask_to_move,
@@ -819,33 +1039,65 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
         record.setdefault("cube_before_pick", cube)
         obs, _ = real_env.reset()
         robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
-        problem = pick_problem(robot, cube, geom, floor, workspace)
+        problem = pick_problem(robot, cube, geom, floor, workspace, bin_fit)
+        stand: tuple[float, float, float] | None = None
+        if problem is None:
+            stand = standoff_pose(
+                robot,
+                (cube["x"], cube["y"]),
+                geom,
+                floor,
+                None if workspace is None else workspace.valid(bin_fit),
+            )
+            if cube.get("in_bin") and bin_fit is not None and in_bin is not None:
+                wall = _bin_pick_problem(
+                    geom, stand, cube, bin_fit, in_bin, arm.get_arm_state()
+                )
+                if wall is not None:
+                    problem = f"cube too close to the bin wall to grasp ({wall})"
         if problem is not None:
-            return f"{problem}; move the cube and rerun"
-        stand = standoff_pose(
-            robot,
-            (cube["x"], cube["y"]),
-            geom,
-            floor,
-            None if workspace is None else workspace.valid(),
-        )
+            if in_bin is None or ask_to_move is None:
+                return f"{problem}; move the cube and rerun"
+            record.setdefault("handed_to_person", []).append(
+                {"cube": cube, "problem": problem}
+            )
+            if not _asked_to_move(
+                ask_to_move,
+                asks,
+                record,
+                f"\nCycle {cycle}: the cube at ({cube['x']:+.3f}, {cube['y']:+.3f}) "
+                f"cannot be picked: {problem}. Please move it onto the floor on the "
+                "robot's side of the tape, clear of the bin and of the camera overlap "
+                "strip (y -0.15..0.18), then press Enter, or type 'stop' to end the "
+                "run: ",
+            ):
+                return f"{problem}; the operator stopped the run"
+            continue
+        assert stand is not None
         confirm(
             f"Cycle {cycle}: Drive to the pick standoff ({stand[0]:+.3f}, "
             f"{stand[1]:+.3f}, {math.degrees(stand[2]):+.0f} deg), "
             f"{geom.standoff:.2f} m from the cube at ({cube['x']:+.3f}, "
             f"{cube['y']:+.3f})?"
         )
-        base = _drive_to(real_env, list(stand), workspace, stop)
+        base = _drive_to(real_env, list(stand), workspace, stop, bin_fit)
         try:
-            cube = _localize(cube_source)  # corrects for where the base parked
+            # Corrects for where the base parked.
+            cube = _find_cube(cube_source, bin_fit)
         except RuntimeError as e:
             return f"{e}; move the cube and rerun"
         # The more confident camera's estimate first; on a miss, the other cameras'
         # (they disagree by ~3 cm where they overlap).
-        targets = [(cube, "best camera")] + [
-            ({"x": x, "y": y, "yaw_deg": math.degrees(yaw)}, "other camera")
-            for x, y, yaw in cube_source.alternates()
-        ]
+        # Inside the bin there is one estimate: the floor localizer's others are stale.
+        from_bin = bin_fit if cube.get("in_bin") else None
+        targets = [(cube, "best camera")] + (
+            []
+            if from_bin is not None
+            else [
+                ({"x": x, "y": y, "yaw_deg": math.degrees(yaw)}, "other camera")
+                for x, y, yaw in cube_source.alternates()
+            ]
+        )
         for k, (cube, label) in enumerate(targets):
             if k > 0:
                 confirm(
@@ -868,6 +1120,8 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 attempts,
                 f"{attempt}" + (f"_{k + 1}" if k else ""),
                 stop,
+                from_bin,
+                in_bin,
             )
             if failure is not None:
                 return failure
@@ -893,7 +1147,7 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 "pose to re-localize the cube?"
             )
             _retract(cfg, arm, stop)
-            _drive_to(real_env, list(toss_pose), workspace, stop)
+            _drive_to(real_env, list(toss_pose), workspace, stop, bin_fit)
     return (
         f"pick failed after {attempts} attempts (gripper never closed on the cube); "
         "move the cube and rerun"
@@ -1276,9 +1530,13 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     attempts: int,
     clip: str,
     stop: threading.Event | None = None,
+    bin_fit: BinFit | None = None,
+    in_bin: Any = None,
 ) -> tuple[bool, str | None]:
     """One grasp from where the base parked at `cube`: (held, stop reason or None).
-    The wrist clip is left recording when the cube is held."""
+    The wrist clip is left recording when the cube is held. With ``bin_fit`` the cube
+    is inside the bin: the arm goes through the waypoint above the rim, and no arm
+    pose touching a wall is commanded."""
     td = cfg.pick.top_down
     ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
     yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
@@ -1293,12 +1551,32 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
             "cube": cube,
             "target": label,
             "arm_target_xy": [ax, ay],
+            "base": list(base),
             "moves": moves,
         }
     )
+    above: list[float] | None = None
+    clear: Callable[[Sequence[float]], str | None] | None = None
+    if bin_fit is not None and in_bin is not None:
+        wall = _bin_pick_problem(geom, base, cube, bin_fit, in_bin, arm.get_arm_state())
+        if wall is not None:
+            record["pick_attempts"][-1].update(
+                {"gripper": None, "held": False, "note": f"bin wall: {wall}"}
+            )
+            _logger.warning("Pick attempt %d not started: bin wall: %s.", attempt, wall)
+            return False, None
+        above = _bin_pick_targets(
+            geom, (ax, ay, yaw_rel), bin_fit, in_bin, arm.get_arm_state()
+        )
+        fit, cfg_in_bin = bin_fit, in_bin
+
+        def clear(joints: Sequence[float]) -> str | None:
+            return arm_bin_collision(joints, geom, base, fit, cfg_in_bin)
+
     confirm(
-        f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: open, arm to 10 cm "
-        f"above the cube (arm frame {ax:+.3f}, {ay:+.3f}), "
+        f"Cycle {cycle}: Pick attempt {attempt}/{attempts}: open, "
+        + ("arm above the bin's rim, " if above is not None else "")
+        + f"arm to 10 cm above the cube (arm frame {ax:+.3f}, {ay:+.3f}), "
         + ("align with the wrist camera, " if servo is not None else "")
         + "descend, close?"
     )
@@ -1319,6 +1597,8 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         read,
         servo,
         f"c{cycle}a{clip}",
+        above,
+        clear,
     )
     if servo_log is not None:
         key = "lateral_servo" if isinstance(servo, TopDownLateralServo) else "servo"
@@ -1359,22 +1639,39 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
     read: Any,
     servo: TopDownCubeServo | TopDownLateralServo | None,
     name: str,
+    above: list[float] | None = None,
+    clear: Callable[[Sequence[float]], str | None] | None = None,
 ) -> tuple[bool, float, str | None, dict[str, Any] | None]:
     """Jimmy Wu's pick_object sequence: open, hover, (align with the wrist camera),
     descend, close, read; then lift and carry, or open and back off.
+
+    With ``above`` (a cube inside the bin) the arm enters and leaves through that
+    waypoint over the rim, and ``clear`` (why a pose would touch the bin, or None)
+    refuses any servo step or grasp that would.
 
     Returns (held, gripper reading, note, servo log); the note says why the gripper
     was not closed, if it was not.
     """
     td = mover.td
     ax, ay, yaw = start
-    hover, grasp = top_down_joint_targets(ax, ay, yaw, geom, seed=mover.joints())
+    hover, grasp = top_down_joint_targets(
+        ax, ay, yaw, geom, seed=above if above is not None else mover.joints()
+    )
     servo_log: dict[str, Any] | None = None
+
+    def retreat(to: list[float]) -> None:
+        mover.move("retreat", to)
+        if above is not None:
+            mover.move("above", above)
+
     mover.begin()
     try:
         mover.gripper(0.0)
+        if above is not None and not mover.move("above", above):
+            mover.move("above", above)
+            return False, mover.arm.get_gripper_state(), "above did not arrive", None
         if not mover.move("hover", hover):
-            mover.move("retreat", hover)
+            retreat(hover)
             return False, mover.arm.get_gripper_state(), "hover did not arrive", None
         if servo is not None:
 
@@ -1382,6 +1679,9 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
                 here = mover.joints()
                 joints, _ = top_down_joint_targets(x, y, w, geom, seed=here)
                 if not _servo_step_is_small(here, joints, td):
+                    return False
+                if clear is not None and clear(joints) is not None:
+                    _logger.warning("Servo step refused: %s.", clear(joints))
                     return False
                 prefix = (
                     "lateral" if isinstance(servo, TopDownLateralServo) else "servo"
@@ -1415,10 +1715,18 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
                 ax, ay, yaw, geom, seed=mover.joints()
             )
             if not result.aligned:
-                mover.move("retreat", hover)
+                retreat(hover)
                 return False, mover.arm.get_gripper_state(), result.note, servo_log
+        if clear is not None and clear(grasp) is not None:
+            retreat(hover)
+            return (
+                False,
+                mover.arm.get_gripper_state(),
+                f"grasp refused: {clear(grasp)}",
+                servo_log,
+            )
         if not mover.move("grasp", grasp, correct=True):
-            mover.move("retreat", hover)
+            retreat(hover)
             return (
                 False,
                 mover.arm.get_gripper_state(),
@@ -1429,10 +1737,12 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
         held = grasp_succeeded(reading, geom)
         if held:
             mover.move("lift", hover)
+            if above is not None:
+                mover.move("above", above)
             mover.move("carry", list(CARRY_ARM_CONF))
         else:
             mover.gripper(0.0)
-            mover.move("retreat", hover)
+            retreat(hover)
         return held, reading, None, servo_log
     finally:
         mover.end()
