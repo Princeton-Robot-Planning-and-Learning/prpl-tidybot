@@ -31,9 +31,32 @@ toss:
     robot_side: 0.0
     far_side: -1.5707963267948966
 
+pick:
+  top_down:
+    # The 2026-10-20 pilot's grasps, off the floor and out of the bin: the arm's
+    # onboard position controller (the toss keeps the arm server's own swing).
+    arm_controller: angular
+  # Attempts per pick() call. After a miss the robot retracts, drives back to
+  # toss_pose (where the ceiling cameras see the cube without the robot over it),
+  # localizes the bin and the cube again and re-plans; missing every attempt, it ends
+  # there. toss_cycles passes 1: it asks its operator between attempts itself.
+  max_attempts: 2
+
 bin:
   # Both spots: the drivable box plus 0.3 m.
   search_bounds: [-1.8, 2.0, -1.8, 1.8]
+  # The cardboard's HSV saturation threshold per ceiling camera (the lab's
+  # camera_serials): the top camera sees the far spot, the bottom one the close spot.
+  # Replaying the 2026-10-20 pilot's frames, 160/130 found the bin in 57/57 far and
+  # 41/41 close looks. One number for both cameras also works: 140 found 56/57 far,
+  # 41/41 close (the pilot ran on it).
+  min_saturation:
+    AD8A29AE: 160.0
+    5A5C29AE: 130.0
+  # A real cube cannot rest on the rim: a centre inside the walls is in the bin
+  # (pilot run9's far throw, 91.5 mm off-centre across the 0.29 m bin, did not score
+  # with toss_cycles' 5 cm margin).
+  in_bin_margin: 0.0
 
 skill_server:
   # Bind address on the NUC (all interfaces, so agni can reach it) and port, next to

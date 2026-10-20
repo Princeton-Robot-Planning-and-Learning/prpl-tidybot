@@ -19,6 +19,7 @@ from prpl_tidybot.interfaces.base_interface import FakeBaseInterface
 from prpl_tidybot.real_sim.perceivers.target_source import ConstantTargetSource
 from prpl_tidybot.robot_skills import InBinPick
 from prpl_tidybot.skill_server import (
+    BIN_NOT_LOCALIZED,
     FakeTossingRobot,
     SkillBusy,
     SkillStopped,
@@ -26,6 +27,7 @@ from prpl_tidybot.skill_server import (
     build_skills,
     serve,
 )
+from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
 from prpl_tidybot.top_down_pick import geometry_from_config
 from prpl_tidybot.visual_servo.top_down_cube import TopDownLateralServo
 
@@ -43,7 +45,9 @@ CONTRACT_KEYS = {
     "barrier",
     "barrier_x",
     "toss_direction",
+    "can_pick",
 }
+CAN_PICK_KEYS = {"feasible", "note", "refused", "reason"}
 HOME = (1.10, -0.78, math.pi)  # the close-side toss stand, the server's home
 CLOSE_BIN = (-0.29, -0.77)  # the fake bin: the close spot, long side along y
 FAR_BIN = (0.24, 1.40)  # the far spot's measured box x 0.03..0.45, y 1.24..1.56
@@ -103,12 +107,55 @@ def _still(skills):
     return (list(skills.arm.get_arm_state()), skills.observe()["robot"])
 
 
+def _base(skills):
+    """The base's map pose, without a look."""
+    return skills._robot()  # pylint: disable=protected-access
+
+
+class _CountingBins:
+    """The skills' bin source, counting its localizations; ``found`` False: no bin."""
+
+    def __init__(self, inner, found=True):
+        self.inner = inner
+        self.found = found
+        self.calls = 0
+
+    def localize(self):
+        """The inner source's bin, or the ceiling source's miss."""
+        self.calls += 1
+        if not self.found:
+            raise RuntimeError("CeilingBinSource: no bin found in the search box")
+        return self.inner.localize()
+
+    def close(self):
+        """Nothing to release."""
+
+
+def _count_cube_looks(monkeypatch):
+    """Count the cube source's floor localizations."""
+    looks = []
+    original = ConstantTargetSource.get_target
+
+    def get_target(self):
+        looks.append(True)
+        return original(self)
+
+    monkeypatch.setattr(ConstantTargetSource, "get_target", get_target)
+    return looks
+
+
+def _missing(skills, **cfg):
+    """Skills whose gripper closes on nothing (0.996: the empty reading)."""
+    del skills
+    return build_skills(_cfg(**{"pick.top_down.fake_grasp_reading": 0.996, **cfg}))
+
+
 # ------------------------------------------------------------------ the real room
 
 
 def test_the_server_config_is_the_real_room():
     """The measured tape, the measured bin searched for at both spots, the pick out
-    of the bin on, the lateral servo on, the compliant arm
+    of the bin on, the lateral servo on, the onboard angular controller for the picks
     (the toss keeps its own swing), and each spot's fixed toss direction."""
     cfg = _cfg()
     workspace = Workspace.from_config(cfg.barrier, cfg.preview.floor_bounds)
@@ -118,12 +165,18 @@ def test_the_server_config_is_the_real_room():
         )
     assert workspace.barrier.depth((0.0, 0.0)) > 0  # the robot is on -y
     assert (cfg.bin.length, cfg.bin.width, cfg.bin.height) == (0.39, 0.29, 0.21)
-    assert cfg.bin.min_saturation == 130.0
+    # Per camera (2026-10-20 replay: 57/57 far, 41/41 close): the top camera sees
+    # the far spot, the bottom one the close spot.
+    assert dict(cfg.bin.min_saturation) == {"AD8A29AE": 160.0, "5A5C29AE": 130.0}
+    assert list(cfg.lab.camera_serials) == ["AD8A29AE", "5A5C29AE"]
+    # The real cube cannot rest on the rim: inside the walls scores.
+    assert cfg.bin.in_bin_margin == 0.0
+    assert cfg.barrier.clearance == 0.05
     x0, x1, y0, y1 = cfg.bin.search_bounds
     for spot in (CLOSE_BIN, FAR_BIN):
         assert x0 < spot[0] < x1 and y0 < spot[1] < y1, spot
     td = cfg.pick.top_down
-    assert td.arm_controller == "compliant"
+    assert td.arm_controller == "angular"  # the pilot's grasps, floor and in-bin
     assert td.lateral_servo.enabled and "wrist_servo" not in td
     assert td.in_bin.enabled
     assert cfg.toss.spot_directions.robot_side == pytest.approx(0.0)
@@ -176,12 +229,23 @@ def test_observe_looks_for_the_cube_inside_the_bin_first(skills, monkeypatch):
     assert obs["cube_inside_bin"] is True and obs["cube_in_bin"] is True
 
 
-def test_a_cube_inside_the_bin_but_against_its_wall_does_not_score(skills):
-    """cube_in_bin is Tossing3D's scoring region (5 cm inside the walls);
-    cube_inside_bin is anywhere inside them."""
-    skills.cube_source = ConstantTargetSource(CLOSE_BIN[0], CLOSE_BIN[1] + 0.17, 0.025)
+def test_a_cube_inside_the_bins_walls_scores(skills):
+    """The real cube cannot rest on the rim (bin.in_bin_margin 0): pilot run9's far
+    throw, 91.5 mm off-centre across the 0.29 m bin (5 mm walls: 140 mm inside), and
+    one against the long wall, score."""
+    for offset in ((0.0915, 0.0), (0.0, 0.17)):  # the close bin's width runs along x
+        skills.cube_source = ConstantTargetSource(
+            CLOSE_BIN[0] + offset[0], CLOSE_BIN[1] + offset[1], 0.025
+        )
+        obs = skills.observe()
+        assert obs["cube_inside_bin"] is True and obs["cube_in_bin"] is True, offset
+
+
+def test_a_cube_outside_the_bins_walls_does_not_score(skills):
+    """Centre over the wall or beyond it: neither inside nor scored."""
+    skills.cube_source = ConstantTargetSource(CLOSE_BIN[0] + 0.143, CLOSE_BIN[1], 0.025)
     obs = skills.observe()
-    assert obs["cube_inside_bin"] is True and obs["cube_in_bin"] is False
+    assert obs["cube_inside_bin"] is False and obs["cube_in_bin"] is False
 
 
 def test_the_far_spot_tosses_from_minus_y(skills):
@@ -259,19 +323,311 @@ def test_no_cube_is_a_refusal(skills, monkeypatch):
 
 
 def test_a_miss_is_not_a_refusal():
-    """The gripper closing on nothing is a real miss: the robot moved, refused is
-    False, and the note says why."""
+    """The gripper closing on nothing is a real miss: the robot moved (it drove to the
+    standoff and back), refused is False, and the note says why."""
     skills = build_skills(_cfg(**{"pick.top_down.fake_grasp_reading": 0.996}))
-    before = skills.observe()["robot"]
     reply = skills.pick()
     assert reply["held"] is False and reply["refused"] is False
     assert reply["reason"] is None and reply["note"]
-    assert skills.observe()["robot"] != pytest.approx(before)
+    assert reply["stand"] != pytest.approx(list(HOME))
 
 
-def test_pick_off_the_floor_is_compliant_and_bin_aware(skills, monkeypatch):
-    """The floor pick runs every arm move under the compliant loop, and the standoff
-    it drives to keeps the base clear of the bin and the barrier."""
+# Pilot poses (raw/2026-10-20): parked at the far toss stand facing the tape, 9 cm
+# from it; every turn towards a cube on the robot's side swung a corner within 5 cm.
+FAR_STAND = (0.22318, -0.01625, 1.56916)
+
+
+@pytest.mark.parametrize(
+    "cube",
+    [
+        "[1.174,-0.161,0.025]",  # run9 (18-10-36, observe 7)
+        "[0.157,-0.800,0.025]",  # runs 7-8 (17-27-17 observe 19, 18-06-59 observe 2)
+    ],
+)
+def test_from_the_far_stand_the_pick_backs_away_from_the_tape_first(cube, monkeypatch):
+    """can_pick says yes, and the pick drives straight back from the tape (no turn)
+    before turning to the standoff."""
+    skills = build_skills(_cfg(**{"env.cube_pose": cube}))
+    base = skills.real_env.interface.base_interface
+    base.base_state = SE2(*FAR_STAND)
+    base.map_base_state = SE2(*FAR_STAND)
+    answer = skills.observe()["can_pick"]
+    assert answer["feasible"] is True, answer
+    assert skills.can_pick()["feasible"] is True
+    starts = []
+    original = skills.real_env.step
+
+    def step(action):
+        starts.append(_base(skills))
+        return original(action)
+
+    monkeypatch.setattr(skills.real_env, "step", step)
+    reply = skills.pick()
+    assert reply["refused"] is False and reply["held"] is True, reply["note"]
+    assert starts[0][2] == pytest.approx(FAR_STAND[2], abs=0.02)
+    # The first leg turns nothing and only moves away from the tape.
+    first_turn = next(
+        k for k, p in enumerate(starts) if abs(p[2] - FAR_STAND[2]) > 0.05
+    )
+    assert first_turn > 1
+    depths = [skills.workspace.barrier.depth(p[:2]) for p in starts[:first_turn]]
+    assert depths == sorted(depths) and depths[-1] > depths[0] + 0.05
+
+
+# ------------------------------------------------------- one look, and no bin
+
+
+def test_observe_says_whether_the_pick_could_start_from_the_same_look(
+    skills, monkeypatch
+):
+    """Observe() localizes the bin and the cube once and answers can_pick from that
+    look, exactly as can_pick() decides it; nothing moves."""
+    skills.bin_source = _CountingBins(skills.bin_source)
+    looks = _count_cube_looks(monkeypatch)
+    before = (
+        list(skills.arm.get_arm_state()),
+        _base(skills),
+    )
+    obs = skills.observe()
+    assert skills.bin_source.calls == 1 and len(looks) == 1
+    assert set(obs["can_pick"]) == CAN_PICK_KEYS
+    assert obs["can_pick"] == skills.can_pick()
+    assert obs["can_pick"]["feasible"] is True
+    json.dumps(obs)
+    assert (
+        list(skills.arm.get_arm_state()),
+        _base(skills),
+    ) == before
+
+
+@pytest.mark.parametrize(
+    "cube, reason",
+    [("[0.3,0.9,0.025]", "cube past the barrier"), (None, "bin wall")],
+)
+def test_observes_can_pick_refuses_what_can_pick_refuses(cube, reason):
+    """Past the barrier, against the bin wall: the same refusal, the same reason."""
+    cube = cube or f"[{CLOSE_BIN[0] + 0.10},{CLOSE_BIN[1]},0.025]"
+    skills = build_skills(_cfg(**{"env.cube_pose": cube}))
+    answer = skills.observe()["can_pick"]
+    assert answer["refused"] is True and reason in answer["reason"]
+    assert answer == skills.can_pick()
+
+
+def _cube_unseen(monkeypatch):
+    """The ceiling cameras lose the cube (it is in the gripper)."""
+
+    def no_cube(_self):
+        raise RuntimeError("CeilingCubeTargetSource: no cube found")
+
+    monkeypatch.setattr(ConstantTargetSource, "get_target", no_cube)
+
+
+def test_observe_while_holding_says_the_pick_cannot_start(skills, monkeypatch):
+    """Holding (closed on the cube, which the cameras no longer see): can_pick's own
+    first check."""
+    assert skills.pick()["held"]
+    _cube_unseen(monkeypatch)
+    obs = skills.observe()
+    assert obs["holding"] is True
+    assert obs["can_pick"]["reason"] == "already holding the cube"
+    assert skills.can_pick()["reason"] == "already holding the cube"
+
+
+def test_a_closed_gripper_with_the_cube_on_the_floor_is_not_holding(skills):
+    """Pilot run9's evaluation: the gripper still commanded closed and reading in the
+    held band, but the person had taken the cube out and it lay on the floor. observe
+    says holding=false, and can_pick agrees: the pick may start."""
+    assert skills.pick()["held"]
+    assert skills.gripper_command >= 1.0
+    obs = skills.observe()  # the fake cameras still see the cube on the floor
+    assert obs["cube"] is not None and obs["holding"] is False
+    assert obs["can_pick"]["feasible"] is True, obs["can_pick"]
+    assert skills.can_pick()["feasible"] is True
+    assert skills.pick()["refused"] is False
+
+
+def test_open_gripper_clears_a_closed_empty_gripper(skills, monkeypatch):
+    """Closed on nothing the cameras can see (the cube gone): open_gripper leaves the
+    gripper open and commanded open, and nothing is held any more."""
+    assert skills.pick()["held"]
+    _cube_unseen(monkeypatch)
+    assert skills.observe()["holding"] is True
+    skills.open_gripper()
+    assert skills.gripper_command == 0.0
+    assert skills.arm.get_gripper_state() == pytest.approx(0.0, abs=0.01)
+    obs = skills.observe()
+    assert obs["holding"] is False and obs["gripper_command"] == 0.0
+    assert obs["can_pick"]["reason"] != "already holding the cube"
+
+
+def test_a_pick_after_observe_plans_from_its_look(skills, monkeypatch):
+    """The pick reuses observe's bin and cube: its only new look is the cube's, at the
+    standoff."""
+    skills.bin_source = _CountingBins(skills.bin_source)
+    looks = _count_cube_looks(monkeypatch)
+    skills.observe()
+    reply = skills.pick()
+    assert reply["held"] is True
+    assert skills.bin_source.calls == 1
+    assert len(looks) == 2
+
+
+@pytest.mark.parametrize(
+    "motion", ["retract", "go_home", "open_gripper", "stop", "toss"]
+)
+def test_any_motion_skill_invalidates_the_look(skills, monkeypatch, motion):
+    """A look taken before a motion is never reused: the pick localizes afresh."""
+    skills.observe()
+    if motion == "toss":
+        assert skills.pick()["held"]
+        skills.observe()
+        skills.toss(1.2, 120.0, 700.0, 0.0)
+    else:
+        getattr(skills, motion)()
+    skills.bin_source = _CountingBins(skills.bin_source)
+    looks = _count_cube_looks(monkeypatch)
+    assert skills.pick()["held"] is True
+    assert skills.bin_source.calls == 1 and len(looks) == 2
+
+
+def test_without_a_bin_can_pick_and_pick_refuse_before_moving(skills):
+    """A bin the cameras miss is never planned around as no bin (that skips the arm's
+    check against its walls): observe, can_pick and pick all refuse, nothing moves."""
+    skills.bin_source = _CountingBins(skills.bin_source, found=False)
+    before = (
+        list(skills.arm.get_arm_state()),
+        _base(skills),
+    )
+    obs = skills.observe()
+    assert obs["bin"] is None
+    assert obs["can_pick"]["refused"] is True
+    assert obs["can_pick"]["reason"] == BIN_NOT_LOCALIZED == "bin not localized"
+    assert skills.can_pick()["reason"] == BIN_NOT_LOCALIZED
+    reply = skills.pick()
+    assert reply["refused"] is True and reply["held"] is False
+    assert reply["reason"] == BIN_NOT_LOCALIZED
+    assert (
+        list(skills.arm.get_arm_state()),
+        _base(skills),
+    ) == before
+
+
+def test_with_no_bin_configured_the_pick_still_runs(skills):
+    """No bin source (no bin in the config): nothing to localize, so nothing to refuse
+    for."""
+    skills.bin_source = None
+    assert skills.observe()["can_pick"]["feasible"] is True
+    assert skills.pick()["held"] is True
+
+
+def test_the_real_bin_source_saves_missed_localizations_in_the_run_log(tmp_path):
+    """build_skills hands the ceiling bin source the run's localization_failures."""
+    from prpl_tidybot.skill_server import (  # pylint: disable=import-outside-toplevel
+        _bin_source_kwargs,
+    )
+
+    real = {"_target_": "prpl_tidybot.bin_localizer.CeilingBinSource"}
+    kwargs = _bin_source_kwargs(real, tmp_path)
+    assert kwargs["failure_dir"] == str(tmp_path / "localization_failures")
+    assert not _bin_source_kwargs(real, None)
+    assert not _bin_source_kwargs(
+        {"_target_": "prpl_tidybot.bin_localizer.ConstantBinSource"}, tmp_path
+    )
+
+
+# ------------------------------------------------------- a missed pick retries
+
+
+def test_a_missed_pick_retreats_relocalizes_and_retries(skills, monkeypatch):
+    """After a miss the robot retracts and drives back to its home stand (where the
+    ceiling cameras see the cube without the robot over it), localizes the bin and
+    the cube afresh and tries again: pick.max_attempts (2) in all. Missing both, it
+    ends retreated, not over the cube."""
+    skills = _missing(skills)
+    drives = []
+    import prpl_tidybot.skill_server as ss  # pylint: disable=import-outside-toplevel
+
+    original = ss._drive_to  # pylint: disable=protected-access
+
+    def drive_to(real_env, pose, *args):
+        drives.append([round(float(v), 3) for v in pose])
+        return original(real_env, pose, *args)
+
+    monkeypatch.setattr(ss, "_drive_to", drive_to)
+    skills.bin_source = _CountingBins(skills.bin_source)
+    reply = skills.pick()
+    assert reply["held"] is False and reply["refused"] is False and reply["note"]
+    assert [a["attempt"] for a in reply["attempts"]] == [1, 2]
+    assert [a["held"] for a in reply["attempts"]] == [False, False]
+    home = [round(v, 3) for v in HOME]
+    assert drives[0] != home and drives[1] == home
+    assert drives[2] != home and drives[3] == home and len(drives) == 4
+    assert skills.bin_source.calls == 2  # the plan, then again after the retreat
+    assert _base(skills) == pytest.approx(HOME, abs=0.02)
+    assert list(skills.arm.get_arm_state()) == pytest.approx(
+        list(RETRACT_ARM_CONF), abs=0.06
+    )
+    assert skills.gripper_command == 0.0
+    json.dumps(reply)
+
+
+def test_a_retry_that_holds_is_a_held_pick(skills):
+    """Miss, retreat, re-localize, hold: the reply is held, with both attempts."""
+    readings = iter([0.996, 0.49])
+    skills._read = lambda _reading: next(readings)  # pylint: disable=protected-access
+    reply = skills.pick()
+    assert reply["held"] is True and reply["note"] is None
+    assert [a["held"] for a in reply["attempts"]] == [False, True]
+    assert skills.gripper_command == 1.0
+
+
+def test_the_number_of_attempts_is_configurable(skills):
+    """pick.max_attempts in the config; an in-process caller (toss_cycles, which asks
+    its operator between attempts) may pass its own."""
+    three = _missing(skills, **{"pick.max_attempts": 3})
+    assert len(three.pick()["attempts"]) == 3
+    once = _missing(skills)
+    reply = once.pick(max_attempts=1)
+    assert len(reply["attempts"]) == 1
+    assert _base(once) == pytest.approx(HOME, abs=0.02)
+
+
+def test_a_retry_the_new_look_refuses_ends_retreated(skills):
+    """After the retreat the bin is not found: the retry does not start, the robot stays
+    retreated, and the reply is a miss (it moved), saying why."""
+    skills = _missing(skills)
+    inner = skills.bin_source
+
+    class _FirstOnly(_CountingBins):
+        def localize(self):
+            self.found = self.calls == 0
+            return super().localize()
+
+    skills.bin_source = _FirstOnly(inner)
+    reply = skills.pick()
+    assert reply["held"] is False and reply["refused"] is False
+    assert BIN_NOT_LOCALIZED in reply["note"]
+    assert [a["attempt"] for a in reply["attempts"]] == [1, 2]
+    assert reply["attempts"][1]["held"] is False
+    assert _base(skills) == pytest.approx(HOME, abs=0.02)
+
+
+@pytest.mark.parametrize("cube", [FLOOR_CUBE, IN_BIN])
+def test_the_servers_picks_use_the_angular_controller(cube):
+    """The 2026-10-20 pilot's grasps: every pick move, off the floor and out of the
+    bin, on the arm's onboard controller."""
+    skills = build_skills(_cfg(**{"env.cube_pose": cube}))
+    reply = skills.pick()
+    assert reply["held"] is True, reply["note"]
+    moves = reply["attempts"][-1]["moves"]
+    assert moves and {m["controller"] for m in moves} == {"angular"}
+
+
+def test_pick_off_the_floor_is_compliant_and_bin_aware(monkeypatch):
+    """With the compliant controller the floor pick runs every arm move under the
+    torque loop, and the standoff it drives to keeps the base clear of the bin and the
+    barrier."""
+    skills = build_skills(_cfg(**{"pick.top_down.arm_controller": "compliant"}))
     angular = []
     monkeypatch.setattr(
         FakeArmInterface, "move_angular", lambda self, goal: angular.append(goal)
@@ -568,7 +924,7 @@ def test_the_fake_robot_rejects_what_the_real_one_rejects():
 
 def test_the_fake_robots_pick_outcomes_are_configurable():
     """Outcomes cycle; a miss leaves the cube on the floor and is not a refusal."""
-    robot = FakeTossingRobot(pick_outcomes=(False, True))
+    robot = FakeTossingRobot(pick_outcomes=(False, True), max_attempts=1)
     miss = robot.pick()
     assert not miss["held"] and not miss["refused"]
     assert robot.observe()["cube"] is not None
@@ -650,3 +1006,18 @@ def test_busy_and_stopped_cross_the_rpc_as_builtin_errors(skills):
         client.retract()
     assert type(halted.value).__module__ == "builtins"
     assert str(halted.value) == "SkillStopped: stop() was called"
+
+
+def test_the_fake_robot_answers_can_pick_in_observe_and_retries_a_miss():
+    """As the real skills: observe carries can_pick; a miss retreats home and tries
+    again (max_attempts); a bin it cannot see refuses."""
+    robot = FakeTossingRobot(pick_outcomes=(False, True))
+    assert robot.observe()["can_pick"] == robot.can_pick()
+    reply = robot.pick()
+    assert reply["held"] and [a["held"] for a in reply["attempts"]] == [False, True]
+    once = FakeTossingRobot(pick_outcomes=(False,), max_attempts=1)
+    assert not once.pick()["held"] and once.robot == pytest.approx(list(HOME))
+    blind = FakeTossingRobot(bin_localized=False)
+    assert blind.observe()["bin"] is None
+    assert blind.observe()["can_pick"]["reason"] == BIN_NOT_LOCALIZED
+    assert blind.pick()["refused"]

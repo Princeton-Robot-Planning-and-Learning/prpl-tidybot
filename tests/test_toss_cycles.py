@@ -610,8 +610,9 @@ def test_a_missed_grasp_retries_then_stops(tmp_path, arm_log):
 def test_a_missed_grasp_drives_back_to_the_toss_pose_to_relocalize(
     tmp_path, monkeypatch
 ):
-    """Between attempts the arm retracts and the base returns to the toss pose, where
-    the ceiling cameras see the cube unoccluded, before driving to a fresh standoff."""
+    """After a miss the pick skill retracts and returns to the toss pose, where the
+    ceiling cameras see the cube unoccluded, before the next attempt drives to a fresh
+    standoff; each attempt's confirmation says so."""
     import prpl_tidybot.skill_server as ss  # pylint: disable=import-outside-toplevel
 
     drives: list[tuple[float, ...]] = []
@@ -631,21 +632,12 @@ def test_a_missed_grasp_drives_back_to_the_toss_pose_to_relocalize(
         }
     )
     run_toss_cycles(cfg, log_dir=tmp_path, prompt_fn=operator)
-    order = [
-        p
-        for p in operator.prompts
-        if "standoff" in p or "Pick attempt" in p or "re-localize" in p
-    ]
-    # One confirmation per pick call (it drives to the standoff and grasps), and the
-    # drive back to re-localize between them.
-    assert ["Pick attempt" in p and "standoff" in p for p in order] == [
-        True,
-        False,
-        True,
-    ]
-    assert "re-localize" in order[1]
+    order = [p for p in operator.prompts if "Pick attempt" in p]
+    assert len(order) == 2
+    assert all("standoff" in p and "re-localize" in p for p in order)
     toss = tuple(round(v, 3) for v in TOSS_POSE)
-    assert drives[0] != toss and drives[1] == toss and drives[2] != toss
+    assert drives[0] != toss and drives[1] == toss
+    assert drives[2] != toss and drives[3] == toss
 
 
 def test_skip_toss_stops_holding_the_cube(tmp_path, arm_log):
@@ -923,3 +915,66 @@ def test_a_cube_the_cameras_cannot_find_asks_the_person_to_move_it(
     assert summary.finish_reason == "picked (toss skipped)"
     log = json.loads((tmp_path / "cycles.json").read_text())
     assert log["cycles"][0]["cube_moved_by_person"] == 1
+
+
+def test_a_bin_the_cameras_miss_asks_the_person_then_retries(tmp_path, monkeypatch):
+    """The pick refuses to plan without the bin's walls when the cameras miss it: the
+    person is asked to check the bin is in view, and the next pick goes ahead."""
+    from prpl_tidybot.bin_localizer import (  # pylint: disable=import-outside-toplevel
+        ConstantBinSource,
+    )
+
+    original = ConstantBinSource.localize
+    calls = {"n": 0}
+
+    def localize(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("CeilingBinSource: no bin found in the search box")
+        return original(self)
+
+    monkeypatch.setattr(ConstantBinSource, "localize", localize)
+    operator = _Operator()
+    summary = run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=operator
+    )
+    assert operator.asked("can't see the bin") == 1
+    assert summary.finish_reason == "picked (toss skipped)"
+
+
+def test_without_the_bin_and_nobody_to_ask_the_run_stops(tmp_path, monkeypatch):
+    """Not interactive: a bin the cameras miss ends the run before anything moves."""
+    from prpl_tidybot.bin_localizer import (  # pylint: disable=import-outside-toplevel
+        ConstantBinSource,
+    )
+
+    def localize(_self):
+        raise RuntimeError("CeilingBinSource: no bin found in the search box")
+
+    monkeypatch.setattr(ConstantBinSource, "localize", localize)
+    summary = run_toss_cycles(
+        _compose(cycles=1, interactive="false"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    assert summary.completed == 0
+    assert "bin not localized" in summary.finish_reason
+
+
+def test_each_pick_call_is_one_attempt(tmp_path, monkeypatch):
+    """toss_cycles asks its operator between attempts itself, so each pick() call it
+    makes tries once (the skill server's own retry is for callers that cannot ask)."""
+    from prpl_tidybot.skill_server import (  # pylint: disable=import-outside-toplevel
+        TossingSkills,
+    )
+
+    seen = []
+    original = TossingSkills.pick
+
+    def pick(self, max_attempts=None):
+        seen.append(max_attempts)
+        return original(self, max_attempts)
+
+    monkeypatch.setattr(TossingSkills, "pick", pick)
+    run_toss_cycles(
+        _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
+    )
+    assert seen == [1]
