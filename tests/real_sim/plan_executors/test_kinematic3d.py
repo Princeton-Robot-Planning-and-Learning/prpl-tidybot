@@ -14,8 +14,14 @@ from spatialmath import SE2
 
 from prpl_tidybot.camera_constants import BASE_CAMERA_DIMS, WRIST_CAMERA_DIMS
 from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
+from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
+    StreamingArmMotion3DPlanExecutor,
+)
 from prpl_tidybot.real_sim.plan_executors.base_motion3d import (
     PurePursuitBaseMotion3DPlanExecutor,
+)
+from prpl_tidybot.real_sim.plan_executors.distance_factories import (
+    create_kinova_distance_fn,
 )
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExecutor
 from prpl_tidybot.structs import TidyBotObservation
@@ -239,3 +245,33 @@ def test_skill_call_without_gap_executor_raises():
     executor = Kinematic3DPlanExecutor()
     with pytest.raises(NotImplementedError, match="gap_executor"):
         executor.set_trajectory([(s0, _skill_call(s0))])
+
+
+def test_confirm_release_segments_prompts_before_insertion_only():
+    """With confirm_release_segments, the operator is prompted exactly when an
+    arm segment containing a gripper OPEN loads (the insertion), not for
+    other arm or base segments (e.g. the staging reach before it)."""
+    prompts: list[str] = []
+    executor = Kinematic3DPlanExecutor(
+        arm_executor=StreamingArmMotion3DPlanExecutor(
+            distance_fn=create_kinova_distance_fn()
+        ),
+        confirm_release_segments=True,
+        prompt_fn=lambda msg: prompts.append(msg) or "",
+    )
+    s0 = _make_state()
+    reach = _arm_action(arm_deltas=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    marker = _base_action(drot=2e-3)
+    insert = _arm_action(arm_deltas=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    release = _arm_action(gripper_cmd=1.0)
+    executor.set_trajectory([(s0, reach), (s0, marker), (s0, insert), (s0, release)])
+    # Loading the trajectory loads the first (staging) segment: no prompt.
+    assert not prompts
+    # pylint: disable=protected-access
+    executor._segment_idx = 1
+    executor._load_current_segment()  # the base marker segment: no prompt
+    assert not prompts
+    executor._segment_idx = 2
+    executor._load_current_segment()  # insertion + release: one prompt
+    assert len(prompts) == 1
+    assert "release" in prompts[0]

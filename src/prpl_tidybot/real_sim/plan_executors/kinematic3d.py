@@ -34,7 +34,7 @@ Hydra can instantiate the desired concrete classes directly via
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 from kinder_models.structs import SkillCall
@@ -83,10 +83,18 @@ class Kinematic3DPlanExecutor(PlanExecutor[SimAction, RealAction, ObjectCentricS
         gap_executor: (
             PlanExecutor[SimAction, RealAction, ObjectCentricState] | None
         ) = None,
+        confirm_release_segments: bool = False,
+        prompt_fn: Callable[[str], str] = input,
     ) -> None:
         self._base_executor = base_executor or PurePursuitBaseMotion3DPlanExecutor()
         self._arm_executor = arm_executor
         self._gap_executor = gap_executor
+        # A testing gate: an arm segment that contains a gripper OPEN is a
+        # place approach (it carries the held object in and releases it), so
+        # with this flag set the operator is prompted before it starts —
+        # while the robot stands still at the staging pose.
+        self._confirm_release_segments = confirm_release_segments
+        self._prompt_fn = prompt_fn
         self._segments: list[_Segment] = []
         self._segment_idx: int = 0
         self._active: PlanExecutor[Any, Any, ObjectCentricState] | None = None
@@ -158,6 +166,15 @@ class Kinematic3DPlanExecutor(PlanExecutor[SimAction, RealAction, ObjectCentricS
                     "the Hydra plan_executor config."
                 )
             self._active = self._arm_executor
+            if self._confirm_release_segments and any(
+                not isinstance(action, SkillCall) and float(action[10]) > 0.5
+                for _, action in segment.pairs
+            ):
+                self._prompt_fn(
+                    f"Arm segment {self._segment_idx + 1}/{len(self._segments)} "
+                    "carries the held object in and releases it (a place "
+                    "approach). Press Enter to run it..."
+                )
         self._active.set_trajectory(segment.pairs)
 
 
