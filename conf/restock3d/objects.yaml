@@ -1,0 +1,49 @@
+# Lab config for the Restock3D real-robot run: shelf staging + the
+# hand-measured objects, one floor target marker per object (print them from
+# conf/calibration/; ids 35-46 are scene targets). The analogue of the
+# cylinder-shelf env's `cylinders` list — sizes are typed in, not perceived.
+# See `prpl_tidybot.restock_scene` for the format and
+# docs/restock3d_real_robot_plan.md for the constraints on sizes and staging.
+#
+# Heights: <= 0.12 m fits either shelf section; 0.12-0.15 m is routed to the
+# bottom (tall) section and keeps >= 0.10 m insertion headroom under a
+# physical 0.254 m board gap; taller objects fit nowhere. Widths must fit the
+# ~0.09 m gripper aperture. Cylinders/jars are preferred (their yaw doesn't
+# matter); a box must be set down with its faces square to the shelf.
+
+shelf:
+  # Measured shelf centre in the map frame, and the home frame's yaw in the
+  # map frame (with yaw_map=0, home +y is map +y and the shelf's open front
+  # faces map -y). Re-measure at staging (plan doc, section 2.2).
+  map_xy: [1.5, 1.5]
+  yaw_map: 0.0
+
+# Placeholder set: the bundled demo6 scene's dimensions (two talls, four
+# shorts, packing feasible in both sections), so the already-planned demo6
+# export can serve as the first lab run by staging objects of these sizes.
+# Replace with the measured object set before the lab visit.
+objects:
+  - marker_id: 35 # tall
+    width: 0.050
+    height: 0.150
+    depth: 0.050
+  - marker_id: 36 # tall
+    width: 0.050
+    height: 0.140
+    depth: 0.050
+  - marker_id: 37 # short
+    width: 0.050
+    height: 0.100
+    depth: 0.050
+  - marker_id: 38 # short
+    width: 0.060
+    height: 0.110
+    depth: 0.060
+  - marker_id: 39 # short
+    width: 0.050
+    height: 0.090
+    depth: 0.050
+  - marker_id: 40 # short
+    width: 0.050
+    height: 0.100
+    depth: 0.050

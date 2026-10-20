@@ -94,6 +94,10 @@ def preview_or_abort(
     on either side of every gap are always kept. Pass ``max_frames=None``
     to render every state.
 
+    With ``shadow_sim=None`` (an env with no sim pipeline) no video is
+    rendered or written; the floor-bounds gate and the approval prompt still
+    run, and approval returns ``None``.
+
     `shadow_sim` is reset once here (with `seed`) so the first
     `set_state` lands on a clean env — same protocol the recorder uses.
     The caller is responsible for instantiating the sim; reusing the
@@ -102,6 +106,58 @@ def preview_or_abort(
     if not planned_states:
         return None
     gaps = _find_gaps(planned_states, planned_actions)
+    out_path: Path | None = None
+    if shadow_sim is None:
+        # An env without a shadow sim (e.g. a replay env whose kinder env is
+        # not importable here) gets no video, but the floor-bounds gate and
+        # the approval prompt below still run.
+        _logger.warning("No shadow sim; skipping the preview video.")
+    else:
+        out_path = _render_preview(
+            planned_states,
+            gaps,
+            shadow_sim,
+            log_dir,
+            seed,
+            fps,
+            max_frames,
+            gap_hold_seconds,
+        )
+        if out_path is None:
+            return None
+    if floor_bounds is not None:
+        violation = find_floor_violation(planned_states, floor_bounds, base_margin)
+        if violation is not None:
+            index, x, y = violation
+            message = (
+                f"Plan leaves the floor: planned state {index} puts the base at "
+                f"({x:.2f}, {y:.2f}), which is less than {base_margin:.2f} m inside "
+                f"x [{floor_bounds[0]:.2f}, {floor_bounds[1]:.2f}] "
+                f"y [{floor_bounds[2]:.2f}, {floor_bounds[3]:.2f}]"
+                + (f" (preview: {out_path})" if out_path is not None else "")
+            )
+            _logger.error(message)
+            raise AgentFailure(message)
+    answer = prompt_fn(_prompt_text(out_path, gaps)).strip().lower()
+    if answer not in ("y", "yes"):
+        raise AgentFailure(f"Plan preview rejected by operator (answer={answer!r})")
+    return out_path
+
+
+def _render_preview(
+    planned_states: Sequence[ObjectCentricState],
+    gaps: dict[int, SkillCall],
+    shadow_sim,
+    log_dir: Path | str,
+    seed: int,
+    fps: int,
+    max_frames: int | None,
+    gap_hold_seconds: float,
+) -> Path | None:
+    """Render the plan through `shadow_sim` and write ``preview.mp4``.
+
+    Returns the written path, or None when no frames were produced.
+    """
     keep: set[int] = set()
     for index in gaps:
         keep.update({index, index + 1})
@@ -140,21 +196,6 @@ def preview_or_abort(
         render_time,
         encode_time,
     )
-    if floor_bounds is not None:
-        violation = find_floor_violation(planned_states, floor_bounds, base_margin)
-        if violation is not None:
-            index, x, y = violation
-            message = (
-                f"Plan leaves the floor: planned state {index} puts the base at "
-                f"({x:.2f}, {y:.2f}), which is less than {base_margin:.2f} m inside "
-                f"x [{floor_bounds[0]:.2f}, {floor_bounds[1]:.2f}] "
-                f"y [{floor_bounds[2]:.2f}, {floor_bounds[3]:.2f}] (preview: {out_path})"
-            )
-            _logger.error(message)
-            raise AgentFailure(message)
-    answer = prompt_fn(_prompt_text(out_path, gaps)).strip().lower()
-    if answer not in ("y", "yes"):
-        raise AgentFailure(f"Plan preview rejected by operator (answer={answer!r})")
     return out_path
 
 
@@ -165,8 +206,8 @@ def find_floor_violation(
     robot_name: str = "robot",
 ) -> tuple[int, float, float] | None:
     """The first planned state whose base position is not at least ``base_margin``
-    inside ``floor_bounds`` (``x_min, x_max, y_min, y_max``), as ``(index, x, y)``,
-    or None when every state is inside."""
+    inside ``floor_bounds`` (``x_min, x_max, y_min, y_max``), as ``(index, x, y)``, or
+    None when every state is inside."""
     x_min, x_max, y_min, y_max = floor_bounds
     for index, state in enumerate(planned_states):
         robot = state.get_object_from_name(robot_name)
@@ -216,8 +257,11 @@ def _gap_banner(frame: np.ndarray, call: SkillCall, index: int) -> np.ndarray:
     )
 
 
-def _prompt_text(out_path: Path, gaps: dict[int, SkillCall]) -> str:
-    lines = [f"\nPlan preview written to {out_path}."]
+def _prompt_text(out_path: Path | None, gaps: dict[int, SkillCall]) -> str:
+    if out_path is not None:
+        lines = [f"\nPlan preview written to {out_path}."]
+    else:
+        lines = ["\nNo preview video (this env has no shadow sim)."]
     if gaps:
         lines.append(
             f"The plan has {len(gaps)} magic gap(s) that will be carried out "

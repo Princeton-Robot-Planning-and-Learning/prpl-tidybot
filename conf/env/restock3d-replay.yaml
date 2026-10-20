@@ -1,0 +1,103 @@
+# Replay an externally planned Restock3D trajectory on the TidyBot.
+#
+# The plan is a "Level B" npz export from alphatamp's
+# `experiments/spectre/restock3d_deploy/deploy.py` (SPECTRE planning in the
+# kinder Restock3D-v3 env, same tidybot-kinova robot): dense absolute
+# base (T,3) / joints (T,7) / gripper (T,) arrays plus per-step 11-d kinder
+# deltas. `NpzPlanAgent` serves it through the PlanningAgent contract and the
+# standard executor stack tracks it; no planning happens in this repo.
+#
+#   python scripts/run_planner.py env=restock3d-replay mode=fake \
+#       env.plan_path=/path/to/plan_level_b.npz
+#
+# There is no sim pipeline: the Restock3D env lives in alphatamp (a different
+# venv), so there is no shadow sim here. Trajectory recording is skipped and
+# the real-mode preview runs without a video — the floor-bounds gate and the
+# approval prompt still apply. Review alphatamp's plan.mp4 as the preview.
+
+env_name: restock3d_replay
+
+# Path to the plan_level_b.npz export. Required.
+plan_path: ???
+
+# SE2 pose of the export's home frame (origin = the robot's planned start
+# pose, +y toward the shelf front) in the map frame. Base poses are
+# rotated+translated and per-step (dx, dy) deltas rotated before execution.
+# With the shelf staged at map (1.5, 1.5), front facing map -y, the home
+# frame sits at (1.1, 0.1) with yaw 0 — see
+# docs/restock3d_real_robot_plan.md, section 2.2.
+home_origin_map: [0.0, 0.0]
+home_yaw_map: 0.0
+
+# The agent replaces the default bilevel planner (see pipeline.py). It
+# prepends unplanned settle pairs from the perceived start configuration to
+# the export's first configuration (arm first, then base).
+agent:
+  _target_: prpl_tidybot.replay_agent.NpzPlanAgent
+  plan_path: ${env.plan_path}
+  seed: ${seed}
+  home_origin_map: ${env.home_origin_map}
+  home_yaw_map: ${env.home_yaw_map}
+
+# Streaming arm executor knobs — same values as the cylinder-shelf env
+# (see conf/env/kinematic-cylinder-shelf3d.yaml for the rationale), except
+# max_iter_total: a Level-B arm segment is ~200-260 densely spaced waypoints
+# (reach + gripper event + stow in one segment), well past the cylinder
+# env's 300-tick budget.
+arm_advance_radius: 0.15
+arm_lookahead: 0.25
+arm_arrival_tolerance: 0.4
+arm_gripper_dwell_ticks: 20
+arm_max_iter_total: 5000
+# Restock3D objects are boxes grasped on their +-x faces; stop short of a
+# full close so a compliant object is squeezed, not crushed. Tune per object
+# set (`env.gripper_close_position=...`).
+gripper_close_position: 0.9
+
+pipelines:
+  fake:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      # FakeInterface stores commanded poses, so the executor converges on
+      # the first tick; skip the per-tick sleep to keep tests fast.
+      control_period: 0.0
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.FakeInterface
+    perceiver:
+      _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.RobotOnlyPerceiver
+    plan_executor:
+      _target_: prpl_tidybot.real_sim.plan_executors.kinematic3d.Kinematic3DPlanExecutor
+      base_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.base_motion3d.PurePursuitBaseMotion3DPlanExecutor
+        # Same tight heading tolerance as the cylinder-shelf env: the grasp
+        # standoff is ~0.72 m, so heading error becomes lateral grasp error.
+        angle_tolerance: 0.03
+      arm_executor:
+        _target_: prpl_tidybot.real_sim.plan_executors.arm_motion3d.CarrotArmMotion3DPlanExecutor
+        distance_fn:
+          _target_: prpl_tidybot.real_sim.plan_executors.distance_factories.create_kinova_distance_fn
+        advance_radius: ${env.arm_advance_radius}
+        arrival_tolerance: ${env.arm_arrival_tolerance}
+        max_iter_total: ${env.arm_max_iter_total}
+        gripper_dwell_ticks: ${env.arm_gripper_dwell_ticks}
+        lookahead: ${env.arm_lookahead}
+        gripper_close_position: ${env.gripper_close_position}
+  real:
+    real_env:
+      _target_: prpl_tidybot.real_env.RealTidyBotEnv
+      interface:
+        _target_: prpl_tidybot.interfaces.interface.RealInterface
+        # Real arm + real base; the camera stays faked — the replay needs no
+        # on-robot perception, and the ceiling cameras feed the renderer.
+        base_interface:
+          _target_: prpl_tidybot.interfaces.base_interface.RealBaseInterface
+          marker_detector_host: ${lab.marker_detector_host}
+        camera_interface:
+          _target_: prpl_tidybot.interfaces.camera_interface.FakeCameraInterface
+      # Off-host render source (JPEG publisher inside the marker-detector
+      # daemon) so `record.video=true`-style captures work without the
+      # on-robot cameras.
+      renderer:
+        _target_: prpl_tidybot.rendering.CeilingCameraRenderer
+    perceiver: ${env.pipelines.fake.perceiver}
+    plan_executor: ${env.pipelines.fake.plan_executor}
