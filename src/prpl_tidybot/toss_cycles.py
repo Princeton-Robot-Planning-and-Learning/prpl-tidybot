@@ -1405,6 +1405,11 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
                 )
             servo_log = _servo_log(result)
             ax, ay, yaw = result.ax, result.ay, result.yaw
+            if result.aligned and isinstance(mover, _CompliantMover):
+                # The servo centred the gripper where it really is; the compliant arm
+                # lags its command (run 36: 42 mm), so descend from there.
+                ax, ay = (float(v) for v in measured_xy())
+                servo_log["descend_from_measured"] = [ax, ay]
             hover, grasp = top_down_joint_targets(
                 ax, ay, yaw, geom, seed=mover.joints()
             )

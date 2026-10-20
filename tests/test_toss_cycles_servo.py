@@ -11,7 +11,11 @@ import pytest
 from hydra import compose, initialize_config_dir
 
 from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
-from prpl_tidybot.top_down_pick import TopDownPickGeometry, forward_kinematics
+from prpl_tidybot.top_down_pick import (
+    TopDownPickGeometry,
+    forward_kinematics,
+    pointing_down_joints,
+)
 from prpl_tidybot.toss_cycles import run_toss_cycles
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
@@ -350,3 +354,43 @@ def test_the_lateral_min_step_keeps_toms_rule_at_the_hover():
     camera sees ~2920 px/m (the 2026-10-14 probes)."""
     lateral = _compose().pick.top_down.lateral_servo
     assert lateral.lateral_min_step < 2 * lateral.lateral_tolerance_px / 2920.0
+
+
+def test_a_compliant_descent_starts_where_the_servo_left_the_gripper(
+    tmp_path, monkeypatch
+):
+    """Run 36 (2026-10-20): the compliant arm lagged each lateral step at the hover, so
+    the servo centred the real gripper over the cube while its command ran 42 mm
+    ahead; the descent then corrected onto the command and slid off the cube. The
+    descent now goes straight down from where the gripper measurably is."""
+    geom = TopDownPickGeometry()
+    lag = np.array([0.0, -0.03])  # at the hover the arm stays 3 cm short in y
+
+    def lagging(self, arm_goal, gripper_goal):
+        pos, approach, closing = forward_kinematics(arm_goal, geom)
+        state = list(arm_goal)
+        if approach[2] < -0.99 and pos[2] > geom.floor_z + geom.grasp_height + 0.05:
+            state = pointing_down_joints(
+                (pos[0] + lag[0], pos[1] + lag[1], pos[2]),
+                math.atan2(closing[1], closing[0]),
+                geom,
+                seed=arm_goal,
+            )
+        self.arm_state = state
+        self.gripper_state = gripper_goal
+
+    monkeypatch.setattr(FakeArmInterface, "execute_action", lagging)
+    result, cameras, _ = _run_lateral(
+        tmp_path,
+        monkeypatch,
+        (0.004, 0.006),
+        **{"pick.top_down.arm_controller": "compliant"},
+    )
+    assert result.finish_reason == "picked (toss skipped)", result.finish_reason
+    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
+        "pick_attempts"
+    ][0]
+    assert attempt["lateral_servo"]["aligned"]
+    grasp = next(m for m in attempt["moves"] if m["name"] == "grasp")
+    pinch, _, _ = forward_kinematics(np.radians(grasp["measured_deg"]), geom)
+    assert math.dist(pinch[:2], cameras[0].cube) < 0.004
