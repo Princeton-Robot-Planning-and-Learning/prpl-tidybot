@@ -51,6 +51,12 @@ class RealTidyBotEnv(gymnasium.Env[TidyBotObservation, RealAction]):
         self._renderer = renderer
         self._prompt_fn = prompt_fn
 
+    @property
+    def interface(self) -> Interface:
+        """The interface this env drives, for commands outside the action space (e.g.
+        ``arm_interface.toss``)."""
+        return self._interface
+
     def reset(
         self,
         *,

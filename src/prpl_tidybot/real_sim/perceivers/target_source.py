@@ -34,8 +34,8 @@ class CylinderSpec:
     """One physical cylinder as the pipeline config describes it.
 
     ``marker_id`` is the ArUco marker taped to the floor under it (real mode),
-    ``fake_xy`` where fake mode pretends it stands. ``radius`` and ``height``
-    are in metres; the standing cylinder's centre is at ``height / 2``.
+    ``fake_xy`` where fake mode pretends it stands. ``radius`` and ``height`` are in
+    metres; the standing cylinder's centre is at ``height / 2``.
     """
 
     radius: float
@@ -78,18 +78,35 @@ class TargetSource(abc.ABC):
     def get_target(self) -> tuple[float, float, float]:
         """Return the latest target position."""
 
+    def get_yaw(self) -> float:
+        """The target's rotation about z (radians); 0 for sources that only see a
+        point."""
+        return 0.0
+
+    def alternates(self) -> list[tuple[float, float, float]]:
+        """Other estimates (x, y, yaw) of the same target from the last call, most
+        confident first, to try if acting on the main one fails; none by default."""
+        return []
+
     def close(self) -> None:
         """Release any resources held by the source (e.g. detector sockets)."""
 
 
 class ConstantTargetSource(TargetSource):
-    """Returns a fixed `(x, y, z)` every call. Used by fake / sim pipelines."""
+    """Returns a fixed `(x, y, z)` every call.
 
-    def __init__(self, x: float, y: float, z: float) -> None:
+    Used by fake / sim pipelines.
+    """
+
+    def __init__(self, x: float, y: float, z: float, yaw: float = 0.0) -> None:
         self._target = (float(x), float(y), float(z))
+        self._yaw = float(yaw)
 
     def get_target(self) -> tuple[float, float, float]:
         return self._target
+
+    def get_yaw(self) -> float:
+        return self._yaw
 
 
 class MarkerDetectorTargetSource(TargetSource):
@@ -144,7 +161,9 @@ class CylinderTargets(abc.ABC):
 
 class ConstantCylinderTargets(CylinderTargets):
     """Each cylinder stands at its spec's ``fake_xy`` with its centre at ``height / 2``.
-    Used by fake / sim pipelines."""
+
+    Used by fake / sim pipelines.
+    """
 
     def __init__(self, cylinders: Sequence[Mapping[str, Any] | CylinderSpec]) -> None:
         self._targets: list[tuple[float, float, float]] = []
@@ -161,8 +180,8 @@ class MarkerDetectorCylinderTargets(CylinderTargets):
     """Each cylinder's `(x, y)` comes from its spec's marker in one shared read of the
     marker detector, with z at the standing cylinder's centre.
 
-    A marker missing from the latest payload keeps its last detection; a marker
-    that has never been seen raises, so a rollout does not run on bogus data.
+    A marker missing from the latest payload keeps its last detection; a marker that has
+    never been seen raises, so a rollout does not run on bogus data.
     """
 
     def __init__(

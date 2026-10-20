@@ -1,0 +1,93 @@
+# Same-side tossing practice (2026-10-20 proof of concept): the bin stands on the
+# robot's side of the barrier, wherever it was put, and every cycle
+#   localize the bin and the cube (inside the bin first, then on the floor; a cube
+#   past the barrier is handed to the person) -> pick it (out of the bin through a
+#   waypoint above the rim, or off the floor) -> drive to the toss pose relative to
+#   the localized bin -> toss,
+# with no reset by the person unless the cube is out of reach.
+#
+#   python scripts/toss_cycles.py --config-name same_side_practice mode=real
+#
+# Everything in toss_cycles.yaml applies.
+
+defaults:
+  - toss_cycles
+  - _self_
+
+cycles: 5
+
+# Home (the reset drive's goal) and where a missed pick retreats to re-localize: the
+# toss pose for the bin as first placed (x -0.45..-0.13, y -0.98..-0.56).
+toss_pose: [1.10, -0.78, 3.141592653589793]
+
+# The localized bin scores the throw; the fixed box is not used.
+bin_stop_box: null
+
+# The measured tape (2026-10-20): its robot-side edge y = 0.349 + 0.0267 x, the robot
+# on -y; "infinite", so 6 m long. A 5 cm strip whose -y face is that line.
+barrier:
+  enabled: true
+  center: [0.0, 0.374]
+  length: 6.0
+  thickness: 0.05
+  yaw: 0.026694
+  robot_side: [0.026690, -0.999644]
+  clearance: 0.05
+  cube_half: 0.025
+
+toss:
+  max_vel: 120.0
+  gripper_release_ms: 675
+  # The opposite-side layout's geometry, rotated with the bin: base centre 1.39 m
+  # from the bin centre, approaching from +x (the bin to the robot), 120 deg/s, 675 ms.
+  aimed:
+    enabled: true
+    standoff: 1.39
+    speed: 120.0
+    release_ms: 675.0
+    direction: 0.0
+
+bin:
+  # The robot's side of the tape only.
+  search_bounds: [-1.8, 2.0, -1.8, 0.3]
+  pipelines:
+    fake:
+      x: -0.29
+      y: -0.77
+      yaw: 1.5707963267948966
+
+pick:
+  top_down:
+    # The compliant torque loop for every pick move (runs 37-40, 2026-10-20: the
+    # descent from the measured hover x, y, closing within the per-axis limits); the
+    # toss keeps the arm server's own swing.
+    arm_controller: compliant
+    wrist_servo:
+      enabled: false
+    lateral_servo:
+      enabled: true
+    # Picking out of the bin: the arm enters and leaves through a waypoint with the
+    # fingertips `rim_clearance` above the rim, descends straight to the usual hover,
+    # aligns there and grasps. Every planned arm pose is checked against the bin's
+    # walls: the arm's own meshes, and the 2F-85 (no mesh in the IK model) as a box
+    # `finger_half_span` along the fingers' travel and `half_width` across them, from
+    # `gripper_length` above the pinch point to `fingertip_drop` below it (the open
+    # gripper in the TidyBot MuJoCo model: 14.8 x 7.6 cm, 12.4 cm up, 2.9 cm down). Of
+    # the grasps on the cube's two pairs of faces, one that clears is used; if neither
+    # does (a pose within `wall_margin` of a wall) the person nudges the cube.
+    in_bin:
+      enabled: true
+      rim_clearance: 0.04
+      finger_half_span: 0.074
+      half_width: 0.038
+      gripper_length: 0.124
+      fingertip_drop: 0.029
+      wall_margin: 0.01
+
+# mode=sim: the same loop on the kinematic TidyBot, with the bin's walls in the scene
+# (sim.bin: x, y, yaw deg; sim_safety.json gives the arm's least clearance to them per
+# step). The cube starts inside the bin, and a throw lands at the bin's centre.
+sim:
+  cube: [-0.27, -0.75, 20.0]
+  landing_offset: [1.39, 0.0]
+  bin: [-0.297, -0.776, 89.0]
