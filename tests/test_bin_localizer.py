@@ -359,3 +359,93 @@ def test_the_toss_cycles_config_builds_both_bin_sources():
     real = cfg.bin.pipelines.real
     assert real.serials == list(SERIALS)
     assert real.darkness == cfg.bin.darkness
+
+
+# Sampled from the 2026-10-20 ceiling frame of the same-side bin (camera 1): floor
+# HSV saturation ~80, the bin's shadow on the floor ~80-100 (darker floor), the
+# cardboard ~160-200. Darkness alone counts the shadow as bin; saturation does not.
+TODAY_FLOOR_BGR = (163, 188, 232)
+TODAY_SHADOW_BGR = (110, 137, 179)
+TODAY_WALL_BGR = (33, 60, 116)
+TODAY_INSIDE_BGR = (55, 83, 141)
+TODAY_MODEL = BinModel(length=0.39, width=0.29, height=0.21, wall=0.005)
+
+
+def _render_with_shadow(cameras, pose, shadow_offset, seed=0):
+    """Today's colours: the bin at `pose` and its shadow on the floor, the bin's
+    footprint shifted by `shadow_offset` (m) and grown 4 cm."""
+    rng = np.random.default_rng(seed)
+    x, y, yaw = pose
+    halves = []
+    for cam in cameras:
+        img = np.full((H, W, 3), TODAY_FLOOR_BGR, np.float32)
+        shadow = _box_polygon(
+            cam,
+            x + shadow_offset[0],
+            y + shadow_offset[1],
+            yaw,
+            TODAY_MODEL.length + 0.04,
+            TODAY_MODEL.width + 0.04,
+            0.0,
+            0.0,
+        ).astype(np.int32)
+        cv.fillConvexPoly(img, shadow, TODAY_SHADOW_BGR, lineType=cv.LINE_AA)
+        outer = bin_silhouette(cam, x, y, yaw, TODAY_MODEL).astype(np.int32)
+        cv.fillConvexPoly(img, outer, TODAY_WALL_BGR, lineType=cv.LINE_AA)
+        t = TODAY_MODEL.wall
+        opening = _box_polygon(
+            cam,
+            x,
+            y,
+            yaw,
+            TODAY_MODEL.length - 2 * t,
+            TODAY_MODEL.width - 2 * t,
+            TODAY_MODEL.height,
+            TODAY_MODEL.height,
+        ).astype(np.int32)
+        cv.fillConvexPoly(img, opening, TODAY_INSIDE_BGR, lineType=cv.LINE_AA)
+        img += rng.normal(0, 3.0, img.shape)
+        halves.append(np.clip(img, 0, 255).astype(np.uint8))
+    return np.vstack(halves)
+
+
+@pytest.mark.parametrize(
+    "pose, shadow",
+    [
+        ((-0.297, -0.776, math.radians(89.0)), (0.04, 0.06)),  # 2026-10-20 spot
+        ((0.6, -0.9, math.radians(20)), (-0.05, 0.03)),
+    ],
+)
+def test_a_saturation_mask_fits_the_bin_and_not_its_shadow(cameras, pose, shadow):
+    """2026-10-20: the darkness mask took the bin's shadow for bin, and the fit sat
+    2 cm off the ArUco marker in the bin's centre. With ``min_saturation`` the mask is
+    the cardboard only and the fit lands within 1 cm."""
+    frames = [_render_with_shadow(cameras, pose, shadow, seed=s) for s in range(2)]
+    fit = localize_bin(
+        frames, cameras, TODAY_MODEL, search_bounds=SEARCH, min_saturation=130.0
+    )
+    assert fit is not None
+    assert math.hypot(fit.x - pose[0], fit.y - pose[1]) < 0.01
+    assert _yaw_err(fit.yaw, pose[2]) < math.radians(3.0)
+
+
+def test_the_ceiling_bin_source_passes_min_saturation_on(cameras):
+    """CeilingBinSource(min_saturation=...) fits with the saturation mask."""
+    pose, shadow = (-0.297, -0.776, math.radians(89.0)), (0.04, 0.06)
+    source = CeilingBinSource(
+        SERIALS,
+        image_client=_FakeImages(
+            [_render_with_shadow(cameras, pose, shadow, seed=s) for s in range(2)]
+        ),
+        marker_client=_FakeMarkers((5.0, 5.0)),
+        length=TODAY_MODEL.length,
+        width=TODAY_MODEL.width,
+        height=TODAY_MODEL.height,
+        wall=TODAY_MODEL.wall,
+        search_bounds=SEARCH,
+        num_frames=2,
+        frame_period_s=0.0,
+        min_saturation=130.0,
+    )
+    fit = source.localize()
+    assert math.hypot(fit.x - pose[0], fit.y - pose[1]) < 0.01

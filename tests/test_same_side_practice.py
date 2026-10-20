@@ -7,6 +7,7 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 from hydra import compose, initialize_config_dir
 from spatialmath import SE2
@@ -99,7 +100,9 @@ def _record(tmp_path, k=0):
 
 
 def _bin_fit():
-    return BinFit(BIN[0], BIN[1], math.pi / 2, 0.40, 0.32, 0.19, 0.005)
+    """The fake bin, as the config builds it."""
+    b = _compose().bin
+    return BinFit(BIN[0], BIN[1], math.pi / 2, b.length, b.width, b.height, b.wall)
 
 
 def test_the_layout_is_the_measured_tape_and_the_opposite_sides_geometry():
@@ -216,7 +219,7 @@ def test_the_collision_check_refuses_a_gripper_over_a_wall():
 def test_a_cube_against_the_bin_wall_is_handed_to_the_person(tmp_path, monkeypatch):
     """A cube the gripper cannot reach without touching a wall is not grasped: the
     person is asked to nudge it, and the pick goes on once it has moved."""
-    cube = [BIN[0] + 0.14, BIN[1], 0.025]  # 1 cm from the inner wall
+    cube = [BIN[0] + 0.10, BIN[1], 0.025]  # 4 cm from the inner wall
 
     monkeypatch.setattr(ConstantTargetSource, "get_target", lambda self: tuple(cube))
 
@@ -264,3 +267,57 @@ def test_the_floor_cube_footprint_check_does_not_block_the_bin_pick():
     workspace = Workspace.from_config(cfg.barrier, cfg.preview.floor_bounds)
     assert workspace.cube_problem(json.loads(IN_BIN)[:2], 0.0) is None
     assert min(workspace.barrier.depth(c) for c in footprint((1.10, -0.78, 0.0))) > 0
+
+
+def test_the_gripper_box_is_long_along_the_fingers_travel():
+    """The open 2F-85 spans 14.8 cm along its fingers' travel (the tool's x axis, not
+    the IK site's 'closing' axis: the TidyBot model's fingers move along x) and 7.6
+    cm across. 7.5 cm from a wall the gripper touches it with the fingers spread
+    towards the wall, and not with them along it (there the wrist's bracelet, 4 cm
+    below the 21 cm rim at the grasp, is what touches)."""
+    cfg = _compose()
+    geom = geometry_from_config(cfg.pick.top_down)
+    in_bin = cfg.pick.top_down.in_bin
+    from prpl_tidybot.top_down_pick import (  # pylint: disable=import-outside-toplevel
+        arm_frame_target,
+        top_down_joint_targets,
+    )
+
+    fit = _bin_fit()
+    base = (fit.x + 0.67, fit.y, math.pi)
+    cube = (fit.x, fit.y + fit.length / 2 - fit.wall - 0.075)  # along y: the length
+    ax, ay = arm_frame_target(base, cube, geom)
+    gripper_hits = {}
+    for turn in (0.0, math.pi / 2):
+        g = dataclasses.replace(geom, closing_turn=turn)
+        _, grasp = top_down_joint_targets(ax, ay, 0.0, g)
+        _, approach, closing = forward_kinematics(grasp, g)
+        fingers = np.cross(closing, approach)[:2]  # the fingers' travel, arm frame
+        towards_wall = abs(fingers[1]) > 0.9  # arm y is map -y (the base faces -x)
+        problem = arm_bin_collision(grasp, g, base, fit, in_bin) or ""
+        gripper_hits[towards_wall] = "the gripper" in problem
+    assert gripper_hits == {True: True, False: False}
+
+
+def test_the_grasp_on_the_other_faces_is_used_when_only_it_clears():
+    """With a gripper wide enough that its finger direction decides, a cube near a
+    wall gets the grasp turned a quarter (fingers along the wall)."""
+    cfg = _compose(
+        **{"pick.top_down.in_bin.finger_half_span": 0.10, "env.cube_pose": IN_BIN}
+    )
+    geom = geometry_from_config(cfg.pick.top_down)
+    fit = _bin_fit()
+    base = (fit.x + 0.67, fit.y, math.pi)
+    cube = {"x": fit.x, "y": fit.y + fit.length / 2 - fit.wall - 0.10, "yaw_deg": 0.0}
+    from prpl_tidybot.third_party.constants import (  # pylint: disable=import-outside-toplevel
+        RETRACT_ARM_CONF,
+    )
+    from prpl_tidybot.toss_cycles import (  # pylint: disable=import-outside-toplevel
+        _bin_grasp_geometry,
+    )
+
+    chosen, problem = _bin_grasp_geometry(
+        geom, base, cube, fit, cfg.pick.top_down.in_bin, RETRACT_ARM_CONF
+    )
+    assert problem is None
+    assert chosen is not None and chosen.closing_turn == pytest.approx(math.pi / 2)

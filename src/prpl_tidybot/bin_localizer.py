@@ -145,12 +145,28 @@ def bin_silhouette(
     return hull.reshape(-1, 2).astype(np.float64)
 
 
-def bin_mask(bgr: NDArray[np.uint8], darkness: float = 0.85) -> NDArray[np.uint8]:
+def bin_mask(
+    bgr: NDArray[np.uint8], darkness: float = 0.85, min_saturation: float | None = None
+) -> NDArray[np.uint8]:
     """1 where a pixel is darker than ``darkness`` times the local floor, holes (a cube
     in the bin, a white label on it) filled.
 
+    With ``min_saturation`` it is instead where the HSV saturation exceeds it: the
+    cardboard, and not the bin's shadow on the floor, which darkness also counts (on
+    2026-10-20 the floor read ~80, the shadow ~80-100, the cardboard ~160-200, and the
+    darkness fit sat 2 cm off the marker in the bin's centre).
+
     Pass one camera's image: the local floor is estimated within it.
     """
+    if min_saturation is not None:
+        saturation: Any = cv.cvtColor(bgr, cv.COLOR_BGR2HSV)[:, :, 1]
+        card: Any = (saturation.astype(np.float32) > min_saturation).astype(np.uint8)
+        card = cv.morphologyEx(card, cv.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+        card = cv.morphologyEx(card, cv.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        outlines, _ = cv.findContours(card, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        solid = np.zeros_like(card)
+        cv.drawContours(solid, outlines, -1, (1,), thickness=cv.FILLED)
+        return solid.astype(np.uint8)
     lightness: Any = cv.cvtColor(bgr, cv.COLOR_BGR2LAB)[:, :, 0]
     h, w = lightness.shape
     small = cv.resize(
@@ -218,6 +234,7 @@ def find_bin_candidates(
     model: BinModel,
     exclude: Sequence[Sequence[float]] = (),
     darkness: float = 0.85,
+    min_saturation: float | None = None,
 ) -> list[tuple[float, float]]:
     """Map-frame (x, y) of each isolated, bin-sized dark region in ``search_bounds``,
     best first: a patch well inside the footprint (whatever the yaw) is dark, and a
@@ -231,7 +248,7 @@ def find_bin_candidates(
     best = np.zeros(gx.shape)
     for i, (cam, img) in enumerate(zip(cameras, _split(frame, len(cameras)))):
         rows, cols = img.shape[:2]
-        mask = bin_mask(img, darkness).astype(np.float64)
+        mask = bin_mask(img, darkness, min_saturation).astype(np.float64)
         valid = _valid_rows(rows, cols, i, len(cameras)).astype(np.float64)
         mask *= valid
         integral = cv.integral(mask)
@@ -269,6 +286,7 @@ def fit_bin_pose(  # pylint: disable=too-many-locals
     model: BinModel,
     only: Sequence[int] | None = None,
     darkness: float = 0.85,
+    min_saturation: float | None = None,
 ) -> BinFit | None:
     """3-DoF silhouette fit around ``guess_xy``; masks are averaged over ``frames``
     first.
@@ -295,7 +313,10 @@ def fit_bin_pose(  # pylint: disable=too-many-locals
         v1 = int(min(px[:, 1].max() + _WINDOW_MARGIN_PX, rows))
         if u1 - u0 < 10 or v1 - v0 < 10:
             continue
-        prob = np.mean([bin_mask(img, darkness)[v0:v1, u0:u1] for img in imgs], axis=0)
+        prob = np.mean(
+            [bin_mask(img, darkness, min_saturation)[v0:v1, u0:u1] for img in imgs],
+            axis=0,
+        )
         valid = _valid_rows(rows, cols, i, len(cameras))[v0:v1, u0:u1]
         prob = prob * valid
         if prob.sum() > 0:
@@ -378,6 +399,7 @@ def _isolated(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     fit: BinFit,
     model: BinModel,
     darkness: float,
+    min_saturation: float | None = None,
 ) -> bool:
     """Whether the dark region under the fit is the bin alone: at most ``_SPILL_MAX`` of
     the connected dark region containing it lies outside the silhouette grown by twice
@@ -388,7 +410,7 @@ def _isolated(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     and rejected too (move one apart).
     """
     img = _split(frame, len(cameras))[index]
-    mask = bin_mask(img, darkness)
+    mask = bin_mask(img, darkness, min_saturation)
     rows, cols = mask.shape
     mask *= _valid_rows(rows, cols, index, len(cameras)).astype(np.uint8)
     _, labels = cv.connectedComponents(mask)
@@ -424,6 +446,7 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
     min_iou: float = 0.7,
     serials: Sequence[str] | None = None,
     darkness: float = 0.85,
+    min_saturation: float | None = None,
 ) -> BinFit | None:
     """The best-fitting bin whose centre lies in ``search_bounds``, or None if nothing
     fits well enough.
@@ -434,9 +457,16 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
     """
     best: BinFit | None = None
     for guess in find_bin_candidates(
-        frames[-1], cameras, search_bounds, model, exclude, darkness
+        frames[-1], cameras, search_bounds, model, exclude, darkness, min_saturation
     ):
-        fit = fit_bin_pose(frames[-2:], cameras, guess, model, darkness=darkness)
+        fit = fit_bin_pose(
+            frames[-2:],
+            cameras,
+            guess,
+            model,
+            darkness=darkness,
+            min_saturation=min_saturation,
+        )
         if fit is not None and (best is None or fit.iou > best.iou):
             best = fit
     if best is None or best.iou < min_iou:
@@ -444,7 +474,15 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
     guess = (best.x, best.y)
     singles = []
     for i in range(len(cameras)):
-        fit = fit_bin_pose(frames, cameras, guess, model, only=[i], darkness=darkness)
+        fit = fit_bin_pose(
+            frames,
+            cameras,
+            guess,
+            model,
+            only=[i],
+            darkness=darkness,
+            min_saturation=min_saturation,
+        )
         if fit is not None:
             singles.append((i, fit))
     if not singles:
@@ -461,7 +499,7 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
     near = [(i, f) for i, f in pool if f.iou >= top_iou - 0.03]
     cam_i, chosen = min(near, key=lambda t: _off_nadir(cameras[t[0]], t[1].x, t[1].y))
     if chosen.iou < min_iou or not _isolated(
-        frames[-1], cameras, cam_i, chosen, model, darkness
+        frames[-1], cameras, cam_i, chosen, model, darkness, min_saturation
     ):
         return None
     if not (
@@ -546,6 +584,7 @@ class CeilingBinSource(TargetSource):
         min_iou: float = 0.7,
         darkness: float = 0.85,
         host: str | None = None,
+        min_saturation: float | None = None,
     ) -> None:
         if image_client is None:
             from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
@@ -572,6 +611,7 @@ class CeilingBinSource(TargetSource):
         self._period = float(frame_period_s)
         self._min_iou = float(min_iou)
         self._darkness = float(darkness)
+        self._min_saturation = None if min_saturation is None else float(min_saturation)
         self.last_fit: BinFit | None = None
 
     def _frames(self) -> list[NDArray[np.uint8]]:
@@ -602,6 +642,7 @@ class CeilingBinSource(TargetSource):
             min_iou=self._min_iou,
             serials=self._serials,
             darkness=self._darkness,
+            min_saturation=self._min_saturation,
         )
         if fit is None:
             raise RuntimeError(

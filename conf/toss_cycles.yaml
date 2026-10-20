@@ -214,15 +214,15 @@ pick:
 
 # The open cardboard bin the cube is tossed into (prpl_tidybot.bin_localizer). It may
 # stand anywhere on the floor; the ceiling cameras find it by its darkness against
-# the local floor and fit this box's silhouette.
+# the floor (by the cardboard's colour saturation) and fit this box's silhouette.
 bin:
-  # PLACEHOLDERS estimated from one ceiling frame (2026-10-15): measure with a tape.
   # Outer footprint (length along the bin's own x / yaw, width across), rim height,
-  # cardboard thickness, metres. The frame's outline fitted a 0.40 m length on the
-  # near side but may run to ~0.45-0.47 m where it met a dark shelf.
-  length: 0.40
-  width: 0.32
-  height: 0.19
+  # cardboard thickness, metres (2026-10-20): the rim from a photo against a 10.2 cm
+  # Leatherman, the footprint fitted to the cardboard in the calibrated ceiling camera
+  # (IoU 0.99, within 1 cm of an ArUco marker placed in its centre).
+  length: 0.39
+  width: 0.29
+  height: 0.21
   wall: 0.005
   # A cube scores only when its centre is inside the walls by this much on every
   # side: a scoring region strictly inside the bin, as Tossing3D's.
@@ -232,6 +232,11 @@ bin:
   # A pixel is bin when darker than this times the local floor. In the real frame
   # the lit outer wall read ~0.73 of the floor beside it, the inside ~0.3.
   darkness: 0.85
+  # The bin is the pixels whose HSV saturation exceeds this: the cardboard, not its
+  # shadow on the floor, which the darkness mask also counts (2026-10-20: floor ~80,
+  # shadow ~80-100, cardboard ~160-200; the darkness fit sat 2 cm off the ArUco marker
+  # in the bin's centre, this one within 1 cm). null falls back to darkness.
+  min_saturation: 130.0
   min_iou: 0.7
   num_frames: 10
   pipelines:
@@ -254,6 +259,7 @@ bin:
       wall: ${bin.wall}
       search_bounds: ${bin.search_bounds}
       darkness: ${bin.darkness}
+      min_saturation: ${bin.min_saturation}
       min_iou: ${bin.min_iou}
       num_frames: ${bin.num_frames}
 

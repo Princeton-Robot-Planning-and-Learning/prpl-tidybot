@@ -66,16 +66,18 @@ pick:
     # fingertips `rim_clearance` above the rim, descends straight to the usual hover,
     # aligns there and grasps. Every planned arm pose is checked against the bin's
     # walls: the arm's own meshes, and the 2F-85 (no mesh in the IK model) as a box
-    # `gripper_half_closing` along its closing axis, `gripper_half_across` across it,
-    # from the flange to `fingertip_drop` below the pinch point. A pose that would
-    # touch a wall (grown by `wall_margin`) is refused and the person nudges the cube.
+    # `finger_half_span` along the fingers' travel and `half_width` across them, from
+    # `gripper_length` above the pinch point to `fingertip_drop` below it (the open
+    # gripper in the TidyBot MuJoCo model: 14.8 x 7.6 cm, 12.4 cm up, 2.9 cm down). Of
+    # the grasps on the cube's two pairs of faces, one that clears is used; if neither
+    # does (a pose within `wall_margin` of a wall) the person nudges the cube.
     in_bin:
       enabled: true
       rim_clearance: 0.04
-      gripper_half_closing: 0.075
-      gripper_half_across: 0.045
-      gripper_length: 0.12
-      fingertip_drop: 0.03
+      finger_half_span: 0.074
+      half_width: 0.038
+      gripper_length: 0.124
+      fingertip_drop: 0.029
       wall_margin: 0.01
 
 # mode=sim: the same loop on the kinematic TidyBot, with the bin's walls in the scene
@@ -84,4 +86,4 @@ pick:
 sim:
   cube: [-0.27, -0.75, 20.0]
   landing_offset: [1.39, 0.0]
-  bin: [-0.29, -0.77, 90.0]
+  bin: [-0.297, -0.776, 89.0]

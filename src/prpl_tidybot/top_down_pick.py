@@ -59,6 +59,10 @@ class TopDownPickGeometry:
     hover_height: float = 0.10
     # Added to the cube's yaw to align the fingers' closing axis with a pair of faces.
     wrist_yaw_offset: float = 0.0
+    # Added after the 90-degree fold: pi/2 closes on the cube's other pair of faces
+    # (inside the bin, the fingers then spread along the other wall), the wrist still
+    # turning at most 90 degrees.
+    closing_turn: float = 0.0
     # Pinch point beyond the arm's flange (the arm server's IK uses 0.12).
     ee_offset: float = 0.12
     # Gripper readings: closing on nothing reaches ~1.0; on the 5 cm cube it read 0.49.
@@ -155,7 +159,11 @@ def cube_closing_yaw(cube_yaw_rel: float, geom: TopDownPickGeometry) -> float:
     """The cube is 90-degree symmetric: pick the equivalent yaw nearest straight
     ahead, so the wrist turns as little as possible."""
     yaw = cube_yaw_rel + geom.wrist_yaw_offset
-    return (yaw + math.pi / 4) % (math.pi / 2) - math.pi / 4
+    folded = (yaw + math.pi / 4) % (math.pi / 2) - math.pi / 4
+    if not geom.closing_turn:
+        return folded
+    # The two fingers are symmetric too: keep the turned grasp within 90 degrees.
+    return (folded + geom.closing_turn + math.pi / 2) % math.pi - math.pi / 2
 
 
 _SOLVERS: dict[float, IKSolver] = {}

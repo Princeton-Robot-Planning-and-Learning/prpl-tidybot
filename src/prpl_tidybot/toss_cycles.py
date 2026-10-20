@@ -224,16 +224,17 @@ def arm_bin_collision(
     Each arm link's collision mesh, and the 2F-85 as a box (the IK model has no
     gripper mesh), is cut below the rim (plus ``wall_margin``); a part touches a wall
     unless that cut lies wholly inside the bin's inner footprint or wholly outside its
-    outer one, both by ``wall_margin``.
+    outer one, both by ``wall_margin``. The box is long along the fingers' travel,
+    which is the tool's x axis (the IK site's 'closing' axis is across the fingers).
     """
     margin = float(in_bin.wall_margin)
     pos, approach, closing = forward_kinematics(joints, geom)
-    across = np.cross(closing, approach)
+    fingers = np.cross(closing, approach)
     corners = [
         pos
         + a * approach
-        + b * float(in_bin.gripper_half_closing) * closing
-        + c * float(in_bin.gripper_half_across) * across
+        + b * float(in_bin.finger_half_span) * fingers
+        + c * float(in_bin.half_width) * closing
         for a in (float(in_bin.fingertip_drop), -float(in_bin.gripper_length))
         for b in (-1.0, 1.0)
         for c in (-1.0, 1.0)
@@ -287,6 +288,27 @@ def _bin_pick_targets(
     )
     high = dataclasses.replace(geom, hover_height=max(above_hover, geom.hover_height))
     return top_down_joint_targets(*target, high, seed=seed)[0]
+
+
+def _bin_grasp_geometry(
+    geom: TopDownPickGeometry,
+    base: Sequence[float],
+    cube: dict[str, Any],
+    bin_fit: BinFit,
+    in_bin: Any,
+    seed: Sequence[float],
+) -> tuple[TopDownPickGeometry | None, str | None]:
+    """The pick geometry for a cube inside the bin: of the grasps on its two pairs of
+    faces (``closing_turn`` 0 and pi/2), the one that touches no wall, the usual one
+    first; else None and why the usual one would touch."""
+    first: str | None = None
+    for turn in (0.0, math.pi / 2):
+        g = dataclasses.replace(geom, closing_turn=turn)
+        problem = _bin_pick_problem(g, base, cube, bin_fit, in_bin, seed)
+        if problem is None:
+            return g, None
+        first = first or problem
+    return None, first
 
 
 def _bin_pick_problem(
@@ -1050,10 +1072,10 @@ def _pick_top_down(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 None if workspace is None else workspace.valid(bin_fit),
             )
             if cube.get("in_bin") and bin_fit is not None and in_bin is not None:
-                wall = _bin_pick_problem(
+                chosen, wall = _bin_grasp_geometry(
                     geom, stand, cube, bin_fit, in_bin, arm.get_arm_state()
                 )
-                if wall is not None:
+                if chosen is None:
                     problem = f"cube too close to the bin wall to grasp ({wall})"
         if problem is not None:
             if in_bin is None or ask_to_move is None:
@@ -1558,13 +1580,19 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     above: list[float] | None = None
     clear: Callable[[Sequence[float]], str | None] | None = None
     if bin_fit is not None and in_bin is not None:
-        wall = _bin_pick_problem(geom, base, cube, bin_fit, in_bin, arm.get_arm_state())
-        if wall is not None:
+        chosen, wall = _bin_grasp_geometry(
+            geom, base, cube, bin_fit, in_bin, arm.get_arm_state()
+        )
+        if chosen is None:
             record["pick_attempts"][-1].update(
                 {"gripper": None, "held": False, "note": f"bin wall: {wall}"}
             )
             _logger.warning("Pick attempt %d not started: bin wall: %s.", attempt, wall)
             return False, None
+        geom = chosen
+        record["pick_attempts"][-1]["closing_turn_deg"] = math.degrees(
+            geom.closing_turn
+        )
         above = _bin_pick_targets(
             geom, (ax, ay, yaw_rel), bin_fit, in_bin, arm.get_arm_state()
         )
