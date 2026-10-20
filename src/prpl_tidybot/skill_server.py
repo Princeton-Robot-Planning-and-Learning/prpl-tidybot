@@ -49,6 +49,9 @@ Definitions the planner relies on:
   all (the pick goes into the bin).
 * The bin's spot: ``far_side`` when its centre is across the barrier, else
   ``robot_side``.
+* Over the RPC, a call made while another skill moves the robot, or one ended by
+  ``stop()``, raises ``RuntimeError("SkillBusy: ...")`` / ``RuntimeError("SkillStopped:
+  ...")``: builtin errors, which a client without prpl_tidybot can unpickle.
 
 Every call is recorded in ``<log dir>/skill_calls.jsonl`` (arguments, reply or error,
 times), the ceiling cameras film the session into ``ceiling.mp4`` labelled with the
@@ -844,10 +847,32 @@ class SkillClientManager(BaseManager):
 SkillClientManager.register("Skills")
 
 
+class _RpcSkills:
+    """The skills as the RPC serves them. SkillBusy and SkillStopped leave as a
+    builtin RuntimeError naming them: the client unpickles every error, and hitl-pmp
+    has no prpl_tidybot to unpickle these classes with. ValueError (a refusal) passes
+    through unchanged."""
+
+    def __init__(self, skills: TossingSkills) -> None:
+        self._skills = skills
+
+    def __getattr__(self, name: str) -> Any:
+        method = getattr(self._skills, name)
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return method(*args, **kwargs)
+            except (SkillBusy, SkillStopped) as e:
+                raise RuntimeError(f"{type(e).__name__}: {e}") from None
+
+        return call
+
+
 def serve(skills: TossingSkills, host: str, port: int, authkey: bytes) -> None:
     """Serve ``skills`` (the contract's calls only) until interrupted; Ctrl-C halts
     the robot first."""
-    SkillManager.register("Skills", callable=lambda: skills, exposed=EXPOSED)
+    rpc = _RpcSkills(skills)
+    SkillManager.register("Skills", callable=lambda: rpc, exposed=EXPOSED)
     manager = SkillManager(address=(host, port), authkey=authkey)
     server = manager.get_server()
     _logger.info("Tossing skill server on %s:%d", host, port)

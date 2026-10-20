@@ -618,3 +618,35 @@ def test_client_and_server_over_localhost(skills):
     client.stop()
     with pytest.raises(AttributeError):
         client._skills.close()  # pylint: disable=protected-access
+
+
+def test_busy_and_stopped_cross_the_rpc_as_builtin_errors(skills):
+    """A client without prpl_tidybot (hitl-pmp) must unpickle every error the server
+    raises: SkillBusy and SkillStopped arrive as RuntimeError naming them."""
+    port = 50095
+    thread = threading.Thread(
+        target=serve, args=(skills, "127.0.0.1", port, b"test"), daemon=True
+    )
+    thread.start()
+    client = None
+    for _ in range(50):
+        try:
+            client = TossingRobotClient("127.0.0.1", port, b"test")
+            break
+        except ConnectionRefusedError:
+            threading.Event().wait(0.1)
+    assert client is not None
+    with skills._moving():  # pylint: disable=protected-access
+        with pytest.raises(RuntimeError) as busy:
+            client.retract()
+    assert type(busy.value).__module__ == "builtins"
+    assert str(busy.value).startswith("SkillBusy: another skill is moving the robot")
+
+    def stopped():
+        raise SkillStopped("stop() was called")
+
+    skills.retract = stopped
+    with pytest.raises(RuntimeError) as halted:
+        client.retract()
+    assert type(halted.value).__module__ == "builtins"
+    assert str(halted.value) == "SkillStopped: stop() was called"
