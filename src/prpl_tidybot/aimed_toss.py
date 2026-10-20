@@ -86,7 +86,10 @@ class Barrier:
     """A rectangle on the floor (map frame) the robot never crosses: its long side
     (``length``) runs along ``yaw``.
 
-    The robot works on its +x side.
+    ``robot_side`` is the map-frame direction from the barrier into the robot's side
+    (normalized): the robot works beyond the rectangle's face in that direction. The
+    default, +x, is the original placeholder layout; the real room's tape runs along x
+    with the robot on its -y side.
     """
 
     x: float = 0.0
@@ -94,17 +97,29 @@ class Barrier:
     length: float = 1.8
     thickness: float = 0.05
     yaw: float = math.pi / 2
+    robot_side: tuple[float, float] = (1.0, 0.0)
 
-    @property
-    def robot_side_x(self) -> float:
-        """The barrier's +x face: the robot's side starts here."""
+    def __post_init__(self) -> None:
+        nx, ny = (float(v) for v in self.robot_side)
+        norm = math.hypot(nx, ny)
+        if not math.isfinite(norm) or norm < 1e-9:
+            raise ValueError(
+                f"Barrier robot_side {self.robot_side} is not a direction."
+            )
+        object.__setattr__(self, "robot_side", (nx / norm, ny / norm))
+
+    def depth(self, point: Sequence[float]) -> float:
+        """How far ``point`` (map x, y) lies past the barrier's robot-side face into
+        the robot's side; negative on the face or across it."""
+        nx, ny = self.robot_side
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        # The rectangle's half-extent along the robot-side direction.
         half = 0.5 * (
-            abs(self.length * math.cos(self.yaw))
-            + abs(self.thickness * math.sin(self.yaw))
+            self.length * abs(nx * c + ny * s) + self.thickness * abs(-nx * s + ny * c)
         )
-        return self.x + half
+        return nx * (point[0] - self.x) + ny * (point[1] - self.y) - half
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict[str, Any]:
         """Plain floats: the skill server's ``observe()["barrier"]``."""
         return {
             "x": float(self.x),
@@ -112,17 +127,23 @@ class Barrier:
             "length": float(self.length),
             "thickness": float(self.thickness),
             "yaw": float(self.yaw),
+            "robot_side": [float(v) for v in self.robot_side],
         }
 
     @classmethod
     def from_config(cls, cfg: Any) -> Barrier:
-        """From ``{center: [x, y], length, thickness, yaw}``."""
+        """From ``{center: [x, y], length, thickness, yaw, robot_side: [x, y]}``
+        (``robot_side`` defaults to +x)."""
+        side = cfg.get("robot_side", None) if hasattr(cfg, "get") else None
         return cls(
             x=float(cfg["center"][0]),
             y=float(cfg["center"][1]),
             length=float(cfg["length"]),
             thickness=float(cfg["thickness"]),
             yaw=float(cfg["yaw"]),
+            robot_side=(
+                (1.0, 0.0) if side is None else (float(side[0]), float(side[1]))
+            ),
         )
 
 
@@ -130,11 +151,38 @@ class Barrier:
 class Workspace:
     """Where the base may be: its centre inside ``floor_bounds`` (x_min, x_max, y_min,
     y_max) and, when there is a barrier, its whole footprint at least ``clearance``
-    beyond the barrier's robot-side face."""
+    beyond the barrier's robot-side face.
+
+    ``cube_half`` is the cube's half side: a cube whose footprint reaches the barrier
+    is not picked (0 checks only its centre).
+    """
 
     floor_bounds: tuple[float, float, float, float] = (-1.5, 1.7, -1.5, 1.5)
     barrier: Barrier | None = None
     clearance: float = 0.05
+    cube_half: float = 0.0
+
+    def cube_problem(self, xy: Sequence[float], yaw: float | None) -> str | None:
+        """Why the cube at ``xy`` (yaw ``yaw`` rad, None if unknown: any) may not be
+        picked because of the barrier, or None: its centre past the robot-side face,
+        or its footprint reaching it."""
+        if self.barrier is None:
+            return None
+        depth = self.barrier.depth(xy)
+        if depth < 0.0:
+            return "cube past the barrier"
+        nx, ny = self.barrier.robot_side
+        if yaw is None:
+            reach = self.cube_half * math.sqrt(2.0)
+        else:
+            c, s = math.cos(yaw), math.sin(yaw)
+            reach = self.cube_half * (abs(nx * c + ny * s) + abs(-nx * s + ny * c))
+        if depth < reach:
+            return (
+                f"cube overlapping the barrier (its footprint reaches "
+                f"{reach - depth:.3f} m past the robot-side edge)"
+            )
+        return None
 
     def pose_problem(
         self, pose: Sequence[float], bin_fit: BinFit | None = None
@@ -146,11 +194,12 @@ class Workspace:
             return f"base centre ({x:+.3f}, {y:+.3f}) outside the drivable box {fb}"
         corners = footprint(pose)
         if self.barrier is not None:
-            limit = self.barrier.robot_side_x + self.clearance
-            if corners[:, 0].min() < limit:
+            depth = min(self.barrier.depth(c) for c in corners)
+            if depth < self.clearance:
                 return (
-                    f"base footprint reaches x = {corners[:, 0].min():+.3f}, across "
-                    f"the barrier (must stay at x >= {limit:+.3f})"
+                    f"base footprint {depth:+.3f} m from the barrier's robot-side "
+                    f"face, across the barrier (must stay {self.clearance:.3f} m "
+                    "clear)"
                 )
         if bin_fit is not None and _rectangles_overlap(
             corners, _bin_corners(bin_fit, self.clearance)
@@ -196,6 +245,7 @@ class Workspace:
             floor_bounds=fb,  # type: ignore[arg-type]
             barrier=Barrier.from_config(cfg),
             clearance=float(cfg.get("clearance", 0.05)),
+            cube_half=float(cfg.get("cube_half", 0.0)),
         )
 
 

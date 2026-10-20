@@ -198,10 +198,9 @@ def test_with_the_barrier_every_base_pose_stays_on_the_robots_side(
         prompt_fn=_Operator(),
     )
     assert result.completed == 1, result.finish_reason
-    limit = Barrier().robot_side_x + 0.05
     assert base_log
     for pose in base_log:
-        assert footprint(pose)[:, 0].min() >= limit - 1e-6, pose
+        assert min(Barrier().depth(c) for c in footprint(pose)) >= 0.05 - 1e-6, pose
 
 
 def test_a_cube_across_the_barrier_is_not_picked(
@@ -213,5 +212,5 @@ def test_a_cube_across_the_barrier_is_not_picked(
         log_dir=tmp_path,
         prompt_fn=_Operator(),
     )
-    assert "cube across the barrier" in result.finish_reason
+    assert "cube past the barrier" in result.finish_reason
     assert not [e for e in arm_log if e[0] == "angular"]

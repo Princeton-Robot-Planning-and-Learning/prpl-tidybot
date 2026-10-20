@@ -100,7 +100,7 @@ def test_can_pick_is_a_dry_run(skills):
 def test_can_pick_refuses_a_cube_across_the_barrier():
     """The robot never crosses the barrier, so that cube is unpickable."""
     skills = build_skills(_cfg(**{"env.cube_pose": "[-0.8,0.8,0.025]"}))
-    assert skills.can_pick() == {"feasible": False, "note": "cube across the barrier"}
+    assert skills.can_pick() == {"feasible": False, "note": "cube past the barrier"}
 
 
 def test_pick_then_toss_into_the_bin(skills):
@@ -129,7 +129,7 @@ def test_pick_then_toss_into_the_bin(skills):
     assert skills.gripper_command == 0.0
     robot = skills.observe()["robot"]
     assert robot[:2] == pytest.approx([-0.45 + 1.2, 0.4], abs=0.02)
-    assert footprint(robot)[:, 0].min() >= Barrier().robot_side_x + 0.05 - 1e-6
+    assert min(Barrier().depth(c) for c in footprint(robot)) >= 0.05 - 1e-6
     assert set(out) == {"tossed", "landed", "in_bin", "note"}
 
 

@@ -709,15 +709,16 @@ def pick_problem(
 ) -> str | None:
     """Why the top-down pick of ``cube`` cannot even start from ``robot``, or None:
 
-    the cube across the barrier (the robot never crosses it), no standoff that keeps the
-    base in the drivable box and on its side, or no straight drive there.
+    the cube past or on the barrier (the robot never crosses it), no standoff that keeps
+    the base in the drivable box and on its side, or no straight drive there.
     """
-    if (
-        workspace is not None
-        and workspace.barrier is not None
-        and cube["x"] < workspace.barrier.robot_side_x
-    ):
-        return "cube across the barrier"
+    if workspace is not None:
+        yaw = cube.get("yaw")
+        if yaw is None and cube.get("yaw_deg") is not None:
+            yaw = math.radians(cube["yaw_deg"])
+        problem = workspace.cube_problem((cube["x"], cube["y"]), yaw)
+        if problem is not None:
+            return problem
     try:
         stand = standoff_pose(
             robot,

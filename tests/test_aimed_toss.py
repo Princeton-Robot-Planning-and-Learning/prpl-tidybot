@@ -77,13 +77,98 @@ def test_every_toss_in_the_box_is_thrown_forward_and_up():
             assert abs(velocity[1]) < 0.05, (speed, release)
 
 
-def test_the_barriers_robot_side_is_its_plus_x_face():
+def test_the_barriers_robot_side_is_its_plus_x_face_by_default():
     """Along y and 5 cm thick, the robot's side starts 2.5 cm past its centre."""
-    assert BARRIER.robot_side_x == pytest.approx(0.025)
-    assert Barrier(x=0.3, yaw=0.0, length=0.2, thickness=0.05).robot_side_x == (
-        pytest.approx(0.4)
-    )
-    assert set(BARRIER.as_dict()) == {"x", "y", "length", "thickness", "yaw"}
+    assert BARRIER.robot_side == (1.0, 0.0)
+    assert BARRIER.depth((0.025, 0.7)) == pytest.approx(0.0)
+    assert BARRIER.depth((0.5, -3.0)) == pytest.approx(0.475)
+    assert Barrier(x=0.3, yaw=0.0, length=0.2, thickness=0.05).depth(
+        (0.4, 0.0)
+    ) == pytest.approx(0.0)
+    assert set(BARRIER.as_dict()) == {
+        "x",
+        "y",
+        "length",
+        "thickness",
+        "yaw",
+        "robot_side",
+    }
+    assert BARRIER.as_dict()["robot_side"] == [1.0, 0.0]
+
+
+# The real room (2026-10-20): black tape across the whole floor, its robot-side edge
+# at y = +0.94 and the robot on the -y side; the bin fixed against the back wall
+# (measured x +0.02..+0.44, y +1.85..~2.05); throws from (0.23, 0.61) facing +y.
+TAPE = Barrier(
+    x=0.1, y=0.965, length=3.2, thickness=0.05, yaw=0.0, robot_side=(0.0, -1.0)
+)
+REAL_WS = Workspace(floor_bounds=FLOOR, barrier=TAPE, clearance=0.05)
+REAL_BIN = BinFit(x=0.23, y=1.95, yaw=0.0, length=0.42, width=0.20, height=0.19)
+REAL_TOSS_POSE = (0.23, 0.61, math.pi / 2)
+
+
+def test_a_barrier_with_its_robot_side_towards_minus_y():
+    """The tape's robot-side edge is its -y face; depth is how far a point is past
+    it into the robot's side."""
+    assert TAPE.depth((0.0, 0.94)) == pytest.approx(0.0)
+    assert TAPE.depth((-1.2, 0.61)) == pytest.approx(0.33)
+    assert TAPE.depth((0.3, 1.2)) < 0.0
+    assert Barrier(robot_side=(0.0, -2.0)).robot_side == (0.0, -1.0)
+    with pytest.raises(ValueError, match="robot_side"):
+        Barrier(robot_side=(0.0, 0.0))
+
+
+def test_the_real_toss_pose_keeps_the_base_clear_of_the_tape():
+    """Facing +y the base's front edge reaches y = 0.884, inside the 5 cm clearance
+    (0.89); 9 cm closer it would not be."""
+    assert REAL_WS.pose_problem(REAL_TOSS_POSE, REAL_BIN) is None
+    problem = REAL_WS.pose_problem((0.23, 0.70, math.pi / 2), REAL_BIN)
+    assert problem is not None and "barrier" in problem
+
+
+def test_the_real_aimed_toss_stands_at_the_toss_pose():
+    """1.34 m from the bin centre, from straight -y (bin -> robot azimuth -90 deg)."""
+    pose = aimed_toss_pose(REAL_BIN, 1.34, -math.pi / 2, REAL_WS)
+    assert pose == pytest.approx(REAL_TOSS_POSE)
+    with pytest.raises(ValueError, match="barrier"):
+        aimed_toss_pose(REAL_BIN, 1.0, -math.pi / 2, REAL_WS)
+
+
+def test_drives_must_stay_on_the_tapes_robot_side():
+    """A drive along the tape is fine; one towards the bin across it is refused."""
+    assert REAL_WS.path_problem((-1.0, 0.3, 0.0), (1.0, 0.3, math.pi / 2)) is None
+    problem = REAL_WS.path_problem(REAL_TOSS_POSE, (0.23, 1.2, math.pi / 2))
+    assert problem is not None and "barrier" in problem
+
+
+@pytest.mark.parametrize(
+    "xy, yaw, problem",
+    [
+        ((0.3, 0.5), 0.0, None),
+        ((0.3, 0.912), 0.0, None),  # its +y face 3 mm short of the edge
+        ((0.3, 0.92), 0.0, "overlapping"),  # its +y face 5 mm onto the tape
+        ((0.3, 0.912), math.radians(45), "overlapping"),  # a corner onto the tape
+        ((0.3, 0.95), 0.0, "past"),
+        ((0.3, 1.95), 0.0, "past"),  # in the bin
+    ],
+)
+def test_a_cube_on_or_past_the_tape_is_not_pickable(xy, yaw, problem):
+    """With the cube's half-size, a cube whose footprint reaches the tape is refused
+    as overlapping it; one whose centre is past the edge, as past the barrier."""
+    ws = Workspace(floor_bounds=FLOOR, barrier=TAPE, clearance=0.05, cube_half=0.025)
+    found = ws.cube_problem(xy, yaw)
+    if problem is None:
+        assert found is None
+    else:
+        assert found is not None and problem in found and "barrier" in found
+
+
+def test_without_a_cube_size_only_the_cubes_centre_counts():
+    """The default (cube_half 0) is the old rule: the centre past the robot-side
+    face."""
+    assert WS.cube_problem((0.03, 0.0), 0.0) is None
+    assert "past" in (WS.cube_problem((0.02, 0.0), 0.0) or "")
+    assert Workspace(FLOOR).cube_problem((-5.0, 0.0), 0.0) is None
 
 
 def test_the_toss_pose_faces_the_bin_from_the_given_direction():
@@ -131,7 +216,7 @@ def test_choose_direction_prefers_the_robots_bearing_and_swings_round():
     # the barrier, so the direction swings towards +x.
     d = choose_toss_direction(_bin(-0.2, 0.0), 1.2, (-0.2, 1.4, 0.0), WS)
     pose = aimed_toss_pose(_bin(-0.2, 0.0), 1.2, d, WS)
-    assert footprint(pose)[:, 0].min() >= BARRIER.robot_side_x + 0.05
+    assert min(BARRIER.depth(c) for c in footprint(pose)) >= 0.05 - 1e-9
 
 
 def test_choose_direction_raises_when_no_pose_is_valid():
@@ -170,6 +255,25 @@ def test_workspace_from_config_off_by_default():
         FLOOR,
     )
     assert ws.barrier is not None and ws.barrier.x == 0.1 and ws.clearance == 0.07
+    assert ws.barrier.robot_side == (1.0, 0.0) and ws.cube_half == 0.0
+
+
+def test_workspace_from_config_reads_the_robot_side_and_the_cube_size():
+    """The real tape's block."""
+    ws = Workspace.from_config(
+        {
+            "enabled": True,
+            "center": [0.1, 0.965],
+            "length": 3.2,
+            "thickness": 0.05,
+            "yaw": 0.0,
+            "robot_side": [0.0, -1.0],
+            "clearance": 0.05,
+            "cube_half": 0.025,
+        },
+        FLOOR,
+    )
+    assert ws.barrier == TAPE and ws.cube_half == 0.025
 
 
 def test_pick_standoffs_keep_the_base_on_the_robots_side():

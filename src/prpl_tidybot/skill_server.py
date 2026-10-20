@@ -11,8 +11,10 @@ The contract (names and fields are fixed; all values plain floats, lists, dicts)
     ``robot`` [x, y, yaw]; ``cube`` [x, y, yaw] or None; ``bin`` {x, y, yaw, length,
     width, height} or None; ``holding``; ``gripper`` (measured) and
     ``gripper_command`` (0 = open, 1 = closed, as the sim's ``pos_gripper``);
-    ``cube_upright``; ``cube_in_bin``; ``barrier`` {x, y, length, thickness, yaw};
-    ``barrier_x`` (the barrier's centre x). Map frame, metres and radians.
+    ``cube_upright``; ``cube_in_bin``; ``barrier`` {x, y, length, thickness, yaw,
+    robot_side} (``length`` along ``yaw``; ``robot_side`` the unit map-frame direction
+    into the robot's side); ``barrier_x`` (the barrier's centre x). Map frame, metres
+    and radians.
 ``can_pick() -> {"feasible", "note"}``
     A dry run of the top-down pick; moves nothing.
 ``pick() -> {"held", "gripper", "note"}``
@@ -190,7 +192,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         if cube is None:
             return {"feasible": False, "note": "no cube found"}
         robot = self._robot()
-        xy = {"x": cube[0][0], "y": cube[0][1]}
+        xy = {"x": cube[0][0], "y": cube[0][1], "yaw": cube[0][2]}
         problem = pick_problem(robot, xy, self.geom, self.floor, self.workspace)
         if problem is not None:
             return {"feasible": False, "note": problem}
