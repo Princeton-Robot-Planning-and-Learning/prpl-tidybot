@@ -1,0 +1,47 @@
+# Config for scripts/skill_server.py: Tossing3D's skills on the real robot, one RPC
+# call each (prpl_tidybot.skill_server). Runs ON the NUC next to the arm and base
+# servers; a planner on the LAN connects with TossingRobotClient.
+#
+#   python scripts/skill_server.py mode=real
+#   python scripts/skill_server.py mode=fake      # no robot: the same skills, faked
+#   python scripts/skill_server.py mode=sim       # the kinematic TidyBot (cfg.sim)
+#
+# The real room of 2026-10-20: everything in same_side_practice.yaml (the measured
+# tape, the pick out of the bin, the lateral wrist servo, the compliant arm) and
+# toss_cycles.yaml (the measured bin and its saturation mask, real_toss_bounds,
+# settle_after_toss_s), with the bin searched for at both of its spots.
+
+defaults:
+  - same_side_practice
+  - _self_
+
+# The planner confirms nothing on stdin; the server never prompts.
+interactive: false
+
+# Home (go_home's goal): the close-side toss stand, 1.39 m +x of that spot's bin.
+toss_pose: [1.10, -0.78, 3.141592653589793]
+
+toss:
+  # The real robot throws at each bin spot from one fixed side (toss(direction=None)):
+  # the close spot (bin about (-0.29, -0.77), on the robot's side of the tape) from
+  # +x, the far spot (bin box x 0.03..0.45, y 1.24..1.56, across the tape) from -y,
+  # i.e. from the stand (0.24, 0.01, +90 deg) at 1.39 m. Azimuths, map frame, bin
+  # centre -> robot, rad.
+  spot_directions:
+    robot_side: 0.0
+    far_side: -1.5707963267948966
+
+bin:
+  # Both spots: the drivable box plus 0.3 m.
+  search_bounds: [-1.8, 2.0, -1.8, 1.8]
+
+skill_server:
+  # Bind address on the NUC (all interfaces, so agni can reach it) and port, next to
+  # the base (50000) and arm (50001) servers. The authkey is
+  # third_party.constants.RPC_AUTHKEY. Clients connect to ${lab.nuc_ip}.
+  host: 0.0.0.0
+  port: 50002
+  # observe()["cube_upright"]: the cube's flat-cube silhouette fit scored at least
+  # this IoU (a cube resting on a face fits at ~0.9; the localizer drops a fit below
+  # its own min_iou, 0.6).
+  upright_min_iou: 0.75

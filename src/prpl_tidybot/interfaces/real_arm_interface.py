@@ -1,8 +1,10 @@
 """Real arm interface backed by the Kinova arm RPC server."""
 
-from prpl_tidybot.interfaces.arm_interface import ArmInterface
+from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.third_party.arm_server import ArmManager
 from prpl_tidybot.third_party.constants import ARM_RPC_HOST, ARM_RPC_PORT, RPC_AUTHKEY
+from prpl_tidybot.third_party.kinova import stop_arm_motion
+from prpl_tidybot.toss import TOSS_GRIPPER_RELEASE_MS, TOSS_MAX_VEL
 
 
 class RealArmInterface(ArmInterface):
@@ -33,6 +35,36 @@ class RealArmInterface(ArmInterface):
     def resume(self) -> None:
         """Restart the low-level loop from the arm's current configuration."""
         self.arm.resume()
+
+    def move_angular(self, goal: list[float]) -> list[float]:
+        """One blocking ``move_angular`` on the arm server. The onboard controller
+        keeps going if this process dies, so Ctrl-C stops the arm directly."""
+        try:
+            return list(self.arm.move_joints_angular(list(goal)))
+        except KeyboardInterrupt as e:
+            stop_arm_motion()
+            raise ArmMotionAborted("Ctrl-C during an angular move; arm stopped") from e
+
+    def set_gripper_angular(self, position: float, timeout: float = 4.0) -> float:
+        """Gripper move on the arm server; Ctrl-C stops the arm as above."""
+        try:
+            return float(self.arm.gripper_angular(position, timeout))
+        except KeyboardInterrupt as e:
+            stop_arm_motion()
+            raise ArmMotionAborted("Ctrl-C during a gripper move; arm stopped") from e
+
+    def toss(
+        self,
+        heading: float = 0.0,
+        max_vel: float = TOSS_MAX_VEL,
+        gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
+    ) -> dict[str, float] | None:
+        """Run the toss on the arm server (``Arm.toss``); blocks until it is done.
+        Returns the swing's start time (after the wind-up)."""
+        result = self.arm.toss(
+            heading=heading, max_vel=max_vel, gripper_release_ms=gripper_release_ms
+        )
+        return dict(result) if isinstance(result, dict) else None
 
     def close(self) -> None:
         """Tear down the RPC connection and stop the low-level arm control loop."""

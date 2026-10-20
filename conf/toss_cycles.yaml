@@ -1,0 +1,294 @@
+# Config for scripts/toss_cycles.py: repeat, `cycles` times,
+#   pick the cube (ends in the carry pose) -> drive to toss_pose -> toss -> retract,
+# confirming each action on stdin in mode=real, and whenever the run stops (done,
+# declined, cube not found, failure) retract the arm and drive back to toss_pose.
+#
+#   python scripts/toss_cycles.py mode=fake
+#   python scripts/toss_cycles.py mode=real
+#
+# Everything in config.yaml (seed, preview, lab) still applies; the env is
+# floor-cube-o1 (the lab's 5 cm cube, localized from the ceiling cameras) and its
+# fake/real pipelines.
+
+defaults:
+  - config
+  - override env: floor-cube-o1
+  - _self_
+
+cycles: 2
+
+# Stdin prompts. null = only in mode=real.
+interactive: null
+
+# Where every throw starts: map-frame (x, y, heading rad). 2026-10-20 opposite-side
+# layout: facing +y across the taped barrier (y = 0.349 + 0.0267 x, robot on -y; the
+# base's front edge stops 2 cm short of `barrier.clearance` from it) at the bin, whose
+# near wall is beyond the arm's 1.14 m reach so the cube has to be tossed. The bin
+# sits where neither ceiling camera's view is hidden by its 19 cm walls.
+# Same-side layout (bin on the robot's side, throwing along -x): override with
+#   'toss_pose=[1.10,-0.78,3.1416]' 'bin_stop_box=[-0.45,-0.13,-0.98,-0.56]'
+# the opposite-side bin rotated and translated with the toss pose (near wall 1.23 m
+# ahead, centre 1 cm right of the heading, long side across the throw), 0.2 m toward
+# +y of the first plan (then fitted to the bin as placed, from the ceiling): ~0.6 m from where run 26's throws came to rest to the
+# reachable edge on -y, ~0.5 m to the barrier.
+toss_pose: [0.23, 0.01, 1.5708]
+
+# The bin's floor box (x0, x1, y0, y1), from the taped corner: a cube seen inside it
+# after a throw scored and is put back on the floor by the person.
+bin_stop_box: [0.03, 0.45, 1.24, 1.56]
+
+toss:
+  # Kortex degrees of joint 1 at the throw.
+  heading: 0.0
+  # Peak speed of the joint that moves furthest (joint 6), deg/s, and the cycle (ms)
+  # of the 1 kHz swing at which the gripper opens: a fixed cycle, so the release
+  # point moves along the swing with max_vel.
+  max_vel: 140.0
+  gripper_release_ms: 600
+  # Toss at the localized bin (`bin` below) instead of from toss_pose, with
+  # Tossing3D's parameters: base centre `standoff` m from the bin centre, facing
+  # it, swinging at `speed` deg/s and opening at `release_ms`. `direction` is the
+  # azimuth (map frame, rad) from the bin centre to the robot; null picks the one
+  # nearest the robot's bearing. Checked against real_toss_bounds, the drivable box,
+  # the barrier and the bin before the base moves.
+  aimed:
+    enabled: false
+    standoff: 1.2
+    speed: 120.0
+    release_ms: 600.0
+    direction: null
+  # The skills' toss(direction=None) per bin spot (robot_side: the bin on the robot's
+  # side of the barrier; far_side: across it), azimuths as `direction`; null: the
+  # valid one nearest the robot's bearing. conf/skill_server.yaml fixes both.
+  spot_directions:
+    robot_side: null
+    far_side: null
+
+# The box of real toss parameters (prpl_tidybot.aimed_toss.RealTossBounds). From
+# this arm's swing (prpl_tidybot.toss: trapezoidal, at most 140 deg/s, fixed release
+# pose, heading 0) and a ballistic model of the release state, validated within
+# ~0.1 m against a real throw: at every speed in [100, 140] deg/s and release cycle in
+# [500, 850] ms the cube leaves moving forward and up (tests/test_aimed_toss.py pins
+# this), and lands at rim height 0.9-1.45 m from the base centre. Anything outside
+# is rejected before the arm or base moves.
+real_toss_bounds:
+  standoff: [0.9, 1.45]
+  speed: [100.0, 140.0]
+  release_ms: [500.0, 850.0]
+
+# Tossing3D's barrier: a rectangle on the floor the robot never crosses (it works on
+# the robot_side side). Every base pose and straight drive keeps the whole footprint
+# (0.548 x 0.508 m) at least `clearance` beyond its robot-side face, and a cube past
+# it (or, with cube_half > 0, whose footprint reaches it) is not picked. Off here (the
+# original toss loop) and the original placeholder line along y with the robot on
+# +x; conf/skill_server.yaml turns it on with the real room's tape.
+barrier:
+  enabled: false
+  center: [0.0, 0.0]
+  # Long side along yaw (pi/2: along the map's y axis).
+  length: 1.8
+  thickness: 0.05
+  yaw: 1.5707963267948966
+  # Map-frame direction from the barrier into the robot's side.
+  robot_side: [1.0, 0.0]
+  clearance: 0.05
+  # The cube's half side; 0 checks only its centre.
+  cube_half: 0.0
+
+# Whole-run video from the ceiling cameras (both, stitched), labelled with the current
+# step: <log dir>/ceiling.mp4.
+ceiling_video:
+  enabled: true
+  fps: 10
+  scale: 0.5
+  host: ${lab.marker_detector_host}
+
+arm_home:
+  # Compliant-loop moves: joint-space tolerance (rad, wrapped) and the most policy
+  # ticks to wait for it.
+  tolerance: 0.05
+  max_ticks: 100
+
+pick:
+  # Jimmy Wu's TidyBot pick_object, ported (prpl_tidybot.top_down_pick).
+  top_down:
+    # Gripper reach from the arm mount at the grasp; the base parks reach +
+    # mounting_offset (0.67 m) from the cube, facing it.
+    reach: 0.55
+    # Floor height in the arm's frame. KINDER's TidyBot model mounts the arm 0.3948 m
+    # above the floor (pybullet_helpers tidybot.py); the kinder pick, which uses that
+    # model, reached the cube's height on the robot. third_party HEIGHT_OFFSET (-0.348)
+    # is the old stack's Kortex tool-frame pick height, a different convention.
+    floor_z: -0.395
+    # The finger pads reach 2.95 cm below the IK's pinch point; at the grasp they stop
+    # pad_clearance above the floor (aiming the pinch point at the cube's middle put
+    # them 4 mm into it). Hover is above the grasp. 2026-10-19: 1 cm higher (Josh: the
+    # grasp sat a little too low), the hover 1 cm less above it so the hover pose, and
+    # the wrist target pixel calibrated there, are unchanged.
+    pad_clearance: 0.022
+    hover_height: 0.09
+    # Added to the cube's yaw to square the fingers to its faces (tune on the robot).
+    wrist_yaw_offset_deg: 0.0
+    # Closed on nothing reads ~1.0; on the 5 cm cube it read 0.49.
+    grasp_min: 0.2
+    grasp_max: 0.9
+    close_position: 1.0
+    # compliant: the torque loop for every pick move (runs 37-40, 2026-10-20: the
+    # descent from the measured hover x, y, closing within the per-axis limits below);
+    # the toss keeps the arm server's own wind-up and swing. angular: the arm's onboard
+    # position controller (Jimmy Wu's pick_object), which lands within 0.1 deg. One
+    # controller per run.
+    arm_controller: compliant
+    arrive_deg: 1.0
+    # The compliant descent is corrected: after the arm settles the pinch point is
+    # re-aimed by the measured position error, up to correction_rounds times, until
+    # within correction_tol_mm, at most correction_max_mm past the goal and never
+    # below the grasp height.
+    correction_rounds: 3
+    correction_tol_mm: 2.0
+    # The descent counts as arrived (and the gripper closes) within these of the grasp,
+    # in the gripper's frame (mm): run 35 (2026-10-20) ended 3.0 along the closing axis,
+    # 4.3 across and 6.0 low after every round and never closed. The 2F-85 opens 85 mm
+    # round the 5 cm cube (closing); its 22 mm pads stay on the cube's face (across),
+    # keep 12 mm off the floor (down) and still cover 23 of their 29 mm (up).
+    correction_arrive_mm:
+      closing: 10.0
+      across: 8.0
+      down: 10.0
+      up: 6.0
+    correction_max_mm: 60.0
+    correction_tol_deg: 0.3
+    correction_max_deg: 8.0
+    # Align over the cube with the wrist camera at the hover before descending: the
+    # align phase of Tom Silver's cylinder servo (conf/env/kinematic-cylinder-shelf3d.yaml's
+    # visual_servo) on both tool axes; the pick's own descent follows. Gain and sign
+    # per tool axis (x, closing y): the 2026-10-14 probes under the onboard controller
+    # measured J = [[2813, 162], [-91, 2960]] and [[3029, 188], [-116, 2873]] px/m,
+    # i.e. image axes along the tool's, unmirrored, ~2920 px/m (a pinhole of
+    # f = 628 px at Z = 0.215 m gives 2927) at this hover height; Tom's 0.0003 m/px
+    # is 0.88 of that, the slight under-correction his comment intends.
+    lateral_servo:
+      enabled: true
+      # Where the cube sits in the wrist image when the pinch point is above it:
+      # hardware_tests/calibrate_wrist_target.py on 2026-10-19, 5/5 samples, std
+      # (1.1, 0.9) px.
+      target_uv: [334, 411]
+      lateral_gain: [0.0003, 0.0003]
+      lateral_sign: [1.0, 1.0]
+      lateral_tolerance_px: 8.0
+      lateral_max_step: 0.01
+      # Tom's 0.006 is under his own rule here (a minimum step below twice the
+      # tolerance in metres: 2 x 8 px / 2920 px/m = 5.5 mm), and his floor was for the
+      # compliant arm ignoring mm targets, which the onboard controller does not.
+      lateral_min_step: 0.005
+      max_area_change_frac: 0.3
+      area_history: 5
+      align_confirm_ticks: 3
+      max_missed_detections: 10
+      max_ticks: 60
+      # 2026-10-20 run 30: the ceiling was ~11 cm off; 0.08 stopped the servo 2.6 cm short.
+      lateral_travel_limit: 0.20
+      settle_s: 0.3
+    # Refuse a servo nudge whose IK jumps an arm joint by more than max_joint_step rad
+    # (the wrist may turn up to max_wrist_step to square the fingers).
+    max_joint_step: 0.2
+    max_wrist_step: 0.9
+    gripper_timeout_s: 4.0
+    # One attempt: a miss retracts, returns to the toss pose and ends the run.
+    max_attempts: 1
+    # After a missed pick: retract, ask the person to move the cube, and try again
+    # (this many times; 0 ends the run on a miss as before).
+    ask_to_move_after_miss: 3
+    # Record the wrist camera during each pick attempt (real mode).
+    record_wrist: true
+    # Fake mode only: the gripper reading to pretend after closing.
+    fake_grasp_reading: 0.49
+
+# The open cardboard bin the cube is tossed into (prpl_tidybot.bin_localizer). It may
+# stand anywhere on the floor; the ceiling cameras find it by its darkness against
+# the floor (by the cardboard's colour saturation) and fit this box's silhouette.
+bin:
+  # Outer footprint (length along the bin's own x / yaw, width across), rim height,
+  # cardboard thickness, metres (2026-10-20): the rim from a photo against a 10.2 cm
+  # Leatherman, the footprint fitted to the cardboard in the calibrated ceiling camera
+  # (IoU 0.99, within 1 cm of an ArUco marker placed in its centre).
+  length: 0.39
+  width: 0.29
+  height: 0.21
+  wall: 0.005
+  # A cube scores only when its centre is inside the walls by this much on every
+  # side: a scoring region strictly inside the bin, as Tossing3D's.
+  in_bin_margin: 0.05
+  # Where to look for the bin's centre: the drivable box plus 0.3 m.
+  search_bounds: [-1.8, 2.0, -1.8, 1.8]
+  # A pixel is bin when darker than this times the local floor. In the real frame
+  # the lit outer wall read ~0.73 of the floor beside it, the inside ~0.3.
+  darkness: 0.85
+  # The bin is the pixels whose HSV saturation exceeds this: the cardboard, not its
+  # shadow on the floor, which the darkness mask also counts (2026-10-20: floor ~80,
+  # shadow ~80-100, cardboard ~160-200; the darkness fit sat 2 cm off the ArUco marker
+  # in the bin's centre, this one within 1 cm). null falls back to darkness.
+  min_saturation: 130.0
+  min_iou: 0.7
+  num_frames: 10
+  pipelines:
+    # The far spot of the 2026-10-20 layout (bin_stop_box above).
+    fake:
+      _target_: prpl_tidybot.bin_localizer.ConstantBinSource
+      x: 0.24
+      y: 1.40
+      yaw: 0.0
+      length: ${bin.length}
+      width: ${bin.width}
+      height: ${bin.height}
+      wall: ${bin.wall}
+    real:
+      _target_: prpl_tidybot.bin_localizer.CeilingBinSource
+      serials: ${lab.camera_serials}
+      host: ${lab.marker_detector_host}
+      length: ${bin.length}
+      width: ${bin.width}
+      height: ${bin.height}
+      wall: ${bin.wall}
+      search_bounds: ${bin.search_bounds}
+      darkness: ${bin.darkness}
+      min_saturation: ${bin.min_saturation}
+      min_iou: ${bin.min_iou}
+      num_frames: ${bin.num_frames}
+
+# Stop after the pick, holding the cube (then the reset prompt).
+skip_toss: false
+
+# Instead of the toss: carry the picked cube to this map (x, y) and set it down there,
+# e.g. to stage a pick in the camera overlap strip. null tosses as usual.
+place_at: null
+
+# once: one confirmation before the first action covers the whole run (Ctrl-C still
+# stops the arm); each: confirm every action.
+confirm: once
+
+# Seconds to wait after each toss before anything looks for the cube. Localizing right
+# after the swing caught the cube mid-flight and mid-slide (at rest ~1.6 s after
+# release) and rejected it.
+settle_after_toss_s: 5.0
+
+# mode=sim: the same commands on a kinematic TidyBot (prpl_tidybot.sim_robot), filmed
+# overhead and oblique into <log dir>/sim.mp4, with per-step clearances, contacts and
+# joint-limit margins in sim_safety.json. Only the robot's motion is faithful: the
+# cube rides in a closed gripper and a thrown one lands landing_offset (m, forward
+# and left of the base) away. Prompts are answered automatically unless
+# interactive=true; a cube found in the bin is put back at put_back.
+#   python scripts/toss_cycles.py mode=sim
+sim:
+  start_base_pose: ${toss_pose}
+  # Where the cube starts: map-frame x, y (m) and yaw (deg).
+  cube: [-0.5, 0.8, 20.0]
+  landing_offset: [1.2, 0.0]
+  put_back: [0.13, 0.6]
+  video:
+    enabled: true
+    fps: 30
+    # The swing lasts about a second; it plays this many times slower.
+    swing_slowdown: 4
+    width: 640
+    height: 480

@@ -21,6 +21,14 @@ from prpl_tidybot.third_party.arm_controller import JointCompliantController
 from prpl_tidybot.third_party.constants import ARM_RPC_HOST, ARM_RPC_PORT, RPC_AUTHKEY
 from prpl_tidybot.third_party.ik_solver import IKSolver
 from prpl_tidybot.third_party.kinova import TorqueControlledArm
+from prpl_tidybot.toss import (
+    TOSS_GRIPPER_RELEASE_MS,
+    TOSS_MAX_VEL,
+    TOSS_WINDUP_TOLERANCE_DEG,
+    max_joint_error_deg,
+    plan_toss_swing,
+    toss_windup_pose,
+)
 
 
 class Arm:
@@ -84,6 +92,63 @@ class Arm:
 
     def execute_action_angular(self, qpos, gripper_pos):
         self.command_queue.put((qpos, gripper_pos))
+
+    def toss(
+        self,
+        heading=0.0,
+        max_vel=TOSS_MAX_VEL,
+        gripper_release_ms=TOSS_GRIPPER_RELEASE_MS,
+    ):
+        # Jimmy Wu's KinovaArm.toss: a high-level move to the wind-up pose,
+        # then a trapezoidal position-servo swing at 1 kHz that opens the
+        # gripper at cycle gripper_release_ms. The torque loop is stopped for
+        # the duration (release() leaves the actuators in position mode under
+        # high-level servoing, which is where Jimmy's toss starts) and
+        # restarted afterwards from wherever the swing ended.
+        windup = toss_windup_pose(heading)
+        # Validate the parameters before anything moves.
+        plan_toss_swing(
+            windup, heading, max_vel=max_vel, gripper_release_ms=gripper_release_ms
+        )
+        self.release()
+        try:
+            self.arm.move_angular(windup)
+            error = max_joint_error_deg(self.arm.get_measured_joint_angles(), windup)
+            if error >= TOSS_WINDUP_TOLERANCE_DEG:
+                raise RuntimeError(
+                    f"Arm stopped {error:.2f} deg from the toss wind-up pose "
+                    f"(tolerance {TOSS_WINDUP_TOLERANCE_DEG} deg); not swinging."
+                )
+            trajectory = plan_toss_swing(
+                self.arm.get_feedback_joint_positions(),
+                heading,
+                max_vel=max_vel,
+                gripper_release_ms=gripper_release_ms,
+            )
+            swing_start = time.time()
+            self.arm.run_position_trajectory(
+                trajectory, gripper_release_step=gripper_release_ms
+            )
+        finally:
+            self.resume()
+        # The wind-up takes seconds; callers align video to the swing itself.
+        return {"swing_start_time": swing_start}
+
+    def move_joints_angular(self, qpos):
+        # One blocking move under the arm's onboard position controller (as Jimmy
+        # Wu's original pick_object), between release() and resume(). Radians in,
+        # wrapped radians of the measured pose out.
+        if self.arm.cyclic_running:
+            raise RuntimeError("release() the torque loop before an angular move")
+        self.arm.move_angular([float(v) for v in np.degrees(qpos) % 360.0])
+        measured = np.radians(self.arm.get_measured_joint_angles())
+        return [float(v) for v in self.radians_clip(measured)]
+
+    def gripper_angular(self, value, timeout=4.0):
+        # Gripper move under the onboard controller; returns where it stopped.
+        if self.arm.cyclic_running:
+            raise RuntimeError("release() the torque loop before an angular move")
+        return float(self.arm.gripper_to(value, timeout))
 
     def get_state(self):
         arm_pos, arm_quat = self.arm.get_tool_pose()
