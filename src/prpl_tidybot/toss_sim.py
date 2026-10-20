@@ -12,7 +12,6 @@ from typing import Any
 from omegaconf import DictConfig
 
 from prpl_tidybot.real_env import RealTidyBotEnv
-from prpl_tidybot.real_sim.perceivers.kinematic3d import Shelf3DPerceiver
 from prpl_tidybot.sim_robot import (
     SimCubeTargetSource,
     SimInterface,
@@ -84,11 +83,6 @@ class TossSim:
         self.interface = SimInterface(self.world)
         self.real_env = RealTidyBotEnv(self.interface, control_period=0.0)
         self.cube_source = SimCubeTargetSource(self.world)
-        self.perceiver = Shelf3DPerceiver(
-            target_source=self.cube_source,
-            shelf_pose=tuple(cfg.env.shelf_pose),
-            cube_half_extents=tuple(cfg.env.cube_half_extents),
-        )
         self.operator = SimOperator(
             self.world, sim.put_back, prompt_fn if interactive else None
         )
