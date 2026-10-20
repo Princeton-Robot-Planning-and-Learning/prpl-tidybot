@@ -1145,7 +1145,6 @@ class _CompliantMover(_Mover):
         aim never goes below the goal's own height, so an arm held up by the floor
         or the cube is not pushed into it."""
         tol = float(self.td.get("correction_tol_mm", 2.0)) / 1000
-        arrive = float(self.td.get("correction_arrive_mm", 1500 * tol)) / 1000
         rounds = int(self.td.get("correction_rounds", 3))
         max_push = float(self.td.get("correction_max_mm", 60.0)) / 1000
         near_floor = goal_pos[2] < self.geom.floor_z + self.geom.grasp_height + 0.03
@@ -1169,19 +1168,38 @@ class _CompliantMover(_Mover):
                 aim, yaw, self.geom, seed=self.arm.get_arm_state()
             )
         measured = list(self.arm.get_arm_state())
-        off = float(
-            np.linalg.norm(forward_kinematics(measured, self.geom)[0] - goal_pos)
-        )
+        err = forward_kinematics(measured, self.geom)[0] - goal_pos
+        off = float(np.linalg.norm(err))
+        # The error in the gripper's frame: along its closing axis, across it, up.
+        across = np.cross(closing, np.array([0.0, 0.0, -1.0]))
+        tool = (float(err @ closing), float(err @ across), float(err[2]))
         return bool(
             self._record(
                 name,
                 goal,
                 measured,
-                reached=off < arrive,
+                reached=self._arrived(tool, off, tol),
                 pinch_error_mm=round(off * 1000, 1),
+                pinch_error_tool_mm=[round(v * 1000, 1) for v in tool],
                 commanded_deg=np.round(np.degrees(command), 2).tolist(),
                 correction_rounds=used,
             )["reached"]
+        )
+
+    def _arrived(
+        self, tool: tuple[float, float, float], off: float, tol: float
+    ) -> bool:
+        """Whether the descent ended close enough to close the gripper: within each
+        axis's limit in ``correction_arrive_mm`` (closing, across, down, up; mm), or
+        without them within 1.5 x the correction tolerance."""
+        limits = self.td.get("correction_arrive_mm")
+        if limits is None:
+            return off < 1.5 * tol
+        closing, across, up = (v * 1000 for v in tool)
+        return (
+            abs(closing) <= float(limits.closing)
+            and abs(across) <= float(limits.across)
+            and -float(limits.down) <= up <= float(limits.up)
         )
 
     def _move_joints(self, name: str, goal: list[float]) -> bool:

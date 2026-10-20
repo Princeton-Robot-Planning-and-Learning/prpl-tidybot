@@ -131,10 +131,16 @@ pick:
     # below the grasp height.
     correction_rounds: 3
     correction_tol_mm: 2.0
-    # The descent counts as arrived (and the gripper closes) within this of the grasp:
-    # run 35 (2026-10-20) ended 8 mm off after every round and never closed, while the
-    # 2F-85 opens 85 mm round the 5 cm cube.
-    correction_arrive_mm: 10.0
+    # The descent counts as arrived (and the gripper closes) within these of the grasp,
+    # in the gripper's frame (mm): run 35 (2026-10-20) ended 3.0 along the closing axis,
+    # 4.3 across and 6.0 low after every round and never closed. The 2F-85 opens 85 mm
+    # round the 5 cm cube (closing); its 22 mm pads stay on the cube's face (across),
+    # keep 12 mm off the floor (down) and still cover 23 of their 29 mm (up).
+    correction_arrive_mm:
+      closing: 10.0
+      across: 8.0
+      down: 10.0
+      up: 6.0
     correction_max_mm: 60.0
     correction_tol_deg: 0.3
     correction_max_deg: 8.0

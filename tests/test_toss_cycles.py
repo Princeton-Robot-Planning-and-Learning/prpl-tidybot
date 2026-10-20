@@ -4,6 +4,7 @@ before every action and a reset (retract, back to the toss pose) whenever the ru
 stops."""
 
 import json
+from typing import Any
 import math
 from pathlib import Path
 
@@ -477,49 +478,68 @@ def test_the_correction_never_aims_the_grasp_below_its_planned_height(
     assert min(commanded_z) > grasp_z - 0.001
 
 
-def test_a_compliant_grasp_8_mm_off_still_closes(tmp_path, monkeypatch):
-    """Run 35 (2026-10-20): the compliant descent ended 8 mm from the grasp after
-    every correction round and the gripper was never closed. The 2F-85 opens 85 mm
-    round the 5 cm cube, so a pinch point within `correction_arrive_mm` (10 mm) of the
-    grasp closes; a farther one still does not."""
+@pytest.mark.parametrize(
+    "offset_mm, closes",
+    [
+        ((3.0, 4.3, -6.0), True),  # run 35: closing, across, vertical
+        ((9.0, 0.0, 0.0), True),
+        ((0.0, 9.0, 0.0), False),
+        ((0.0, 0.0, -9.0), True),
+        ((0.0, 0.0, 8.0), False),
+        ((12.0, 0.0, 0.0), False),
+    ],
+)
+def test_a_compliant_grasp_closes_within_each_axis_limit(
+    tmp_path, monkeypatch, offset_mm, closes
+):
+    """Run 35 (2026-10-20): the compliant descent ended 3.0 mm along the closing axis,
+    4.3 mm across it and 6.0 mm low after every correction round, and the gripper was
+    never closed. Each axis has its own limit (`correction_arrive_mm`): the fingers
+    open 85 mm round the 5 cm cube (closing 10 mm), the pads stay on its face (across
+    8 mm), clear the floor (down 10 mm) and still cover it (up 6 mm)."""
     geom = _configured_geometry()
     grasp_z = geom.floor_z + geom.grasp_height
+    stuck: dict[str, Any] = {}
 
-    def held_up(lift):
-        def execute_action(self, arm_goal, gripper_goal):
-            pos, approach, closing = forward_kinematics(arm_goal, geom)
-            state = list(arm_goal)
-            if approach[2] < -0.99 and pos[2] < grasp_z + lift:
-                state = pointing_down_joints(
-                    (pos[0], pos[1], grasp_z + lift),
-                    math.atan2(closing[1], closing[0]),
-                    geom,
-                    seed=arm_goal,
+    def execute_action(self, arm_goal, gripper_goal):
+        pos, approach, closing = forward_kinematics(arm_goal, geom)
+        state = list(arm_goal)
+        # Below the hover the arm ends at the same spot whatever the correction aims.
+        if approach[2] < -0.99 and pos[2] < grasp_z + 0.06:
+            if "at" not in stuck:  # the first descent command aims at the grasp
+                across = np.cross(closing, approach)
+                o = np.array(offset_mm) / 1000
+                stuck["at"] = (
+                    pos + o[0] * closing + o[1] * across + np.array([0, 0, o[2]])
                 )
-            self.arm_state = state
-            self.gripper_state = gripper_goal
+            state = pointing_down_joints(
+                tuple(stuck["at"]),
+                math.atan2(closing[1], closing[0]),
+                geom,
+                seed=arm_goal,
+            )
+        self.arm_state = state
+        self.gripper_state = gripper_goal
 
-        return execute_action
-
-    for lift, closes in ((0.008, True), (0.015, False)):
-        monkeypatch.setattr(FakeArmInterface, "execute_action", held_up(lift))
-        run_toss_cycles(
-            _compose(
-                cycles=1,
-                skip_toss="true",
-                **{
-                    "pick.top_down.arm_controller": "compliant",
-                    "pick.top_down.max_attempts": 1,
-                },
-            ),
-            log_dir=tmp_path,
-            prompt_fn=_Operator(),
-        )
-        log = json.loads((tmp_path / "cycles.json").read_text())
-        attempt = log["cycles"][0]["pick_attempts"][0]
-        moves = {m["name"]: m for m in attempt["moves"]}
-        assert moves["grasp"]["reached"] is closes, lift
-        assert (attempt.get("note") != "grasp did not arrive") is closes, lift
+    monkeypatch.setattr(FakeArmInterface, "execute_action", execute_action)
+    run_toss_cycles(
+        _compose(
+            cycles=1,
+            skip_toss="true",
+            **{
+                "pick.top_down.arm_controller": "compliant",
+                "pick.top_down.max_attempts": 1,
+            },
+        ),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    attempt = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0][
+        "pick_attempts"
+    ][0]
+    grasp = next(m for m in attempt["moves"] if m["name"] == "grasp")
+    assert grasp["reached"] is closes, grasp.get("pinch_error_tool_mm")
+    assert (attempt.get("note") != "grasp did not arrive") is closes
 
 
 def test_confirm_once_asks_a_single_question_for_the_whole_run(
