@@ -20,9 +20,11 @@ cycles: 2
 # near wall is beyond the arm's 1.14 m reach so the cube has to be tossed. The bin
 # sits where neither ceiling camera's view is hidden by its 19 cm walls.
 # Same-side layout (bin on the robot's side, throwing along -x): override with
-#   'toss_pose=[1.11,-0.75,3.1416]' 'bin_stop_box=[-0.51,-0.09,-0.92,-0.58]'
-# (0.2 m toward +y of the first plan: ~0.6 m from where run 26's throws came to
-# rest to the reachable edge on -y, ~0.5 m to the barrier)
+#   'toss_pose=[1.11,-0.75,3.1416]' 'bin_stop_box=[-0.44,-0.12,-0.95,-0.53]'
+# the opposite-side bin rotated and translated with the toss pose (near wall 1.23 m
+# ahead, centre 1 cm right of the heading, long side across the throw), 0.2 m toward
+# +y of the first plan: ~0.6 m from where run 26's throws came to rest to the
+# reachable edge on -y, ~0.5 m to the barrier.
 toss_pose: [0.23, 0.01, 1.5708]
 
 # The bin's floor box (x0, x1, y0, y1), from the taped corner: a cube seen inside it
