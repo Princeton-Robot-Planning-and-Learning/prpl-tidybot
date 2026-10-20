@@ -305,3 +305,118 @@ def test_plan_aimed_toss_checks_bounds_first_then_pose_then_path():
     # Chosen direction when none is given.
     pose = plan_aimed_toss(_bin(), 1.2, 120.0, 600.0, None, robot, WS, bounds)
     assert WS.pose_problem(pose) is None
+
+
+# The measured tape of 2026-10-20 (conf/same_side_practice.yaml): robot-side face
+# y = 0.349 + 0.0267 x, the robot on -y.
+TAPE_1020 = Barrier(
+    x=0.0,
+    y=0.374,
+    length=6.0,
+    thickness=0.05,
+    yaw=0.026694,
+    robot_side=(0.026690, -0.999644),
+)
+WS_1020 = Workspace(floor_bounds=FLOOR, barrier=TAPE_1020, clearance=0.05)
+# Pilot run9 (raw/2026-10-20/18-10-36, observe 7): parked at the far toss stand,
+# facing the tape, and the pick standoff it was refused for.
+FAR_STAND = (0.22318, -0.01625, 1.56916)
+RUN9_STANDOFF = (0.512, -0.060, math.atan2(-0.161 + 0.060, 1.174 - 0.512))
+
+
+def _clearance(ws, pose):
+    return min(ws.barrier.depth(c) for c in footprint(pose))
+
+
+def _legs(start, waypoints, steps=50):
+    """Poses along the straight legs start -> waypoints[0] -> ..."""
+    poses, here = [], start
+    for goal in waypoints:
+        dtheta = math.atan2(math.sin(goal[2] - here[2]), math.cos(goal[2] - here[2]))
+        poses += [
+            tuple(here[i] + f * (goal[i] - here[i]) for i in range(2))
+            + (here[2] + f * dtheta,)
+            for f in np.linspace(0.0, 1.0, steps)
+        ]
+        here = goal
+    return poses
+
+
+def test_turning_off_the_far_stand_swings_a_corner_towards_the_tape():
+    """Run9's refusal: the stand is 9 cm from the tape (outside the 5 cm clearance),
+    but the straight drive turns from facing the tape to facing the cube and swings a
+    front corner inside the clearance."""
+    assert _clearance(WS_1020, FAR_STAND) == pytest.approx(0.090, abs=0.002)
+    worst = min(_clearance(WS_1020, p) for p in _legs(FAR_STAND, [RUN9_STANDOFF]))
+    assert 0.0 < worst < 0.05
+
+
+def test_a_refused_turn_off_the_far_stand_backs_straight_away_from_the_tape_first():
+    """The drive backs away along the tape's normal with no turn, until the base can
+    turn without coming within the clearance, then drives on: both legs pass the full
+    check, and no pose on them comes within the clearance."""
+    waypoints, problem = WS_1020.plan_path(FAR_STAND, RUN9_STANDOFF)
+    assert problem is None
+    assert WS_1020.path_problem(FAR_STAND, RUN9_STANDOFF) is None
+    assert len(waypoints) == 2 and waypoints[-1] == pytest.approx(RUN9_STANDOFF)
+    back = waypoints[0]
+    assert back[2] == pytest.approx(FAR_STAND[2])  # a pure translation
+    shift = np.subtract(back[:2], FAR_STAND[:2])
+    nx, ny = TAPE_1020.robot_side
+    assert shift @ (nx, ny) > 0.0  # away from the tape
+    assert abs(shift @ (-ny, nx)) < 1e-9  # straight along its normal
+    assert min(_clearance(WS_1020, p) for p in _legs(FAR_STAND, waypoints)) >= 0.05
+    assert WS_1020.pose_problem(back) is None
+
+
+def test_a_drive_that_needs_no_back_off_is_one_leg():
+    """Along the tape, well clear of it: straight to the goal."""
+    waypoints, problem = WS_1020.plan_path((-1.0, -0.3, 0.0), (1.0, -0.3, math.pi / 2))
+    assert problem is None and len(waypoints) == 1
+
+
+def test_a_start_inside_the_margin_may_move_without_getting_closer():
+    """4.8 cm from the tape (inside the 5 cm clearance): a move straight away from it
+    is allowed (no pose closer than the start); one that gets closer, or crosses, is
+    refused."""
+    nx, ny = TAPE_1020.robot_side
+    push = 0.090 - 0.048
+    start = (FAR_STAND[0] - push * nx, FAR_STAND[1] - push * ny, FAR_STAND[2])
+    assert _clearance(WS_1020, start) == pytest.approx(0.048, abs=0.002)
+    assert WS_1020.pose_problem(start) is not None
+    away = (start[0] + 0.3 * nx, start[1] + 0.3 * ny, start[2])
+    assert WS_1020.path_problem(start, away) is None
+    sideways = (
+        start[0] - 0.3 * ny - 0.01 * nx,
+        start[1] + 0.3 * nx - 0.01 * ny,
+        start[2],
+    )
+    assert _clearance(WS_1020, sideways) < 0.048
+    problem = WS_1020.path_problem(start, sideways)
+    assert problem is not None and "barrier" in problem
+    across = (start[0], start[1] + 0.2, start[2])
+    assert "barrier" in WS_1020.path_problem(start, across)
+
+
+def test_from_inside_the_margin_the_far_stands_pick_backs_off_first():
+    """The brief's case: 4.8 cm from the tape, a standoff away from it is reachable
+    through the back-off."""
+    nx, ny = TAPE_1020.robot_side
+    push = 0.090 - 0.048
+    start = (FAR_STAND[0] - push * nx, FAR_STAND[1] - push * ny, FAR_STAND[2])
+    waypoints, problem = WS_1020.plan_path(start, RUN9_STANDOFF)
+    assert problem is None and len(waypoints) == 2
+    poses = _legs(start, waypoints)
+    worst = min(_clearance(WS_1020, p) for p in poses)
+    assert worst >= _clearance(WS_1020, start) - 1e-9
+
+
+def test_a_refused_back_off_refuses_the_drive_and_says_so():
+    """No room behind the robot (the bin there): the drive is refused, and the reason
+    names the back-off."""
+    behind = BinFit(x=0.235, y=-0.55, yaw=0.0, length=0.39, width=0.29, height=0.21)
+    assert WS_1020.pose_problem(FAR_STAND, behind) is None
+    waypoints, problem = WS_1020.plan_path(FAR_STAND, RUN9_STANDOFF, behind)
+    assert not waypoints and problem is not None
+    assert "back" in problem and "bin" in problem
+    assert WS_1020.path_problem(FAR_STAND, RUN9_STANDOFF, behind) == problem

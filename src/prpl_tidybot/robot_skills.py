@@ -340,21 +340,42 @@ def _drive_to(
 
     Uses a robot-only perceiver: driving needs no cube, and must still work when the
     cube cannot be found (the reset after a failed localization). With a
-    ``workspace`` the straight drive is checked first (drivable box, barrier) and a
-    drive that would leave it raises ``ValueError`` before the base moves. A set
-    ``stop`` ends the drive (``ArmMotionAborted``) without another command.
+    ``workspace`` the drive is checked first (drivable box, barrier;
+    :meth:`Workspace.plan_path`, which may back straight off the barrier before
+    turning) and a drive that would leave it raises ``ValueError`` before the base
+    moves. A set ``stop`` ends the drive (``ArmMotionAborted``) without another
+    command.
     """
-    perceiver = PrplLab3DPerceiver()
-    obs, info = real_env.reset()
-    state = perceiver.step(obs, info)
-    robot = state.get_object_from_name("robot")
+    legs = [(float(pose[0]), float(pose[1]), float(pose[2]))]
     if workspace is not None:
+        obs, _ = real_env.reset()
         here = obs.map_base_pose
-        problem = workspace.path_problem(
+        legs, problem = workspace.plan_path(
             (float(here.x), float(here.y), float(here.theta())), pose, bin_fit
         )
         if problem is not None:
             raise ValueError(f"Drive refused: {problem}.")
+        if len(legs) > 1:
+            _logger.info(
+                "Backing straight off the barrier to (%+.3f, %+.3f) before the drive.",
+                legs[0][0],
+                legs[0][1],
+            )
+    reached: tuple[float, float, float] | None = None
+    for leg in legs:
+        reached = _drive_straight(real_env, leg, stop)
+    assert reached is not None
+    return reached
+
+
+def _drive_straight(
+    real_env: Any, pose: Sequence[float], stop: threading.Event | None
+) -> tuple[float, float, float]:
+    """One straight leg of :func:`_drive_to`, unchecked."""
+    perceiver = PrplLab3DPerceiver()
+    obs, info = real_env.reset()
+    state = perceiver.step(obs, info)
+    robot = state.get_object_from_name("robot")
     delta = np.zeros(11)
     delta[0] = pose[0] - state.get(robot, "pos_base_x")
     delta[1] = pose[1] - state.get(robot, "pos_base_y")

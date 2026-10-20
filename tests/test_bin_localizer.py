@@ -498,3 +498,75 @@ def test_the_ceiling_bin_source_passes_min_saturation_on(cameras):
     )
     fit = source.localize()
     assert math.hypot(fit.x - pose[0], fit.y - pose[1]) < 0.01
+
+
+def _bottom_only_source(cameras, min_saturation):
+    """Today's colours, the bin in the open floor only the bottom camera sees."""
+    pose, shadow = (-0.6, -0.9, math.radians(20)), (0.04, 0.06)
+    return pose, CeilingBinSource(
+        SERIALS,
+        image_client=_FakeImages(
+            [_render_with_shadow(cameras, pose, shadow, seed=s) for s in range(2)]
+        ),
+        marker_client=_FakeMarkers((5.0, 5.0)),
+        length=TODAY_MODEL.length,
+        width=TODAY_MODEL.width,
+        height=TODAY_MODEL.height,
+        wall=TODAY_MODEL.wall,
+        search_bounds=SEARCH,
+        num_frames=2,
+        frame_period_s=0.0,
+        min_saturation=min_saturation,
+    )
+
+
+def test_min_saturation_can_be_set_per_camera_serial(cameras):
+    """min_saturation as {serial: threshold}: each camera's mask uses its own. 255
+    masks nothing, so with it on the top camera the bottom one still finds the bin,
+    and with it on the bottom camera nothing does."""
+    top, bottom = SERIALS
+    pose, source = _bottom_only_source(cameras, {top: 255.0, bottom: 130.0})
+    fit = source.localize()
+    assert math.hypot(fit.x - pose[0], fit.y - pose[1]) < 0.01
+    _, blind = _bottom_only_source(cameras, {top: 130.0, bottom: 255.0})
+    with pytest.raises(RuntimeError, match="no bin"):
+        blind.localize()
+
+
+def test_a_per_camera_min_saturation_must_name_every_camera(cameras):
+    """A camera with no threshold of its own is a config error, raised at once."""
+    with pytest.raises(ValueError, match=SERIALS[1]):
+        _bottom_only_source(cameras, {SERIALS[0]: 160.0})
+
+
+def test_localize_bin_takes_one_threshold_per_camera(cameras):
+    """localize_bin(min_saturation=[top, bottom]) as the source's mapping, in the
+    cameras' order; one number is every camera's."""
+    pose, shadow = (-0.6, -0.9, math.radians(20)), (0.04, 0.06)
+    frames = [_render_with_shadow(cameras, pose, shadow, seed=s) for s in range(2)]
+    for sat in (130.0, [255.0, 130.0]):
+        fit = localize_bin(
+            frames, cameras, TODAY_MODEL, search_bounds=SEARCH, min_saturation=sat
+        )
+        assert fit is not None and math.hypot(fit.x - pose[0], fit.y - pose[1]) < 0.01
+    assert (
+        localize_bin(
+            frames,
+            cameras,
+            TODAY_MODEL,
+            search_bounds=SEARCH,
+            min_saturation=[130.0, 255.0],
+        )
+        is None
+    )
+
+
+def test_a_missed_bin_saves_its_per_camera_thresholds(cameras, tmp_path):
+    """The failure record keeps the mapping, so the miss replays as it ran."""
+    _, source = _bottom_only_source(cameras, {SERIALS[0]: 130.0, SERIALS[1]: 255.0})
+    source._failure_dir = tmp_path  # pylint: disable=protected-access
+    with pytest.raises(RuntimeError):
+        source.localize()
+    (saved,) = tmp_path.glob("*_bin/localization.json")
+    info = json.loads(saved.read_text())
+    assert info["min_saturation"] == {SERIALS[0]: 130.0, SERIALS[1]: 255.0}

@@ -42,6 +42,10 @@ from prpl_tidybot.bin_localizer import BinFit
 # The TidyBot++ base, centre-referenced (m): along its heading, and across.
 BASE_LENGTH = 0.548
 BASE_WIDTH = 0.508
+# The base's footprint turns within this circle about its centre.
+_TURN_RADIUS = 0.5 * math.hypot(BASE_LENGTH, BASE_WIDTH)
+# How much further a back-off goes, for the drive's tracking error.
+BACK_OFF_SLACK = 0.02
 
 Pose = tuple[float, float, float]
 
@@ -185,23 +189,34 @@ class Workspace:
             )
         return None
 
+    def barrier_clearance(self, pose: Sequence[float]) -> float | None:
+        """How far the base's footprint at ``pose`` lies past the barrier's robot-side
+        face (negative: across it), or None without a barrier."""
+        if self.barrier is None:
+            return None
+        return min(self.barrier.depth(c) for c in footprint(pose))
+
     def pose_problem(
-        self, pose: Sequence[float], bin_fit: BinFit | None = None
+        self,
+        pose: Sequence[float],
+        bin_fit: BinFit | None = None,
+        required: float | None = None,
     ) -> str | None:
-        """Why the base cannot stand at ``pose``, or None if it can."""
+        """Why the base cannot stand at ``pose``, or None if it can. ``required``: the
+        barrier clearance to keep, if not ``clearance`` (a drive that starts inside
+        the margin keeps its start's)."""
         x, y = pose[0], pose[1]
         fb = self.floor_bounds
         if not (fb[0] <= x <= fb[1] and fb[2] <= y <= fb[3]):
             return f"base centre ({x:+.3f}, {y:+.3f}) outside the drivable box {fb}"
         corners = footprint(pose)
-        if self.barrier is not None:
-            depth = min(self.barrier.depth(c) for c in corners)
-            if depth < self.clearance:
-                return (
-                    f"base footprint {depth:+.3f} m from the barrier's robot-side "
-                    f"face, across the barrier (must stay {self.clearance:.3f} m "
-                    "clear)"
-                )
+        depth = self.barrier_clearance(pose)
+        need = self.clearance if required is None else required
+        if depth is not None and depth < need:
+            return (
+                f"base footprint {depth:+.3f} m from the barrier's robot-side "
+                f"face, across the barrier (must stay {need:.3f} m clear)"
+            )
         if bin_fit is not None and _rectangles_overlap(
             corners, _bin_corners(bin_fit, self.clearance)
         ):
@@ -213,11 +228,60 @@ class Workspace:
         start: Sequence[float],
         goal: Sequence[float],
         bin_fit: BinFit | None = None,
+    ) -> str | None:
+        """Why the base cannot drive from ``start`` to ``goal``
+        (:meth:`plan_path`), or None."""
+        return self.plan_path(start, goal, bin_fit)[1]
+
+    def plan_path(
+        self,
+        start: Sequence[float],
+        goal: Sequence[float],
+        bin_fit: BinFit | None = None,
+    ) -> tuple[list[tuple[float, float, float]], str | None]:
+        """The straight legs from ``start`` to ``goal`` ([goal], or [back-off, goal])
+        and None, or ([], why the drive is refused).
+
+        Straight to the goal when :meth:`straight_problem` allows it. Otherwise,
+        when the base is too near the barrier to turn freely (a turn towards it swings
+        a corner closer: run9 at the far toss stand), first back straight away from
+        the barrier along its normal with no turn (:meth:`back_off_pose`), then drive
+        on; both legs must pass the full check.
+        """
+        goal_pose = (float(goal[0]), float(goal[1]), float(goal[2]))
+        direct = self.straight_problem(start, goal_pose, bin_fit)
+        if direct is None:
+            return [goal_pose], None
+        back = self.back_off_pose(start)
+        if back is None:
+            return [], direct
+        where = f"backing straight off the barrier first, to ({back[0]:+.3f}, "
+        where += f"{back[1]:+.3f})"
+        problem = self.straight_problem(start, back, bin_fit)
+        if problem is None:
+            problem = self.straight_problem(back, goal_pose, bin_fit)
+            if problem is None:
+                return [back, goal_pose], None
+            where += ", then"
+        else:
+            where += ", is refused too"
+        return [], f"{direct}; {where}: {problem}"
+
+    def straight_problem(
+        self,
+        start: Sequence[float],
+        goal: Sequence[float],
+        bin_fit: BinFit | None = None,
         steps: int = 20,
     ) -> str | None:
         """Why the base cannot drive straight from ``start`` to ``goal`` (turning as it
         goes), or None: every pose after the start must be valid (the start is wherever
-        the robot already is)."""
+        the robot already is). A start inside the barrier's margin (but not across)
+        may move as long as no pose comes closer to the barrier than the start."""
+        required = None
+        here = self.barrier_clearance(start)
+        if here is not None and 0.0 <= here < self.clearance:
+            required = here - 1e-9
         dtheta = math.atan2(math.sin(goal[2] - start[2]), math.cos(goal[2] - start[2]))
         for k in range(1, steps + 1):
             f = k / steps
@@ -226,10 +290,31 @@ class Workspace:
                 start[1] + f * (goal[1] - start[1]),
                 start[2] + f * dtheta,
             )
-            problem = self.pose_problem(pose, bin_fit)
+            problem = self.pose_problem(pose, bin_fit, required)
             if problem is not None:
                 return f"on the way to ({goal[0]:+.3f}, {goal[1]:+.3f}): {problem}"
         return None
+
+    def back_off_pose(
+        self, start: Sequence[float]
+    ) -> tuple[float, float, float] | None:
+        """``start`` moved straight away from the barrier along its normal, heading
+        unchanged, until the base can turn on the spot and keep ``clearance`` (plus
+        ``BACK_OFF_SLACK`` for the drive's tracking error); None when there is no
+        barrier, the base is across it, or it can already turn freely."""
+        here = self.barrier_clearance(start)
+        if self.barrier is None or here is None or here < 0.0:
+            return None
+        need = self.clearance + _TURN_RADIUS + BACK_OFF_SLACK
+        distance = need - self.barrier.depth(start[:2])
+        if distance <= 1e-3:
+            return None
+        nx, ny = self.barrier.robot_side
+        return (
+            float(start[0] + distance * nx),
+            float(start[1] + distance * ny),
+            float(start[2]),
+        )
 
     def valid(self, bin_fit: BinFit | None = None) -> Callable[[Sequence[float]], bool]:
         """A predicate for base poses (for ``top_down_pick.standoff_pose``)."""

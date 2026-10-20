@@ -26,7 +26,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -232,6 +232,17 @@ def _box_fill(
     return fill, seen / area
 
 
+# bin_mask's min_saturation: one for every camera, or one per camera (in order).
+Saturation = float | Sequence[float | None] | None
+
+
+def _camera_saturation(min_saturation: Saturation, index: int) -> float | None:
+    if min_saturation is None or isinstance(min_saturation, (int, float)):
+        return min_saturation
+    value = min_saturation[index]
+    return None if value is None else float(value)
+
+
 def find_bin_candidates(
     frame: NDArray[np.uint8],
     cameras: Sequence[CeilingCamera],
@@ -239,7 +250,7 @@ def find_bin_candidates(
     model: BinModel,
     exclude: Sequence[Sequence[float]] = (),
     darkness: float = 0.85,
-    min_saturation: float | None = None,
+    min_saturation: Saturation = None,
 ) -> list[tuple[float, float]]:
     """Map-frame (x, y) of each isolated, bin-sized dark region in ``search_bounds``,
     best first: a patch well inside the footprint (whatever the yaw) is dark, and a
@@ -253,7 +264,8 @@ def find_bin_candidates(
     best = np.zeros(gx.shape)
     for i, (cam, img) in enumerate(zip(cameras, _split(frame, len(cameras)))):
         rows, cols = img.shape[:2]
-        mask = bin_mask(img, darkness, min_saturation).astype(np.float64)
+        sat = _camera_saturation(min_saturation, i)
+        mask = bin_mask(img, darkness, sat).astype(np.float64)
         valid = _valid_rows(rows, cols, i, len(cameras)).astype(np.float64)
         mask *= valid
         integral = cv.integral(mask)
@@ -291,7 +303,7 @@ def fit_bin_pose(  # pylint: disable=too-many-locals
     model: BinModel,
     only: Sequence[int] | None = None,
     darkness: float = 0.85,
-    min_saturation: float | None = None,
+    min_saturation: Saturation = None,
 ) -> BinFit | None:
     """3-DoF silhouette fit around ``guess_xy``; masks are averaged over ``frames``
     first.
@@ -319,7 +331,12 @@ def fit_bin_pose(  # pylint: disable=too-many-locals
         if u1 - u0 < 10 or v1 - v0 < 10:
             continue
         prob = np.mean(
-            [bin_mask(img, darkness, min_saturation)[v0:v1, u0:u1] for img in imgs],
+            [
+                bin_mask(img, darkness, _camera_saturation(min_saturation, i))[
+                    v0:v1, u0:u1
+                ]
+                for img in imgs
+            ],
             axis=0,
         )
         valid = _valid_rows(rows, cols, i, len(cameras))[v0:v1, u0:u1]
@@ -404,7 +421,7 @@ def _isolated(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     fit: BinFit,
     model: BinModel,
     darkness: float,
-    min_saturation: float | None = None,
+    min_saturation: Saturation = None,
 ) -> bool:
     """Whether the dark region under the fit is the bin alone: at most ``_SPILL_MAX`` of
     the connected dark region containing it lies outside the silhouette grown by twice
@@ -415,7 +432,7 @@ def _isolated(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     and rejected too (move one apart).
     """
     img = _split(frame, len(cameras))[index]
-    mask = bin_mask(img, darkness, min_saturation)
+    mask = bin_mask(img, darkness, _camera_saturation(min_saturation, index))
     rows, cols = mask.shape
     mask *= _valid_rows(rows, cols, index, len(cameras)).astype(np.uint8)
     _, labels = cv.connectedComponents(mask)
@@ -451,10 +468,13 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
     min_iou: float = 0.7,
     serials: Sequence[str] | None = None,
     darkness: float = 0.85,
-    min_saturation: float | None = None,
+    min_saturation: Saturation = None,
 ) -> BinFit | None:
     """The best-fitting bin whose centre lies in ``search_bounds``, or None if nothing
     fits well enough.
+
+    ``min_saturation``: one threshold for every camera, or one per camera in
+    ``cameras``' order (None: the darkness mask).
 
     Each camera is fitted on its own and the best single view kept (the cameras'
     calibrations need not agree); a near tie goes to a camera whose calibrated region
@@ -572,6 +592,9 @@ class CeilingBinSource(TargetSource):
     is ever aimed at a stale or invented bin, and saves that miss's frames and inputs
     under ``failure_dir`` (``NN_HH-MM-SS_bin``) so it can be replayed. ``get_target`` is
     the centre of the opening, at rim height.
+
+    ``min_saturation`` is one threshold, or ``{serial: threshold}`` naming every
+    camera (each sees the cardboard under its own exposure and angle).
     """
 
     def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -590,7 +613,7 @@ class CeilingBinSource(TargetSource):
         min_iou: float = 0.7,
         darkness: float = 0.85,
         host: str | None = None,
-        min_saturation: float | None = None,
+        min_saturation: float | Mapping[str, float] | None = None,
         failure_dir: str | Path | None = None,
     ) -> None:
         if image_client is None:
@@ -619,7 +642,19 @@ class CeilingBinSource(TargetSource):
         self._period = float(frame_period_s)
         self._min_iou = float(min_iou)
         self._darkness = float(darkness)
-        self._min_saturation = None if min_saturation is None else float(min_saturation)
+        self._min_saturation: float | dict[str, float] | None = None
+        self._per_camera: Saturation = None
+        if isinstance(min_saturation, Mapping):
+            missing = [k for k in self._serials if k not in min_saturation]
+            if missing:
+                raise ValueError(
+                    f"CeilingBinSource: min_saturation names no threshold for camera "
+                    f"{', '.join(missing)} (it gives {dict(min_saturation)})"
+                )
+            self._min_saturation = {k: float(min_saturation[k]) for k in self._serials}
+            self._per_camera = [self._min_saturation[k] for k in self._serials]
+        elif min_saturation is not None:
+            self._min_saturation = self._per_camera = float(min_saturation)
         self.last_fit: BinFit | None = None
 
     def _frames(self) -> list[NDArray[np.uint8]]:
@@ -652,7 +687,7 @@ class CeilingBinSource(TargetSource):
             min_iou=self._min_iou,
             serials=self._serials,
             darkness=self._darkness,
-            min_saturation=self._min_saturation,
+            min_saturation=self._per_camera,
         )
         if fit is None:
             self._save_failure(frames, exclude)

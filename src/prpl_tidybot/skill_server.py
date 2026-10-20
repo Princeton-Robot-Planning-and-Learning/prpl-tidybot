@@ -54,8 +54,9 @@ Definitions the planner relies on:
   bin's wall fits that model badly. The search inside the bin fits no silhouette, so a
   cube found there counts as upright.
 * ``cube_in_bin``: the cube's centre is inside the bin's walls by ``bin.in_bin_margin``
-  on every side (Tossing3D's scoring region); ``cube_inside_bin``: inside the walls at
-  all (the pick goes into the bin).
+  on every side (the server's config: 0, since a real cube cannot rest on the rim;
+  Tossing3D's own scoring region is 5 cm inside); ``cube_inside_bin``: inside the walls
+  at all (the pick goes into the bin).
 * The bin's spot: ``far_side`` when its centre is across the barrier, else
   ``robot_side``.
 * Over the RPC, a call made while another skill moves the robot, or one ended by
@@ -379,7 +380,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
     ) -> tuple[tuple[float, float, float] | None, str | None]:
         """(standoff, why the pick cannot start) from ``look``: can_pick's decision,
         moves nothing."""
-        if self._held_reading():
+        if self._holding(look.cube):
             return None, "already holding the cube"
         if look.bin_fit is None and self.bin_source is not None:
             return None, BIN_NOT_LOCALIZED
@@ -403,6 +404,12 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         except RuntimeError as e:
             _logger.info("No cube: %s", e)
             return None, str(e)
+
+    def _holding(self, cube: dict[str, Any] | None) -> bool:
+        """``observe()["holding"]``, and can_pick's "already holding": the held
+        reading, and the cube not seen (a person may take it out of the closed
+        gripper; pilot run9's evaluation)."""
+        return bool(self._held_reading() and cube is None)
 
     def _held_reading(self) -> bool:
         return self.gripper_command >= _CLOSED and grasp_succeeded(
@@ -433,7 +440,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
                 else [cube["x"], cube["y"], math.radians(cube["yaw_deg"])]
             ),
             "bin": None if bin_fit is None else bin_fit.as_dict(),
-            "holding": bool(self._held_reading() and cube is None),
+            "holding": self._holding(cube),
             "gripper": float(self.arm.get_gripper_state()),
             "gripper_command": float(self.gripper_command),
             "cube_upright": bool(
@@ -1164,7 +1171,7 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
         landing: (
             Callable[[Sequence[float], float, float], Sequence[float]] | None
         ) = None,
-        in_bin_margin: float = 0.05,
+        in_bin_margin: float = 0.0,
         home: Sequence[float] = HOME_POSE,
         max_attempts: int = 2,
         bin_localized: bool = True,
