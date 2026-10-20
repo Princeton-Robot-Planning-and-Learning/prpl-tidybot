@@ -477,6 +477,51 @@ def test_the_correction_never_aims_the_grasp_below_its_planned_height(
     assert min(commanded_z) > grasp_z - 0.001
 
 
+def test_a_compliant_grasp_8_mm_off_still_closes(tmp_path, monkeypatch):
+    """Run 35 (2026-10-20): the compliant descent ended 8 mm from the grasp after
+    every correction round and the gripper was never closed. The 2F-85 opens 85 mm
+    round the 5 cm cube, so a pinch point within `correction_arrive_mm` (10 mm) of the
+    grasp closes; a farther one still does not."""
+    geom = _configured_geometry()
+    grasp_z = geom.floor_z + geom.grasp_height
+
+    def held_up(lift):
+        def execute_action(self, arm_goal, gripper_goal):
+            pos, approach, closing = forward_kinematics(arm_goal, geom)
+            state = list(arm_goal)
+            if approach[2] < -0.99 and pos[2] < grasp_z + lift:
+                state = pointing_down_joints(
+                    (pos[0], pos[1], grasp_z + lift),
+                    math.atan2(closing[1], closing[0]),
+                    geom,
+                    seed=arm_goal,
+                )
+            self.arm_state = state
+            self.gripper_state = gripper_goal
+
+        return execute_action
+
+    for lift, closes in ((0.008, True), (0.015, False)):
+        monkeypatch.setattr(FakeArmInterface, "execute_action", held_up(lift))
+        run_toss_cycles(
+            _compose(
+                cycles=1,
+                skip_toss="true",
+                **{
+                    "pick.top_down.arm_controller": "compliant",
+                    "pick.top_down.max_attempts": 1,
+                },
+            ),
+            log_dir=tmp_path,
+            prompt_fn=_Operator(),
+        )
+        log = json.loads((tmp_path / "cycles.json").read_text())
+        attempt = log["cycles"][0]["pick_attempts"][0]
+        moves = {m["name"]: m for m in attempt["moves"]}
+        assert moves["grasp"]["reached"] is closes, lift
+        assert (attempt.get("note") != "grasp did not arrive") is closes, lift
+
+
 def test_confirm_once_asks_a_single_question_for_the_whole_run(
     tmp_path, arm_log, caplog
 ):

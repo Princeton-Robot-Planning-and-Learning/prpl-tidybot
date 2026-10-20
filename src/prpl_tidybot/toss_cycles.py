@@ -1145,6 +1145,7 @@ class _CompliantMover(_Mover):
         aim never goes below the goal's own height, so an arm held up by the floor
         or the cube is not pushed into it."""
         tol = float(self.td.get("correction_tol_mm", 2.0)) / 1000
+        arrive = float(self.td.get("correction_arrive_mm", 1500 * tol)) / 1000
         rounds = int(self.td.get("correction_rounds", 3))
         max_push = float(self.td.get("correction_max_mm", 60.0)) / 1000
         near_floor = goal_pos[2] < self.geom.floor_z + self.geom.grasp_height + 0.03
@@ -1176,7 +1177,7 @@ class _CompliantMover(_Mover):
                 name,
                 goal,
                 measured,
-                reached=off < 1.5 * tol,
+                reached=off < arrive,
                 pinch_error_mm=round(off * 1000, 1),
                 commanded_deg=np.round(np.degrees(command), 2).tolist(),
                 correction_rounds=used,

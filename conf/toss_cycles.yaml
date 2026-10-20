@@ -136,6 +136,10 @@ pick:
     correction_max_deg: 8.0
     # Align over the cube with the wrist camera at the hover before descending
     # (prpl_tidybot.visual_servo.top_down_cube). x/y nudges at the hover height and
+    # The descent counts as arrived (and the gripper closes) within this of the grasp:
+    # run 35 (2026-10-20) ended 8 mm off after every round and never closed, while the
+    # 2F-85 opens 85 mm round the 5 cm cube.
+    correction_arrive_mm: 10.0
     # a wrist turn to square the fingers; never moves the gripper down.
     wrist_servo:
       enabled: true
