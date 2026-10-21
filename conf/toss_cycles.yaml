@@ -231,6 +231,17 @@ bin:
   min_saturation: 130.0
   min_iou: 0.7
   num_frames: 10
+  # The real bin's detector: saturation (the masks above, fitted as a silhouette) or
+  # rim_edges (the rectangle whose four rim sides are all straight edges, in the rim
+  # plane's top-down view; no colour thresholds). conf/skill_server.yaml runs
+  # rim_edges.
+  method: saturation
+  # rim_edges: the weakest rim side's edge score, frozen on the 2026-10-20 replay's
+  # dev runs (weakest true bin 0.034, strongest non-bin 0.011), and the most the
+  # inside's log brightness may be relative to the floor ring around it (the
+  # darkest true bin read -0.58).
+  rim_min_score: 0.014
+  rim_max_darkness: -0.3
   pipelines:
     # The far spot of the 2026-10-20 layout (bin_stop_box above).
     fake:
@@ -255,6 +266,9 @@ bin:
       min_saturation: ${bin.min_saturation}
       min_iou: ${bin.min_iou}
       num_frames: ${bin.num_frames}
+      method: ${bin.method}
+      rim_min_score: ${bin.rim_min_score}
+      rim_max_darkness: ${bin.rim_max_darkness}
 
 # Stop after the pick, holding the cube (then the reset prompt).
 skip_toss: false
