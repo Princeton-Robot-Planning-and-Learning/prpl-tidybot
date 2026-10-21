@@ -378,13 +378,62 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             return None
 
     def _look_now(self) -> _Look:
-        """Localize the bin, then the cube (inside the bin first), and keep the look for
-        a pick that follows with no motion between."""
+        """Localize the bin and the cube (:meth:`_see`), and keep the look for a pick
+        that follows with no motion between."""
         motions = self.motions
-        bin_fit = self._bin()
-        cube, missing = self._find(bin_fit)
+        bin_fit, cube, missing = self._see()
         self._look = _Look(bin_fit, cube, missing, motions)
         return self._look
+
+    def _see(
+        self, bin_fit: BinFit | None = None, find_bin: bool = True
+    ) -> tuple[BinFit | None, dict[str, Any] | None, str]:
+        """(the bin, the cube or None, why not) from one camera round: the bin (when
+        ``find_bin``; ``bin_fit`` when it is not looked for or not found) and the cube
+        from one shared frame grab where the cube source can (the ceiling cameras'
+        ``look``), else the bin and then the cube (inside the bin first;
+        :func:`_find_cube`).
+
+        ``in_bin`` is the fitted centre inside the bin's walls (or in ``bin_stop_box``).
+        """
+        look = getattr(self.cube_source, "look", None)
+        bins = self.bin_source if find_bin else None
+        if not callable(look) or (
+            bins is not None and not callable(getattr(bins, "localize_frames", None))
+        ):
+            found = self._bin() if find_bin else None
+            found = found or bin_fit
+            cube, missing = self._find(found)
+            return found, cube, missing
+        result = look(bins, bin_fit, self.bin_box)
+        if result.bin_error:
+            _logger.info("No bin: %s", result.bin_error)
+        _logger.info(
+            "Look: %d frames, grab %.2f s, compute %.2f s",
+            result.num_frames,
+            result.grab_s,
+            result.compute_s,
+        )
+        fit = result.cube
+        if fit is None:
+            why = (
+                "CeilingCubeTargetSource: no cube found in the drivable area or the bin"
+            )
+            _logger.info("No cube: %s", why)
+            return result.bin_fit, None, why
+        return (
+            result.bin_fit,
+            {
+                "x": float(fit.x),
+                "y": float(fit.y),
+                "yaw_deg": math.degrees(fit.yaw),
+                "in_bin": bool(fit.in_bin),
+                # The flat-cube fit's IoU on the floor; None in the bin, whose fit
+                # scores only what its walls leave visible.
+                "iou": None if fit.in_bin else float(fit.iou),
+            },
+            "",
+        )
 
     def _last_look(self) -> _Look | None:
         """The latest look, if it was taken before this motion and after the last one
@@ -578,7 +627,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
                 {"attempt": attempt, "held": False, "note": str(e)}
             )
             return {"note": str(e), "refused": True, "reason": str(e)}
-        found, missing = self._find(bin_fit)
+        _, found, missing = self._see(bin_fit, find_bin=False)
         if found is None:
             lost = f"{missing} (at the standoff)"
             record["pick_attempts"].append(
@@ -761,8 +810,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         if settle > 0:
             _logger.info("Waiting %.1f s for the cube to settle.", settle)
             self._sleep(settle)
-        after = self._bin() or bin_fit
-        cube, missing = self._find(after)
+        after, cube, missing = self._see(bin_fit)
         base = {
             "pose": [float(v) for v in pose],
             "bin": None if after is None else after.as_dict(),

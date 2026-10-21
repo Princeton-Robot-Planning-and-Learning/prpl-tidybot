@@ -154,7 +154,7 @@ pipelines:
     perceiver:
       _target_: prpl_tidybot.real_sim.perceivers.kinematic3d.Shelf3DPerceiver
       target_source:
-        _target_: prpl_tidybot.cube_localizer.CeilingCubeTargetSource
+        _target_: prpl_tidybot.cube_detector.CeilingCubeDetectorSource
         serials: ${lab.camera_serials}
         host: ${lab.marker_detector_host}
         side: 0.05

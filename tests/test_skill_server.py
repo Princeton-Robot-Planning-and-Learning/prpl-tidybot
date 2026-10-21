@@ -1021,3 +1021,24 @@ def test_the_fake_robot_answers_can_pick_in_observe_and_retries_a_miss():
     assert blind.observe()["bin"] is None
     assert blind.observe()["can_pick"]["reason"] == BIN_NOT_LOCALIZED
     assert blind.pick()["refused"]
+
+
+def test_observe_with_the_ceiling_cameras_is_one_shared_look(skills):
+    """With the real ceiling sources (on the 2026-10-21 corner frame, the cube in the
+    far bin's corner) observe takes one grab for the bin and the cube, and its reply
+    keeps the contract: the cube inside the bin, scoring, no floor IoU, can_pick a
+    dry run's reply."""
+    # pylint: disable=import-outside-toplevel
+    from test_cube_detector import _sources
+
+    cube, bin_source, images = _sources("corner_8_10-29-48_53", look_frames=3)
+    skills.cube_source, skills.bin_source = cube, bin_source
+    obs = skills.observe()
+    assert set(obs) == CONTRACT_KEYS
+    json.dumps(obs)
+    assert images.calls == 3
+    assert obs["cube"][:2] == pytest.approx([0.0725, 1.3946], abs=0.03)
+    assert obs["bin"]["x"] == pytest.approx(0.22, abs=0.03)
+    assert obs["cube_inside_bin"] is True and obs["cube_in_bin"] is True
+    assert obs["cube_upright"] is True
+    assert set(obs["can_pick"]) == CAN_PICK_KEYS
