@@ -618,6 +618,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
                 self.stop_event,
                 from_bin,
                 self.in_bin,
+                bin_fit if from_bin is None else None,
             )
             if failure is not None or held:
                 break

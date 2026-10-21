@@ -267,6 +267,56 @@ def _bin_pick_problem(
     return None
 
 
+def _floor_grasp_geometry(  # pylint: disable=too-many-arguments
+    geom: TopDownPickGeometry,
+    base: Sequence[float],
+    cube: dict[str, Any],
+    bin_fit: BinFit,
+    in_bin: Any,
+    seed: Sequence[float],
+    turns: Sequence[float] = (0.0, math.pi / 2),
+) -> tuple[TopDownPickGeometry | None, str | None]:
+    """The pick geometry for a cube on the floor beside the bin, the bin an obstacle
+    only: of the grasps on its two pairs of faces, the one whose hover (also the lift
+    and the retreat), grasp and carry touch no wall, the usual one first; else None
+    and why the usual one would touch."""
+    first: str | None = None
+    for turn in turns:
+        g = dataclasses.replace(geom, closing_turn=turn)
+        problem = _floor_pick_problem(g, base, cube, bin_fit, in_bin, seed)
+        if problem is None:
+            return g, None
+        first = first or problem
+    return None, first
+
+
+def _floor_pick_problem(
+    geom: TopDownPickGeometry,
+    base: Sequence[float],
+    cube: dict[str, Any],
+    bin_fit: BinFit,
+    in_bin: Any,
+    seed: Sequence[float],
+) -> str | None:
+    """Why the pick of the floor cube, from ``base``, would touch the bin's walls at
+    the hover, the grasp or the carry, or None."""
+    ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
+    yaw = math.radians(cube["yaw_deg"]) - base[2]
+    try:
+        hover, grasp = top_down_joint_targets(ax, ay, yaw, geom, seed=seed)
+    except ValueError as e:
+        return f"no top-down pick: {e}"
+    for name, joints in (
+        ("hover", hover),
+        ("grasp", grasp),
+        ("carry", list(CARRY_ARM_CONF)),
+    ):
+        problem = arm_bin_collision(joints, geom, base, bin_fit, in_bin)
+        if problem is not None:
+            return f"{name}: {problem}"
+    return None
+
+
 def _move_arm(
     arm: ArmInterface,
     goal: list[float],
@@ -478,8 +528,10 @@ def plan_pick(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     The cube past or on the barrier, no standoff in the drivable box on the robot's
     side clear of the bin, no straight drive there (:func:`pick_problem`); for a cube
     inside the bin, the pick out of it off (``in_bin`` None) or no grasp on either pair
-    of its faces clear of the walls; otherwise no IK for the hover and the grasp.
-    Returns (standoff, None) or (None, why)."""
+    of its faces clear of the walls; otherwise no IK for the hover and the grasp, or,
+    with a bin localized, no grasp on either pair of faces whose hover, grasp and
+    carry clear its walls (the bin an obstacle only). Returns (standoff, None) or
+    (None, why)."""
     if cube.get("in_bin") and in_bin is None:
         return None, IN_BIN_PICK_OFF
     problem = pick_problem(robot, cube, geom, floor, workspace, bin_fit)
@@ -501,7 +553,20 @@ def plan_pick(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         )
     except ValueError as e:
         return None, f"pick IK: {e}"
+    if bin_fit is not None:
+        chosen, wall = _floor_grasp_geometry(
+            geom, stand, cube, bin_fit, bin_margins(in_bin), seed
+        )
+        if chosen is None:
+            return None, f"cube too close to the bin wall to grasp ({wall})"
     return stand, None
+
+
+def bin_margins(in_bin: Any) -> Any:
+    """The bin wall check's clearances: ``pick.top_down.in_bin`` when the pick out
+    of the bin is on, else the measured defaults (the bin is an obstacle to every
+    pick, whether or not the pick out of it is on)."""
+    return InBinPick() if in_bin is None else in_bin
 
 
 def _place_top_down(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -881,13 +946,16 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     stop: threading.Event | None = None,
     bin_fit: BinFit | None = None,
     in_bin: Any = None,
+    obstacle: BinFit | None = None,
 ) -> tuple[bool, str | None]:
     """One grasp from where the base parked at `cube`: (held, stop reason or None).
     ``step`` is told each step (the ceiling video's label); ``read`` maps the gripper's
     reading after closing (fake mode's gripper closes on nothing). The wrist clip
     ``clip`` is left recording when the cube is held. With ``bin_fit`` the cube is
     inside the bin: the arm goes through the waypoint above the rim, and no arm pose
-    touching a wall is commanded."""
+    touching a wall is commanded. With ``obstacle`` (the localized bin, the cube on
+    the floor) no arm pose touching its walls is commanded either: the grasp on the
+    faces that clears them, or none."""
     td = cfg.pick.top_down
     ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
     yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
@@ -930,6 +998,26 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
 
         def clear(joints: Sequence[float]) -> str | None:
             return arm_bin_collision(joints, geom, base, fit, cfg_in_bin)
+
+    elif obstacle is not None:
+        margins = bin_margins(in_bin)
+        chosen, wall = _floor_grasp_geometry(
+            geom, base, cube, obstacle, margins, arm.get_arm_state()
+        )
+        if chosen is None:
+            record["pick_attempts"][-1].update(
+                {"gripper": None, "held": False, "note": f"bin wall: {wall}"}
+            )
+            _logger.warning("Pick attempt %d not started: bin wall: %s.", attempt, wall)
+            return False, None
+        geom = chosen
+        record["pick_attempts"][-1]["closing_turn_deg"] = math.degrees(
+            geom.closing_turn
+        )
+        obs_fit, obs_margins = obstacle, margins
+
+        def clear(joints: Sequence[float]) -> str | None:
+            return arm_bin_collision(joints, geom, base, obs_fit, obs_margins)
 
     step(
         f"Pick ({label}): open, "
@@ -1000,8 +1088,9 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
     descend, close, read; then lift and carry, or open and back off.
 
     With ``above`` (a cube inside the bin) the arm enters and leaves through that
-    waypoint over the rim, and ``clear`` (why a pose would touch the bin, or None)
-    refuses any servo step or grasp that would.
+    waypoint over the rim. ``clear`` (why a pose would touch the bin, or None; any
+    pick with a bin localized) refuses any servo step, re-planned hover (the lift and
+    the retreat) or grasp that would.
 
     Returns (held, gripper reading, note, servo log); the note says why the gripper
     was not closed, if it was not.
@@ -1059,6 +1148,14 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
             if not result.aligned:
                 retreat(hover)
                 return False, mover.arm.get_gripper_state(), result.note, servo_log
+        if clear is not None and clear(hover) is not None:
+            retreat(mover.joints())
+            return (
+                False,
+                mover.arm.get_gripper_state(),
+                f"hover refused: {clear(hover)}",
+                servo_log,
+            )
         if clear is not None and clear(grasp) is not None:
             retreat(hover)
             return (
