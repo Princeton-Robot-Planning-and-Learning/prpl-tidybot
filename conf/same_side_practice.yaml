@@ -88,6 +88,11 @@ pick:
       openings_mm: [85.0]
       gripper_model: box
       finger_allowance: 0.0
+      # Gripper yaws tried off the cube's faces (deg, face-aligned first): within
+      # +-15/25 a yaw-relaxed face grasp, 45 an edge grasp across the diagonal (an
+      # opening narrower than the cube's span at that yaw + 5 mm is skipped).
+      yaw_offsets_deg: [0.0]
+      cube_width: 0.05
 
 # mode=sim: the same loop on the kinematic TidyBot, with the bin's walls in the scene
 # (sim.bin: x, y, yaw deg; sim_safety.json gives the arm's least clearance to them per

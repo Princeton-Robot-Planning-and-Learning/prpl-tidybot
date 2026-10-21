@@ -83,6 +83,21 @@ def _b(cm: float) -> tuple[str, ...]:
     return (_MESH, f"{_IN_BIN}.finger_allowance={cm / 100}")
 
 
+# C: the gripper's yaw freed from the cube's faces, with A's tilts, openings and mesh:
+# C1-<phi>, a yaw-relaxed face grasp within +-phi of face-aligned (5 deg steps); C2,
+# an edge grasp across the diagonal (45 deg off).
+def _yaws(phi: int) -> str:
+    steps = [0] + [s * k for k in range(5, phi + 1, 5) for s in (1, -1)]
+    return f"{_IN_BIN}.yaw_offsets_deg=[{','.join(str(v) for v in steps)}]"
+
+
+_C = {
+    "C1-15": (*_A, _yaws(15)),
+    "C1-25": (*_A, _yaws(25)),
+    "C2": (*_A, f"{_IN_BIN}.yaw_offsets_deg=[0,45]"),
+}
+
+
 # The candidate controllers, by name (scripts/in_bin_pick_benchmark.py --controller).
 VARIANTS: dict[str, Controller] = {
     c.name: c
@@ -95,6 +110,11 @@ VARIANTS: dict[str, Controller] = {
         *(
             Controller(name=f"A+B{cm}", overrides=_A + _b(cm)[1:])
             for cm in (0.5, 1.0, 2.0)
+        ),
+        *(Controller(name=name, overrides=ov) for name, ov in _C.items()),
+        *(
+            Controller(name=f"{name}+B0.5", overrides=ov + _b(0.5)[1:])
+            for name, ov in _C.items()
         ),
     ]
 }
@@ -190,6 +210,9 @@ def run_case(
         "closing_turn_deg": attempts[-1].get("closing_turn_deg") if attempts else None,
         "tilt_deg": attempts[-1].get("tilt_deg") if attempts else None,
         "open_position": attempts[-1].get("open_position") if attempts else None,
+        "yaw_offset_deg": (
+            attempts[-1].get("wrist_yaw_offset_deg") if attempts else None
+        ),
         "gripper": reply.get("gripper"),
         "steps": [{"step": m["name"], "reached": m.get("reached")} for m in moves],
         "lifted_above_rim": verdict == "held"

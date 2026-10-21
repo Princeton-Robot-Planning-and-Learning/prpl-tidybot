@@ -193,3 +193,49 @@ def test_light_finger_contact_rescues_a_run_10_refusal_by_touching_the_wall():
     assert result["verdict"] == "held"
     links = {c["link"] for c in result["wall_contacts"]}
     assert links and links <= FINGER_LINKS
+
+
+RUN_10_REFUSALS = [
+    c["id"]
+    for c in CASES
+    if c["source"]["session"] == "2026-10-21/10-29-48"
+    and c["real"]["verdict"] == "refused"
+]
+# C (the gripper's yaw freed from the faces, with A's tilts and openings): which of
+# run 10's 5 refusals each rescues in sim.
+C_RESCUES = {
+    "C1-25": {"2026-10-21/10-29-48#115"},
+    "C1-25+B0.5": {
+        "2026-10-21/10-29-48#96",
+        "2026-10-21/10-29-48#110",
+        "2026-10-21/10-29-48#115",
+    },
+}
+
+
+@pytest.mark.parametrize("variant", sorted(C_RESCUES))
+@pytest.mark.parametrize("case_id", RUN_10_REFUSALS)
+def test_a_yaw_relaxed_grasp_rescues_some_of_run_10s_refusals(variant, case_id):
+    """C1-25 (gripper yaw up to 25 deg off the faces) reaches run 10's 5.3 cm rest (20
+    deg off) without touching a wall; with B0.5 it also reaches the 2.4 cm rest (15 deg
+    off, tilted 15) and the 5.6 cm one (face-aligned at 70 mm, as A+B0.5 does), by the
+    finger linkage touching the wall.
+
+    Grip stability off the faces' normals is not modelled in sim.
+    """
+    result = run_case(BY_ID[case_id], VARIANTS[variant])
+    assert (result["verdict"] == "held") == (case_id in C_RESCUES[variant])
+    if result["verdict"] == "held":
+        face_aligned = case_id == "2026-10-21/10-29-48#96"
+        assert (result["yaw_offset_deg"] == 0.0) == face_aligned
+        assert {c["link"] for c in result["wall_contacts"]} <= FINGER_LINKS
+        if variant == "C1-25":
+            assert result["wall_contacts"] == []
+
+
+@pytest.mark.parametrize("case_id", PICKED)
+def test_the_yaw_relaxed_grasp_keeps_every_real_pick_face_aligned(case_id):
+    """With C1-25+B0.5 the real picks are still taken square to the faces."""
+    result = run_case(BY_ID[case_id], VARIANTS["C1-25+B0.5"])
+    assert result["verdict"] == "held"
+    assert result["yaw_offset_deg"] == 0.0 and result["tilt_deg"] == 0.0

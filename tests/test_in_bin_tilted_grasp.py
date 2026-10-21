@@ -191,3 +191,50 @@ def test_the_tilted_candidates_pick_a_cube_the_current_grasp_refuses():
     assert problem is None, problem
     assert chosen is not None
     assert chosen.tilt != 0.0
+
+
+def test_the_gripper_yaw_is_tied_to_the_faces_by_default():
+    """C is off by default: one gripper yaw per pair of faces."""
+    assert list(_compose().pick.top_down.in_bin.yaw_offsets_deg) == [0.0]
+    assert InBinPick().yaw_offsets_deg == (0.0,)
+
+
+def _candidates(cfg):
+    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
+        bin_grasp_candidates,
+    )
+
+    return bin_grasp_candidates(
+        geometry_from_config(cfg.pick.top_down), cfg.pick.top_down.in_bin
+    )
+
+
+def test_an_edge_grasp_closes_across_the_diagonal_fully_open_only():
+    """C2: the fingers close on two opposite vertical edges, the gripper turned 45
+    degrees off the faces.
+
+    The diagonal (7.07 cm) does not fit the 70 mm opening, so an edge grasp is tried
+    fully open only; face-aligned grasps come first.
+    """
+    cfg = _variant_a("pick.top_down.in_bin.yaw_offsets_deg=[0,45]")
+    cands = _candidates(cfg)
+    offsets = [round(math.degrees(g.wrist_yaw_offset)) for g in cands]
+    assert offsets[0] == 0 and offsets[-1] == 45
+    assert offsets.index(45) > max(i for i, o in enumerate(offsets) if o == 0)
+    edge = [g for g in cands if round(math.degrees(g.wrist_yaw_offset)) == 45]
+    assert edge and all(g.open_position == 0.0 for g in edge)
+    face = [g for g in cands if g.wrist_yaw_offset == 0.0]
+    assert {g.open_position for g in face} == {0.0, opening_command(0.070)}
+
+
+def test_a_yaw_relaxed_grasp_turns_the_closing_axis_off_the_faces():
+    """C1: with an offset the closing axis sits that far off the faces' normal."""
+    cfg = _compose()
+    geom = geometry_from_config(cfg.pick.top_down)
+    ax, ay = arm_frame_target(BASE, (BIN.x, BIN.y), geom)
+    _, flat = top_down_joint_targets(ax, ay, 0.0, geom)
+    relaxed = dataclasses.replace(geom, wrist_yaw_offset=math.radians(15.0))
+    _, turned = top_down_joint_targets(ax, ay, 0.0, relaxed)
+    c0 = forward_kinematics(flat, geom)[2]
+    c1 = forward_kinematics(turned, relaxed)[2]
+    assert math.degrees(math.acos(abs(float(c0 @ c1)))) == pytest.approx(15.0, abs=1.0)

@@ -264,6 +264,42 @@ def _bin_pick_targets(
     return top_down_joint_targets(*target, high, seed=seed)[0]
 
 
+def bin_grasp_candidates(
+    geom: TopDownPickGeometry, in_bin: Any
+) -> list[TopDownPickGeometry]:
+    """Every grasp the pick out of the bin may try, in order.
+
+    Gripper yaws off the faces (``yaw_offsets_deg``, as listed: face-aligned first)
+    outermost; within a yaw, kinder-baselines #178's order: tilts as listed
+    (``tilts_deg``, untilted first), both pairs of faces, each opening as listed
+    (``openings_mm``, fully open first). An opening narrower than the cube's span across
+    the closing axis at that yaw, plus 5 mm, is skipped (an edge grasp, 45 degrees off,
+    spans the 7.07 cm diagonal).
+    """
+    width = float(_in_bin_option(in_bin, "cube_width"))
+    out = []
+    for offset in (float(o) for o in _in_bin_option(in_bin, "yaw_offsets_deg")):
+        off = math.radians(offset)
+        span = width * (abs(math.cos(off)) + abs(math.sin(off)))
+        for tilt in (float(t) for t in _in_bin_option(in_bin, "tilts_deg")):
+            for turn in (0.0, math.pi / 2):
+                for opening in (
+                    float(o) for o in _in_bin_option(in_bin, "openings_mm")
+                ):
+                    if opening / 1000 < span + 0.005 and offset:
+                        continue
+                    out.append(
+                        dataclasses.replace(
+                            geom,
+                            closing_turn=turn,
+                            tilt=math.radians(tilt),
+                            open_position=opening_command(opening / 1000),
+                            wrist_yaw_offset=geom.wrist_yaw_offset + off,
+                        )
+                    )
+    return out
+
+
 def _bin_grasp_geometry(
     geom: TopDownPickGeometry,
     base: Sequence[float],
@@ -276,35 +312,24 @@ def _bin_grasp_geometry(
     faces (``closing_turn`` 0 and pi/2), the one that touches no wall, the usual one
     first; else None and why the usual one would touch.
 
-    With more than one tilt or opening configured (``tilts_deg``, ``openings_mm``;
-    kinder-baselines #178's candidates) they are tried in #178's order: tilts as listed
-    (untilted first), within a tilt both pairs of faces, within a pair each opening as
-    listed (fully open first); a refusal then names the untilted reason for each pair of
-    faces and how many candidates were tried.
+    With more candidates configured (:func:`bin_grasp_candidates`) the first that clears
+    is used; a refusal then names the first reason for each pair of faces and how many
+    candidates were tried.
     """
-    tilts = [float(t) for t in _in_bin_option(in_bin, "tilts_deg")]
-    openings = [float(o) for o in _in_bin_option(in_bin, "openings_mm")]
+    candidates = bin_grasp_candidates(geom, in_bin)
     first: dict[float, str] = {}
-    tried = 0
-    for tilt in tilts:
-        for turn in (0.0, math.pi / 2):
-            for opening in openings:
-                g = dataclasses.replace(
-                    geom,
-                    closing_turn=turn,
-                    tilt=math.radians(tilt),
-                    open_position=opening_command(opening / 1000),
-                )
-                tried += 1
-                problem = _bin_pick_problem(g, base, cube, bin_fit, in_bin, seed)
-                if problem is None:
-                    return g, None
-                first.setdefault(turn, problem)
+    for g in candidates:
+        problem = _bin_pick_problem(g, base, cube, bin_fit, in_bin, seed)
+        if problem is None:
+            return g, None
+        first.setdefault(g.closing_turn, problem)
     both = "; ".join(f"faces {math.degrees(t):.0f} deg: {p}" for t, p in first.items())
-    _logger.info("No grasp clears the bin's walls (%d tried): %s.", tried, both)
-    if len(tilts) == 1 and len(openings) == 1:
+    _logger.info(
+        "No grasp clears the bin's walls (%d tried): %s.", len(candidates), both
+    )
+    if len(candidates) == 2:
         return None, first[0.0]
-    return None, f"{both}; {tried} candidates"
+    return None, f"{both}; {len(candidates)} candidates"
 
 
 def _bin_pick_problem(
@@ -535,6 +560,8 @@ class InBinPick:  # pylint: disable=too-many-instance-attributes
     openings_mm: tuple[float, ...] = (85.0,)
     gripper_model: str = "box"
     finger_allowance: float = 0.0
+    yaw_offsets_deg: tuple[float, ...] = (0.0,)
+    cube_width: float = 0.05
 
 
 _IN_BIN_DEFAULTS = InBinPick()
@@ -1025,6 +1052,9 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         )
         record["pick_attempts"][-1]["tilt_deg"] = math.degrees(geom.tilt)
         record["pick_attempts"][-1]["open_position"] = geom.open_position
+        record["pick_attempts"][-1]["wrist_yaw_offset_deg"] = math.degrees(
+            geom.wrist_yaw_offset
+        )
         above = _bin_pick_targets(
             geom, (ax, ay, yaw_rel), bin_fit, in_bin, arm.get_arm_state()
         )
