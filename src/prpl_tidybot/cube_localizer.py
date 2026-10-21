@@ -97,6 +97,10 @@ class CubeFit:
     camera_disagreement_m: float = 0.0
     # The camera whose fit was kept (-1 when fused).
     camera: int = -1
+    # The fraction of the cube's silhouette that camera sees (the occlusion-aware
+    # detector's; the bin's walls hide the rest), and whether it lies in the bin.
+    visible: float = 1.0
+    in_bin: bool = False
 
 
 def load_ceiling_cameras(serials: Sequence[str]) -> list[CeilingCamera]:
@@ -611,10 +615,11 @@ class CeilingCubeTargetSource(TargetSource):
         self._retries = int(retries)
         self.last_fit: CubeFit | None = None
 
-    def _frames(self) -> list[NDArray[np.uint8]]:
+    def _frames(self, num: int | None = None) -> list[NDArray[np.uint8]]:
+        num = self._num_frames if num is None else int(num)
         frames: list[NDArray[np.uint8]] = []
-        deadline = time.time() + 10 * max(self._period, 0.1) * self._num_frames
-        while len(frames) < self._num_frames and time.time() < deadline:
+        deadline = time.time() + 10 * max(self._period, 0.1) * num
+        while len(frames) < num and time.time() < deadline:
             img = self._images.get_image()
             if img is not None and (not frames or img is not frames[-1]):
                 frames.append(np.array(img, copy=True))
@@ -638,17 +643,7 @@ class CeilingCubeTargetSource(TargetSource):
         for _ in range(1 + self._retries):
             frames, exclude = self._frames(), self._exclusions()
             diagnostics: dict[str, Any] = {}
-            fit = localize_cube(
-                frames,
-                self._cameras,
-                self._floor_bounds,
-                self._side,
-                exclude=exclude,
-                min_iou=self._min_iou,
-                fusion=self._fusion,
-                serials=self._serials,
-                diagnostics=diagnostics,
-            )
+            fit = self._fit(frames, exclude, diagnostics)
             if fit is not None:
                 break
             self._save_failure(frames, exclude, diagnostics)
@@ -668,6 +663,25 @@ class CeilingCubeTargetSource(TargetSource):
             )
         self.last_fit = fit
         return fit
+
+    def _fit(
+        self,
+        frames: Sequence[NDArray[np.uint8]],
+        exclude: Sequence[Sequence[float]],
+        diagnostics: dict[str, Any],
+    ) -> CubeFit | None:
+        """The cube in ``frames`` (:func:`localize_cube`), or None."""
+        return localize_cube(
+            frames,
+            self._cameras,
+            self._floor_bounds,
+            self._side,
+            exclude=exclude,
+            min_iou=self._min_iou,
+            fusion=self._fusion,
+            serials=self._serials,
+            diagnostics=diagnostics,
+        )
 
     def find_in_box(self, box: Sequence[float]) -> tuple[float, float] | None:
         """Where the cube lies inside the floor box ``box`` (the bin), or None (see
