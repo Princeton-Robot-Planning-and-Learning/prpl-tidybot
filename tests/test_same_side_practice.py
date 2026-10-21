@@ -322,3 +322,118 @@ def test_the_grasp_on_the_other_faces_is_used_when_only_it_clears():
     )
     assert problem is None
     assert chosen is not None and chosen.closing_turn == pytest.approx(math.pi / 2)
+
+
+# The 2026-10-21 10:39 scene: a floor cube 3 cm outside the bin's +x wall.
+WALL_BIN = BinFit(-0.305, -0.395, 1.55, 0.39, 0.29, 0.21, 0.005)
+WALL_CUBE = {"x": -0.105, "y": -0.454, "yaw_deg": 0.0, "in_bin": False}
+TOSS_POSE = (1.10, -0.78, math.pi)
+
+
+def _plan(cube, fit=WALL_BIN, **extra):
+    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
+        plan_pick,
+    )
+    from prpl_tidybot.third_party.constants import (  # pylint: disable=import-outside-toplevel
+        RETRACT_ARM_CONF,
+    )
+
+    cfg = _compose(**extra)
+    return plan_pick(
+        TOSS_POSE,
+        cube,
+        geometry_from_config(cfg.pick.top_down),
+        tuple(cfg.preview.floor_bounds),
+        Workspace.from_config(cfg.barrier, cfg.preview.floor_bounds),
+        fit,
+        cfg.pick.top_down.in_bin,
+        list(RETRACT_ARM_CONF),
+    )
+
+
+def test_a_floor_cube_against_the_bin_wall_outside_is_refused_before_moving():
+    """The 10:39 scene: the floor pick beside the bin is checked against its walls,
+    and refused (both closing orientations touch the wall) before anything moves."""
+    stand, why = _plan(WALL_CUBE)
+    assert stand is None
+    assert why is not None and why.startswith("cube too close to the bin wall to grasp")
+
+
+def test_the_floor_pick_refuses_with_the_in_bin_pick_off_too():
+    """The bin is an obstacle whether or not the pick out of it is on."""
+    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
+        plan_pick,
+    )
+    from prpl_tidybot.third_party.constants import (  # pylint: disable=import-outside-toplevel
+        RETRACT_ARM_CONF,
+    )
+
+    cfg = _compose()
+    stand, why = plan_pick(
+        TOSS_POSE,
+        WALL_CUBE,
+        geometry_from_config(cfg.pick.top_down),
+        tuple(cfg.preview.floor_bounds),
+        Workspace.from_config(cfg.barrier, cfg.preview.floor_bounds),
+        WALL_BIN,
+        None,
+        list(RETRACT_ARM_CONF),
+    )
+    assert stand is None
+    assert why is not None and why.startswith("cube too close to the bin wall to grasp")
+
+
+def test_the_fake_skills_can_pick_refuses_the_cube_against_the_wall():
+    """``can_pick`` (the planner's question) refuses the same scene."""
+    from prpl_tidybot.skill_server import (  # pylint: disable=import-outside-toplevel
+        FakeTossingRobot,
+    )
+
+    skills = FakeTossingRobot(
+        robot=TOSS_POSE,
+        cube=(WALL_CUBE["x"], WALL_CUBE["y"], 0.0),
+        bin_fit=WALL_BIN,
+    )
+    reply = skills.can_pick()
+    assert reply["refused"] is True, reply
+    assert reply["reason"].startswith("cube too close to the bin wall to grasp")
+
+
+def test_a_floor_cube_30_cm_from_the_bin_is_still_pickable():
+    """The bin wall check does not refuse a floor cube well clear of it."""
+    fit = WALL_BIN
+    cube = {"x": fit.x + fit.width / 2 + 0.30, "y": -0.454, "yaw_deg": 0.0}
+    cube["in_bin"] = False
+    stand, why = _plan(cube)
+    assert why is None and stand is not None
+
+
+def test_the_floor_pick_uses_the_other_faces_when_only_they_clear():
+    """With a gripper wide enough that its finger direction decides, a floor cube
+    beside the wall gets the grasp turned a quarter (fingers along the wall)."""
+    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
+        _floor_grasp_geometry,
+    )
+    from prpl_tidybot.third_party.constants import (  # pylint: disable=import-outside-toplevel
+        RETRACT_ARM_CONF,
+    )
+
+    cfg = _compose(**{"pick.top_down.in_bin.finger_half_span": 0.10})
+    geom = geometry_from_config(cfg.pick.top_down)
+    in_bin = cfg.pick.top_down.in_bin
+    fit = _bin_fit()
+    base = (fit.x + 0.67, fit.y, math.pi)
+    # Beside the +y end wall (the bin's length is along y), outside it.
+    cube = {"x": fit.x, "y": fit.y + fit.length / 2 + 0.09, "yaw_deg": 0.0}
+    results = {}
+    for turn in (0.0, math.pi / 2):
+        g = dataclasses.replace(geom, closing_turn=turn)
+        results[turn], _ = _floor_grasp_geometry(
+            g, base, cube, fit, in_bin, RETRACT_ARM_CONF, turns=(turn,)
+        )
+    assert results[0.0] is None and results[math.pi / 2] is not None, results
+    chosen, problem = _floor_grasp_geometry(
+        geom, base, cube, fit, in_bin, RETRACT_ARM_CONF
+    )
+    assert problem is None
+    assert chosen is not None and chosen.closing_turn == pytest.approx(math.pi / 2)
