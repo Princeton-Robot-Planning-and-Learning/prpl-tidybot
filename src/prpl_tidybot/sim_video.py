@@ -1,14 +1,14 @@
 """Film a :class:`~prpl_tidybot.sim_robot.SimWorld` and check its paths.
 
-The robot is KINDER's MuJoCo model of the Stanford TidyBot (Jimmy Wu's base, Kinova
-Gen3 and Robotiq 2F-85: the same Gen3 chain as the IK model the pick plans with),
-posed kinematically from the sim's record. Two views go side by side: overhead over
-the whole floor, and oblique following the base. The floor bounds, the bin
-(``bin_stop_box``) and the toss pose are drawn on the floor.
+The robot is KINDER's MuJoCo model of the Stanford TidyBot (Jimmy Wu's base, Kinova Gen3
+and Robotiq 2F-85: the same Gen3 chain as the IK model the pick plans with), posed
+kinematically from the sim's record. Two views go side by side: overhead over the whole
+floor, and oblique following the base. The floor bounds, the bin (``bin_stop_box``) and
+the toss pose are drawn on the floor.
 
-``safety_summary`` poses the same model at every recorded instant and reports, step
-by step, how close the arm and gripper came to the floor, any contact between the
-arm and the base or itself, and how close joints 2, 4 and 6 came to their stops.
+``safety_summary`` poses the same model at every recorded instant and reports, step by
+step, how close the arm and gripper came to the floor, any contact between the arm and
+the base or itself, and how close joints 2, 4 and 6 came to their stops.
 """
 
 # mujoco is a compiled extension; pylint cannot see its members.
@@ -265,22 +265,14 @@ class SimScene:
 
 
 def _wall_gap(model: Any, data: Any, wall: int, geom: int, fromto: Any) -> float:
-    """The robot geom's least distance to a wall box (negative inside it), up to 0.5
-    m. A mesh is measured from its vertices and a box from its corners:
-    mj_geomDistance returned 0.0 for such pairs ~10 cm apart (MuJoCo 3.3.7)."""
-    mesh = int(model.geom_dataid[geom])
-    rot = data.geom_xmat[geom].reshape(3, 3)
-    if model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_MESH and mesh >= 0:
-        start, count = int(model.mesh_vertadr[mesh]), int(model.mesh_vertnum[mesh])
-        local_points = model.mesh_vert[start : start + count]
-    elif model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_BOX:
-        signs = np.array(
-            [[a, b, c] for a in (-1, 1) for b in (-1, 1) for c in (-1, 1)], float
-        )
-        local_points = signs * model.geom_size[geom]
-    else:
+    """The robot geom's least distance to a wall box (negative inside it), up to 0.5 m.
+
+    A mesh is measured from its vertices and a box from its corners:
+    mj_geomDistance returned 0.0 for such pairs ~10 cm apart (MuJoCo 3.3.7).
+    """
+    points = _geom_points(model, data, geom)
+    if points is None:
         return float(mujoco.mj_geomDistance(model, data, wall, geom, 0.5, fromto))
-    points = data.geom_xpos[geom] + local_points @ rot.T
     wall_rot = data.geom_xmat[wall].reshape(3, 3)
     local = np.abs((points - data.geom_xpos[wall]) @ wall_rot) - model.geom_size[wall]
     outside = np.linalg.norm(np.maximum(local, 0.0), axis=1)
@@ -333,9 +325,9 @@ def _steps(world: SimWorld) -> list[tuple[str, list[int]]]:
 
 def safety_summary(world: SimWorld, markers: SimMarkers) -> dict[str, Any]:
     """Per step: the arm's and the gripper's least clearance above the floor, any
-    contact of the arm with the base or itself, the least margin of joints 2, 4 and 6
-    to their stops, peak joint and base speeds, and whether the base centre left the
-    floor bounds."""
+    contact of the arm with the base or itself, the least margin of joints 2, 4 and 6 to
+    their stops, peak joint and base speeds, and whether the base centre left the floor
+    bounds."""
     scene = SimScene(markers)
     m, d = scene.model, scene.data
     fromto = np.zeros(6)
@@ -440,6 +432,85 @@ def safety_summary(world: SimWorld, markers: SimMarkers) -> dict[str, Any]:
     }
 
 
+def bin_wall_contacts(world: SimWorld, markers: SimMarkers) -> dict[str, Any]:
+    """Where the TidyBot model's arm and gripper went into the walled bin
+    (``markers.bin``), per step and link.
+
+    ``contacts`` lists each (step, link) that touched a wall, deepest first within the
+    step order, with ``depth_m``: how far the link's part below the rim reached past the
+    wall's face it came from (the inner face for a link inside the bin, the outer one
+    for a link outside), so a link through the 5 mm cardboard reads more than 5 mm.
+    ``min_clearance_m`` is the arm's and the gripper's least gap to a wall over the
+    whole record (negative: touching). The step is the arm's own sub-step (``above``,
+    ``hover``, ``grasp``, ...) when it noted one.
+    """
+    assert markers.bin is not None
+    bx, by, yaw, length, width, height, wall_t = markers.bin
+    inner = (0.5 * length - wall_t, 0.5 * width - wall_t)
+    outer = (0.5 * length, 0.5 * width)
+    cb, sb = math.cos(yaw), math.sin(yaw)
+    scene = SimScene(markers)
+    m, d = scene.model, scene.data
+    fromto = np.zeros(6)
+    deepest: dict[tuple[str, str], tuple[float, float]] = {}
+    least = {"arm": math.inf, "gripper": math.inf}
+    last_t = -math.inf
+    for sample in world.samples:
+        if sample[0] - last_t < _SAFETY_PERIOD_S:
+            continue
+        last_t = sample[0]
+        scene.set(sample)
+        step = sample[6] or sample[5]
+        for g in scene.robot_geoms:
+            body = m.geom_bodyid[g]
+            if body in scene.base_bodies:
+                continue
+            part = "gripper" if body in scene.gripper_bodies else "arm"
+            gap = min(_wall_gap(m, d, w, g, fromto) for w in scene.bin_walls)
+            least[part] = min(least[part], gap)
+            if gap >= 0:
+                continue
+            depth = -gap
+            points = _geom_points(m, d, g)
+            if points is not None and np.any(points[:, 2] < height):
+                low = points[points[:, 2] < height]
+                dx, dy = low[:, 0] - bx, low[:, 1] - by
+                u = np.abs(cb * dx + sb * dy)
+                v = np.abs(-sb * dx + cb * dy)
+                past_inner = float(np.maximum(u - inner[0], v - inner[1]).max())
+                into_outer = float(np.minimum(outer[0] - u, outer[1] - v).max())
+                depth = max(depth, min(past_inner, into_outer))
+            key = (step, str(m.body(body).name))
+            if depth > deepest.get(key, (0.0, 0.0))[0]:
+                deepest[key] = (depth, float(sample[0]))
+    return {
+        "contacts": [
+            {"step": step, "link": link, "depth_m": round(depth, 4), "t_s": round(t, 3)}
+            for (step, link), (depth, t) in sorted(
+                deepest.items(), key=lambda item: item[1][1]
+            )
+        ],
+        "min_clearance_m": {k: _round(v) for k, v in least.items()},
+    }
+
+
+def _geom_points(model: Any, data: Any, geom: int) -> NDArray[np.float64] | None:
+    """A mesh geom's vertices or a box geom's corners in the world frame, else None."""
+    mesh = int(model.geom_dataid[geom])
+    rot = data.geom_xmat[geom].reshape(3, 3)
+    if model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_MESH and mesh >= 0:
+        start, count = int(model.mesh_vertadr[mesh]), int(model.mesh_vertnum[mesh])
+        local_points = model.mesh_vert[start : start + count]
+    elif model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_BOX:
+        signs = np.array(
+            [[a, b, c] for a in (-1, 1) for b in (-1, 1) for c in (-1, 1)], float
+        )
+        local_points = signs * model.geom_size[geom]
+    else:
+        return None
+    return np.asarray(data.geom_xpos[geom] + local_points @ rot.T, dtype=np.float64)
+
+
 def _round(value: float, digits: int = 4) -> float | None:
     return None if not math.isfinite(value) else round(float(value), digits)
 
@@ -528,8 +599,8 @@ class _Views:
         return cam
 
     def _add_footprint(self) -> None:
-        """The base's body as a flat box: from straight above its mesh does not
-        render (one-sided faces)."""
+        """The base's body as a flat box: from straight above its mesh does not render
+        (one-sided faces)."""
         m, d = self.scene.model, self.scene.data
         g = self.scene.base_body_geom
         if self.scn.ngeom >= self.scn.maxgeom:

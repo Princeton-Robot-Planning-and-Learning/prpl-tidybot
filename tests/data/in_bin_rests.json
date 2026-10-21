@@ -1,0 +1,802 @@
+{
+ "description": "Every real in-bin cube rest on the robot's side of the tape, 2026-10-20 to 2026-10-21, from the NUC's raw logs: the bin as the robot fitted it (x, y, yaw rad, outer length/width, rim height, wall; m), the cube's centre and yaw as localized, the robot pose and arm joints the pick was planned from, and what the real robot did. wall_distance_m is the cube centre to the nearest inner wall surface; bin_frame_uv is the centre in the bin's own frame (u along its length). resting_face is not measured in the bin (no flat-cube fit there). Rests past the barrier (the far bin) are excluded.",
+ "measured_bin": {
+  "length": 0.39,
+  "width": 0.29,
+  "height": 0.21,
+  "wall": 0.005
+ },
+ "cases": [
+  {
+   "id": "2026-10-20/18-10-36#34",
+   "source": {
+    "run": "47 (pilot run9)",
+    "session": "2026-10-20/18-10-36",
+    "time": "2026-10-20T18:28:27-04:00",
+    "code": "prpl-tidybot #158 56d2079 (skill server, angular grasps)",
+    "log": "raw/2026-10-20/18-10-36/skill_calls.jsonl",
+    "observe_call": 34,
+    "pick_call": 35,
+    "in_bin_config": "current"
+   },
+   "kind": "toss rest",
+   "robot": [
+    1.0492073989774957,
+    -0.7769296928261533,
+    -3.0641293247514447
+   ],
+   "arm_seed": [
+    0.0,
+    -0.349066,
+    3.141593,
+    -2.548181,
+    0.0,
+    -0.872665,
+    1.570796
+   ],
+   "arm_seed_source": "retract (the session has no motion.jsonl)",
+   "bin": {
+    "x": -0.3231249999999987,
+    "y": -0.7818749999999991,
+    "yaw": 1.531526418625024,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.29265235910346327,
+    "y": -0.7629964179102314,
+    "yaw_deg": 54.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.020060377654440173,
+    -0.02970797794011802
+   ],
+   "wall_distance_m": 0.11029202205988196,
+   "real": {
+    "verdict": "picked",
+    "reason": null,
+    "gripper": 0.4410480558872223,
+    "closing_turn_deg": 0.0,
+    "stand": [
+     0.39420044915240965,
+     -0.771254831341666,
+     3.1374595781141004
+    ],
+    "attempts": 1
+   }
+  },
+  {
+   "id": "2026-10-21/10-29-48#33",
+   "source": {
+    "run": "48 (run 10, the full run)",
+    "session": "2026-10-21/10-29-48",
+    "time": "2026-10-21T10:44:10-04:00",
+    "code": "prpl-tidybot #159 10091e0 (skill server, angular grasps)",
+    "log": "full-run-20261021/nuc_logs/2026-10-21/10-29-48/skill_calls.jsonl",
+    "observe_call": 33,
+    "pick_call": 34,
+    "in_bin_config": "current"
+   },
+   "kind": "toss rest",
+   "robot": [
+    1.0139580498636636,
+    -0.46472453275425185,
+    -3.1360373609983405
+   ],
+   "arm_seed": [
+    0.0075,
+    -0.3344,
+    -3.1415,
+    -2.5542,
+    0.0,
+    -0.8258,
+    1.5708
+   ],
+   "arm_seed_source": "motion.jsonl at t=1792593850.04",
+   "bin": {
+    "x": -0.3482771001555199,
+    "y": -0.4612561763931696,
+    "yaw": 1.4922565104551517,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.363294947918499,
+    "y": -0.36784114723621086,
+    "yaw_deg": 36.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.09194877504249595,
+    0.0223008114653244
+   ],
+   "wall_distance_m": 0.09805122495750405,
+   "real": {
+    "verdict": "picked",
+    "reason": null,
+    "gripper": 0.5851528644561768,
+    "closing_turn_deg": 0.0,
+    "stand": [
+     0.31842587334290073,
+     -0.4114942490464774,
+     3.0711567123704633
+    ],
+    "attempts": 1
+   }
+  },
+  {
+   "id": "2026-10-21/10-29-48#83",
+   "source": {
+    "run": "48 (run 10, the full run)",
+    "session": "2026-10-21/10-29-48",
+    "time": "2026-10-21T11:02:19-04:00",
+    "code": "prpl-tidybot #159 10091e0 (skill server, angular grasps)",
+    "log": "full-run-20261021/nuc_logs/2026-10-21/10-29-48/skill_calls.jsonl",
+    "observe_call": 83,
+    "pick_call": 84,
+    "in_bin_config": "current"
+   },
+   "kind": "toss rest",
+   "robot": [
+    1.0697241583065302,
+    -0.7938590167057088,
+    -3.139670937792868
+   ],
+   "arm_seed": [
+    -0.0001,
+    -0.3357,
+    -3.1416,
+    -2.5541,
+    -0.0097,
+    -0.8279,
+    1.5704
+   ],
+   "arm_seed_source": "motion.jsonl at t=1792594939.24",
+   "bin": {
+    "x": -0.30697234717704597,
+    "y": -0.7897929905856097,
+    "yaw": 1.5620696805349246,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.2785766435125799,
+    "y": -0.8799198270562778,
+    "yaw_deg": 72.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    -0.08987560860087009,
+    -0.029181117480897308
+   ],
+   "wall_distance_m": 0.10012439139912992,
+   "real": {
+    "verdict": "picked",
+    "reason": null,
+    "gripper": 0.5065501928329468,
+    "closing_turn_deg": 0.0,
+    "stand": [
+     0.4018175002875213,
+     -0.8330381499423722,
+     -3.08107144956524
+    ],
+    "attempts": 1
+   }
+  },
+  {
+   "id": "2026-10-21/10-29-48#87",
+   "source": {
+    "run": "48 (run 10, the full run)",
+    "session": "2026-10-21/10-29-48",
+    "time": "2026-10-21T11:04:14-04:00",
+    "code": "prpl-tidybot #159 10091e0 (skill server, angular grasps)",
+    "log": "full-run-20261021/nuc_logs/2026-10-21/10-29-48/skill_calls.jsonl",
+    "observe_call": 87,
+    "in_bin_config": "current"
+   },
+   "kind": "toss rest",
+   "robot": [
+    1.088556584498864,
+    -0.795562617212677,
+    -3.1365491600059947
+   ],
+   "arm_seed": [
+    0.0,
+    -0.3338,
+    -3.1416,
+    -2.5563,
+    -0.0001,
+    -0.8257,
+    1.5708
+   ],
+   "arm_seed_source": "motion.jsonl at t=1792595053.99",
+   "bin": {
+    "x": -0.3149158576007424,
+    "y": -0.7882880885713004,
+    "yaw": 1.5358897417550104,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.20844520251995144,
+    "y": -0.6249262830194395,
+    "yaw_deg": 36.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.16697806222971207,
+    -0.10070455124028486
+   ],
+   "wall_distance_m": 0.023021937770287937,
+   "real": {
+    "verdict": "refused",
+    "reason": "cube too close to the bin wall to grasp (hover: the gripper would touch the bin wall (0.097 m below the rim))"
+   }
+  },
+  {
+   "id": "2026-10-21/10-29-48#96",
+   "source": {
+    "run": "48 (run 10, the full run)",
+    "session": "2026-10-21/10-29-48",
+    "time": "2026-10-21T11:07:59-04:00",
+    "code": "prpl-tidybot #159 10091e0 (skill server, angular grasps)",
+    "log": "full-run-20261021/nuc_logs/2026-10-21/10-29-48/skill_calls.jsonl",
+    "observe_call": 96,
+    "in_bin_config": "current"
+   },
+   "kind": "toss rest",
+   "robot": [
+    1.1046652117768665,
+    -0.7918998775923151,
+    -3.088889183598109
+   ],
+   "arm_seed": [
+    -0.0,
+    -0.3358,
+    -3.1416,
+    -2.5552,
+    -0.0,
+    -0.83,
+    1.5713
+   ],
+   "arm_seed_source": "motion.jsonl at t=1792595279.98",
+   "bin": {
+    "x": -0.30697234717704597,
+    "y": -0.7897929905856097,
+    "yaw": 1.5620696805349246,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.23290488835019268,
+    "y": -0.9242387148806994,
+    "yaw_deg": 24.000000000000004
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    -0.13379425270514636,
+    -0.07523788395064229
+   ],
+   "wall_distance_m": 0.05620574729485364,
+   "real": {
+    "verdict": "refused",
+    "reason": "cube too close to the bin wall to grasp (hover: the gripper would touch the bin wall (0.097 m below the rim))"
+   }
+  },
+  {
+   "id": "2026-10-21/10-29-48#101",
+   "source": {
+    "run": "48 (run 10, the full run)",
+    "session": "2026-10-21/10-29-48",
+    "time": "2026-10-21T11:10:07-04:00",
+    "code": "prpl-tidybot #159 10091e0 (skill server, angular grasps)",
+    "log": "full-run-20261021/nuc_logs/2026-10-21/10-29-48/skill_calls.jsonl",
+    "observe_call": 101,
+    "in_bin_config": "current"
+   },
+   "kind": "toss rest",
+   "robot": [
+    1.0818184304951477,
+    -0.7772902915902787,
+    -3.137119984841444
+   ],
+   "arm_seed": [
+    -0.0002,
+    -0.3343,
+    -3.1416,
+    -2.5564,
+    0.0074,
+    -0.8298,
+    1.556
+   ],
+   "arm_seed_source": "motion.jsonl at t=1792595407.13",
+   "bin": {
+    "x": -0.31695864252459177,
+    "y": -0.7892696310231803,
+    "yaw": 1.5620696805349246,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.42041802214214946,
+    "y": -0.6764162074874136,
+    "yaw_deg": 59.99999999999999
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.11194628447432824,
+    0.10444025960799706
+   ],
+   "wall_distance_m": 0.03555974039200292,
+   "real": {
+    "verdict": "refused",
+    "reason": "cube too close to the bin wall to grasp (hover: the gripper would touch the bin wall (0.097 m below the rim))"
+   }
+  },
+  {
+   "id": "2026-10-21/10-29-48#110",
+   "source": {
+    "run": "48 (run 10, the full run)",
+    "session": "2026-10-21/10-29-48",
+    "time": "2026-10-21T11:13:48-04:00",
+    "code": "prpl-tidybot #159 10091e0 (skill server, angular grasps)",
+    "log": "full-run-20261021/nuc_logs/2026-10-21/10-29-48/skill_calls.jsonl",
+    "observe_call": 110,
+    "in_bin_config": "current"
+   },
+   "kind": "toss rest",
+   "robot": [
+    1.1092769789782366,
+    -0.793694383845166,
+    -3.1400935440375513
+   ],
+   "arm_seed": [
+    -0.0001,
+    -0.3347,
+    -3.1416,
+    -2.5566,
+    0.0,
+    -0.8296,
+    1.5708
+   ],
+   "arm_seed_source": "motion.jsonl at t=1792595628.78",
+   "bin": {
+    "x": -0.3069735656389924,
+    "y": -0.7900722397215575,
+    "yaw": -1.5707963267948966,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.30997375934814264,
+    "y": -0.9561917693590869,
+    "yaw_deg": 28.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.1661195296375294,
+    -0.003000193709150233
+   ],
+   "wall_distance_m": 0.023880470362470596,
+   "real": {
+    "verdict": "refused",
+    "reason": "cube too close to the bin wall to grasp (hover: the gripper would touch the bin wall (0.097 m below the rim))"
+   }
+  },
+  {
+   "id": "2026-10-21/10-29-48#115",
+   "source": {
+    "run": "48 (run 10, the full run)",
+    "session": "2026-10-21/10-29-48",
+    "time": "2026-10-21T11:15:40-04:00",
+    "code": "prpl-tidybot #159 10091e0 (skill server, angular grasps)",
+    "log": "full-run-20261021/nuc_logs/2026-10-21/10-29-48/skill_calls.jsonl",
+    "observe_call": 115,
+    "in_bin_config": "current"
+   },
+   "kind": "toss rest",
+   "robot": [
+    1.1291089770941922,
+    -0.7874317216209861,
+    3.102191226678439
+   ],
+   "arm_seed": [
+    -0.0001,
+    -0.336,
+    -3.1415,
+    -2.5563,
+    0.0,
+    -0.83,
+    1.5708
+   ],
+   "arm_seed_source": "motion.jsonl at t=1792595740.08",
+   "bin": {
+    "x": -0.31695864252459177,
+    "y": -0.7892696310231803,
+    "yaw": 1.5620696805349246,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.3780577582779618,
+    "y": -0.6517479756981215,
+    "yaw_deg": 46.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.13698323531927284,
+    0.062296876893249614
+   ],
+   "wall_distance_m": 0.05301676468072716,
+   "real": {
+    "verdict": "refused",
+    "reason": "cube too close to the bin wall to grasp (hover: the gripper would touch the bin wall (0.097 m below the rim))"
+   }
+  },
+  {
+   "id": "2026-10-20/11-51-28#c2-1",
+   "source": {
+    "run": "38 (same-side practice x2)",
+    "session": "2026-10-20/11-51-28",
+    "time": "2026-10-20T11:54:09-04:00",
+    "code": "prpl-tidybot 74028dc (toss_cycles, compliant grasps)",
+    "log": "raw/2026-10-20/11-51-28/cycles.json",
+    "cycle": 2,
+    "note": "cycles.json landing",
+    "in_bin_config": "old gripper box"
+   },
+   "kind": "toss rest",
+   "robot": [
+    1.1,
+    -0.78,
+    3.141592653589793
+   ],
+   "arm_seed": [
+    0.0,
+    -0.349066,
+    3.141593,
+    -2.548181,
+    0.0,
+    -0.872665,
+    1.570796
+   ],
+   "arm_seed_source": "retract (toss_cycles plans from the toss pose, arm retracted)",
+   "bin": {
+    "x": -0.28749999999999876,
+    "y": -0.7731249999999991,
+    "yaw": 1.5609788497524288,
+    "length": 0.4,
+    "width": 0.32,
+    "height": 0.19,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": false,
+   "cube": {
+    "x": -0.28330692622908143,
+    "y": -0.6470989582173867,
+    "yaw_deg": 0.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.12606113320072038,
+    -0.002955633805351862
+   ],
+   "wall_distance_m": 0.06893886679927963,
+   "real": {
+    "verdict": null,
+    "reason": "no pick followed: the run ended after this toss (the landing has no yaw; 0 used)"
+   }
+  },
+  {
+   "id": "2026-10-20/11-56-48#c1-1",
+   "source": {
+    "run": "39 (first bin pick)",
+    "session": "2026-10-20/11-56-48",
+    "time": "2026-10-20T11:56:50-04:00",
+    "code": "prpl-tidybot toss_cycles before 63d4a6a (compliant grasps)",
+    "log": "raw/2026-10-20/11-56-48/cycles.json",
+    "cycle": 1,
+    "note": "handed to the person",
+    "in_bin_config": "old gripper box"
+   },
+   "kind": "hand placed",
+   "robot": [
+    1.1,
+    -0.78,
+    3.141592653589793
+   ],
+   "arm_seed": [
+    0.0,
+    -0.349066,
+    3.141593,
+    -2.548181,
+    0.0,
+    -0.872665,
+    1.570796
+   ],
+   "arm_seed_source": "retract (toss_cycles plans from the toss pose, arm retracted)",
+   "bin": {
+    "x": -0.28749999999999876,
+    "y": -0.7712499999999991,
+    "yaw": 1.5609788497524288,
+    "length": 0.4,
+    "width": 0.32,
+    "height": 0.19,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": false,
+   "cube": {
+    "x": -0.29509419208120896,
+    "y": -0.6401063050998952,
+    "yaw_deg": 44.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.1310628203402002,
+    0.008881305641078745
+   ],
+   "wall_distance_m": 0.06393717965979981,
+   "real": {
+    "verdict": "refused",
+    "reason": "cube too close to the bin wall to grasp (hover: the gripper would touch the bin wall (0.078 m below the rim))"
+   }
+  },
+  {
+   "id": "2026-10-20/11-56-48#c1-2",
+   "source": {
+    "run": "39 (first bin pick)",
+    "session": "2026-10-20/11-56-48",
+    "time": "2026-10-20T11:57:47-04:00",
+    "code": "prpl-tidybot toss_cycles before 63d4a6a (compliant grasps)",
+    "log": "raw/2026-10-20/11-56-48/cycles.json",
+    "cycle": 1,
+    "attempt": 2,
+    "in_bin_config": "old gripper box"
+   },
+   "kind": "hand placed",
+   "robot": [
+    1.1,
+    -0.78,
+    3.141592653589793
+   ],
+   "arm_seed": [
+    0.0,
+    -0.349066,
+    3.141593,
+    -2.548181,
+    0.0,
+    -0.872665,
+    1.570796
+   ],
+   "arm_seed_source": "retract (toss_cycles plans from the toss pose, arm retracted)",
+   "bin": {
+    "x": -0.28749999999999876,
+    "y": -0.7712499999999991,
+    "yaw": 1.5609788497524288,
+    "length": 0.4,
+    "width": 0.32,
+    "height": 0.19,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": false,
+   "cube": {
+    "x": -0.317654922010167,
+    "y": -0.7667656583142324,
+    "yaw_deg": 52.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.004188085081713505,
+    0.030197493027441236
+   ],
+   "wall_distance_m": 0.12480250697255876,
+   "real": {
+    "verdict": "executed_missed",
+    "reason": "lateral servo step did not arrive (refused or short)",
+    "gripper": 0.004385974407196045,
+    "closing_turn_deg": null,
+    "stand": [
+     0.34984617710654775,
+     -0.778755693306837,
+     -3.1299063359671315
+    ],
+    "attempts": 1
+   }
+  },
+  {
+   "id": "2026-10-20/12-34-53#c1-1",
+   "source": {
+    "run": "40 (bin pick, measured bin)",
+    "session": "2026-10-20/12-34-53",
+    "time": "2026-10-20T12:34:55-04:00",
+    "code": "prpl-tidybot 63d4a6a (toss_cycles, compliant grasps)",
+    "log": "raw/2026-10-20/12-34-53/cycles.json",
+    "cycle": 1,
+    "note": "handed to the person",
+    "in_bin_config": "current"
+   },
+   "kind": "hand placed",
+   "robot": [
+    1.1,
+    -0.78,
+    3.141592653589793
+   ],
+   "arm_seed": [
+    0.0,
+    -0.349066,
+    3.141593,
+    -2.548181,
+    0.0,
+    -0.872665,
+    1.570796
+   ],
+   "arm_seed_source": "retract (toss_cycles plans from the toss pose, arm retracted)",
+   "bin": {
+    "x": -0.3018749999999987,
+    "y": -0.7831249999999992,
+    "yaw": 1.557706357404939,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.32516847480397754,
+    "y": -0.9289803294454484,
+    "yaw_deg": 6.000000000000001
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    -0.146147735830167,
+    0.02138229192111639
+   ],
+   "wall_distance_m": 0.04385226416983301,
+   "real": {
+    "verdict": "refused",
+    "reason": "cube too close to the bin wall to grasp (hover: the gripper would touch the bin wall (0.098 m below the rim))"
+   }
+  },
+  {
+   "id": "2026-10-20/12-34-53#c1-2",
+   "source": {
+    "run": "40 (bin pick, measured bin)",
+    "session": "2026-10-20/12-34-53",
+    "time": "2026-10-20T12:34:55-04:00",
+    "code": "prpl-tidybot 63d4a6a (toss_cycles, compliant grasps)",
+    "log": "raw/2026-10-20/12-34-53/cycles.json",
+    "cycle": 1,
+    "note": "handed to the person",
+    "in_bin_config": "current"
+   },
+   "kind": "hand placed",
+   "robot": [
+    1.1,
+    -0.78,
+    3.141592653589793
+   ],
+   "arm_seed": [
+    0.0,
+    -0.349066,
+    3.141593,
+    -2.548181,
+    0.0,
+    -0.872665,
+    1.570796
+   ],
+   "arm_seed_source": "retract (toss_cycles plans from the toss pose, arm retracted)",
+   "bin": {
+    "x": -0.3018749999999987,
+    "y": -0.7831249999999992,
+    "yaw": 1.557706357404939,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.3244871679046619,
+    "y": -0.9306638145492753,
+    "yaw_deg": 88.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    -0.14782215867396892,
+    0.02067900725185621
+   ],
+   "wall_distance_m": 0.042177841326031085,
+   "real": {
+    "verdict": "refused",
+    "reason": "cube too close to the bin wall to grasp (hover: the gripper would touch the bin wall (0.097 m below the rim))"
+   }
+  },
+  {
+   "id": "2026-10-20/12-34-53#c1-3",
+   "source": {
+    "run": "40 (bin pick, measured bin)",
+    "session": "2026-10-20/12-34-53",
+    "time": "2026-10-20T12:35:29-04:00",
+    "code": "prpl-tidybot 63d4a6a (toss_cycles, compliant grasps)",
+    "log": "raw/2026-10-20/12-34-53/cycles.json",
+    "cycle": 1,
+    "attempt": 3,
+    "in_bin_config": "current"
+   },
+   "kind": "hand placed",
+   "robot": [
+    1.1,
+    -0.78,
+    3.141592653589793
+   ],
+   "arm_seed": [
+    0.0,
+    -0.349066,
+    3.141593,
+    -2.548181,
+    0.0,
+    -0.872665,
+    1.570796
+   ],
+   "arm_seed_source": "retract (toss_cycles plans from the toss pose, arm retracted)",
+   "bin": {
+    "x": -0.3018749999999987,
+    "y": -0.7831249999999992,
+    "yaw": 1.557706357404939,
+    "length": 0.39,
+    "width": 0.29,
+    "height": 0.21,
+    "wall": 0.005
+   },
+   "bin_is_measured_size": true,
+   "cube": {
+    "x": -0.321843936563796,
+    "y": -0.7760082322911421,
+    "yaw_deg": 64.0
+   },
+   "resting_face": null,
+   "bin_frame_uv": [
+    0.006854772694492264,
+    0.0200603813876415
+   ],
+   "wall_distance_m": 0.11993961861235848,
+   "real": {
+    "verdict": "picked",
+    "reason": null,
+    "gripper": 0.48684211730957033,
+    "closing_turn_deg": 0.0,
+    "stand": [
+     0.34451938662632875,
+     -0.7807256607679433,
+     -3.1362465756298086
+    ],
+    "attempts": 1
+   }
+  }
+ ]
+}
