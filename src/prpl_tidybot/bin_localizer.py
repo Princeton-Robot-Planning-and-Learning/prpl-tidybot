@@ -18,6 +18,11 @@ a calibrated camera is the convex hull of its eight outer corners - the rim and 
 outer walls; whatever is inside the open top lies within that hull. The IoU between
 that silhouette and the mask (averaged over frames, stitch-line rows excluded) is
 maximised per camera, and the best single view is kept.
+
+:func:`localize_bin_rim_edges` is the alternative (``CeilingBinSource(method=
+"rim_edges")``): no mask at all, but the rectangle of the bin's rim whose four sides
+are straight brightness edges, searched for in each camera's top-down view of the
+rim plane.
 """
 
 from __future__ import annotations
@@ -552,6 +557,408 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
     )
 
 
+# ---------------------------------------------------------------- rim edges
+# The rim-edge detector (``bin.method: rim_edges``). Each camera's image is warped
+# onto the plane of the bin's rim through its calibration, where the rim - wherever
+# the bin stands - is an exact length x width rectangle. The search is over position
+# and yaw for the rectangle whose four sides are all straight brightness edges. It
+# needs no colour model, so it does not depend on the cardboard's saturation under
+# each camera's exposure (2026-10-20 replay: 131/131 bins found, 0 wrong, 0/131
+# returned with the bin hidden, unchanged under dimmer, brighter, paler and warmer
+# lighting).
+
+# Grid resolutions of the rim-plane view (m/px): the search, and its refinement.
+_RIM_RES = 0.01
+_RIM_FINE_RES = 0.004
+# Yaws searched (a rectangle repeats every 180 degrees).
+_RIM_YAWS = np.deg2rad(np.arange(0.0, 180.0, 3.0))
+# Frames averaged (the newest), against sensor noise.
+_RIM_FRAMES = 3
+# The whole bin must lie this far inside the chosen camera's view (m): a bin cut by
+# the image border has only some of its sides to show.
+_RIM_VIEW_MARGIN_M = 0.10
+# Thresholds: the weakest rim side's edge score, frozen on the replay's dev runs
+# (weakest true bin 0.034, strongest non-bin 0.011), and the log brightness of the
+# inside relative to the floor ring around it (darkest true bin -0.58).
+RIM_MIN_SCORE = 0.014
+RIM_MAX_DARKNESS = -0.3
+# CeilingBinSource's detectors.
+BIN_METHODS = ("rim_edges", "saturation")
+
+
+def _rim_grid(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    camera: CeilingCamera,
+    centre: Sequence[float],
+    yaw: float,
+    res: float,
+    size: int,
+    z: float,
+) -> tuple[Any, Any]:
+    """(H, G): G maps a pixel (u, v) of a size x size grid centred on ``centre``, +u
+    along the map direction ``yaw`` and +v along yaw - 90 deg, to the map plane at
+    height z; H maps it on to the camera's pixels."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    h = (size - 1) / 2.0
+    grid = np.array(
+        [
+            [res * c, res * s, centre[0] - res * h * (c + s)],
+            [res * s, -res * c, centre[1] - res * h * (s - c)],
+            [0, 0, 1.0],
+        ]
+    )
+    rot: Any = cv.Rodrigues(camera.rvec)[0]
+    plane = np.c_[rot[:, 0], rot[:, 1], rot[:, 2] * z + camera.tvec.reshape(3)]
+    return camera.camera_matrix @ plane @ grid, grid
+
+
+def _rim_warp(img: Any, hom: Any, size: int, interp: int = cv.INTER_LINEAR) -> Any:
+    return cv.warpPerspective(
+        img,
+        hom,
+        (size, size),
+        flags=interp | cv.WARP_INVERSE_MAP,
+        borderMode=cv.BORDER_CONSTANT,
+        borderValue=(0.0, 0.0, 0.0, 0.0),
+    )
+
+
+def _box(img: Any, hu: int, hv: int) -> Any:
+    """Mean over the (2hu+1) x (2hv+1) box centred on each pixel."""
+    return cv.boxFilter(
+        img,
+        cv.CV_32F,
+        (2 * hu + 1, 2 * hv + 1),
+        normalize=True,
+        borderType=cv.BORDER_CONSTANT,
+    )
+
+
+def _shift(img: Any, du: int, dv: int) -> Any:
+    """out[v, u] = img[v + dv, u + du] (zero outside)."""
+    m = np.array([[1, 0, -du], [0, 1, -dv]], np.float32)
+    return cv.warpAffine(
+        img,
+        m,
+        (img.shape[1], img.shape[0]),
+        flags=cv.INTER_NEAREST,
+        borderMode=cv.BORDER_CONSTANT,
+        borderValue=(0.0, 0.0, 0.0, 0.0),
+    )
+
+
+def _log_brightness(bgr: NDArray[np.uint8]) -> Any:
+    gray = cv.cvtColor(bgr, cv.COLOR_BGR2GRAY).astype(np.float32)
+    return cv.GaussianBlur(np.log(gray + 4.0), (0, 0), 1.2)
+
+
+def _side_segments(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    gu: Any, gv: Any, hl: int, hw: int, t: int, inset: int, nseg: int
+) -> list[Any]:
+    """Straight-edge evidence along each rim side, in ``nseg`` segments per side: the
+    mean gradient *across* the side minus the mean gradient *along* it (a straight edge
+    has the first, texture has both)."""
+    out = []
+    for normal, tangent, half_len, off, along_u in (
+        (gv, gu, hl - inset, hw, True),
+        (gu, gv, hw - inset, hl, False),
+    ):
+        e = normal - tangent
+        seg = max(int(half_len / nseg), 1)
+        k = _box(e, seg, t) if along_u else _box(e, t, seg)
+        for sign in (-1, 1):
+            for j in range(nseg):
+                c = int(round(-half_len + (2 * j + 1) * half_len / nseg))
+                out.append(
+                    _shift(k, c, sign * off) if along_u else _shift(k, sign * off, c)
+                )
+    return out
+
+
+def _rim_score_map(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    evidence: Any,
+    valid_img: Any,
+    camera: CeilingCamera,
+    centre: Sequence[float],
+    yaw: float,
+    res: float,
+    size: int,
+    dims: tuple[float, float],
+    z: float,
+    weakest: bool = True,
+) -> tuple[Any, Any]:
+    """(score per grid pixel, G) for a rim of ``dims`` centred on each pixel of the
+    rotated grid.
+
+    ``weakest``: the weakest of 12 side segments (every side must be a straight edge;
+    detects); else the mean of the four sides (localizes). -1 where the rim is not all
+    in view.
+    """
+    hom, grid = _rim_grid(camera, centre, yaw, res, size, z)
+    e = _rim_warp(evidence, hom, size)
+    valid = (_rim_warp(valid_img, hom, size, cv.INTER_NEAREST) > 0).astype(np.float32)
+    hl = int(round(dims[0] / 2 / res))
+    hw = int(round(dims[1] / 2 / res))
+    vmask = cv.erode(valid, np.ones((5, 5), np.uint8))
+    # Per cm of rim, independent of the grid's resolution.
+    k = 0.01 / res
+    gu = np.abs(cv.Sobel(e, cv.CV_32F, 1, 0, ksize=3) / 8.0) * vmask * k
+    gv = np.abs(cv.Sobel(e, cv.CV_32F, 0, 1, ksize=3) / 8.0) * vmask * k
+    inset = max(2, int(round(0.02 / res)))
+    if weakest:
+        t = max(1, int(round(0.01 / res)))
+        score = np.minimum.reduce(_side_segments(gu, gv, hl, hw, t, inset, 3))
+    else:
+        score = np.mean(_side_segments(gu, gv, hl, hw, 1, inset, 1), axis=0)
+    cover = _box(valid, hl + 2, hw + 2)
+    return np.where(cover > 0.97, score, -1.0), grid
+
+
+def _inside_and_ring(
+    p: Any, valid: Any, hl: int, hw: int, res: float
+) -> tuple[Any, Any]:
+    """Mean of ``p`` over the rectangle shrunk by 2 cm, and over a ring 4-12 cm outside
+    it, each over its visible part."""
+    shr = int(round(0.02 / res))
+    r0, r1 = int(round(0.04 / res)), int(round(0.12 / res))
+    pv = p * valid
+    n_in, d_in = _box(pv, hl - shr, hw - shr), _box(valid, hl - shr, hw - shr)
+    n_o0, d_o0 = _box(pv, hl + r0, hw + r0), _box(valid, hl + r0, hw + r0)
+    n_o1, d_o1 = _box(pv, hl + r1, hw + r1), _box(valid, hl + r1, hw + r1)
+    a_o0 = (2 * (hl + r0) + 1) * (2 * (hw + r0) + 1)
+    a_o1 = (2 * (hl + r1) + 1) * (2 * (hw + r1) + 1)
+    inside = n_in / np.maximum(d_in, 1e-6)
+    ring = (n_o1 * a_o1 - n_o0 * a_o0) / np.maximum(d_o1 * a_o1 - d_o0 * a_o0, 1e-6)
+    return inside, ring
+
+
+def _rim_candidates(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    evidence: Any,
+    valid_img: Any,
+    camera: CeilingCamera,
+    exclude: Sequence[Sequence[float]],
+    bounds: Sequence[float],
+    model: BinModel,
+) -> list[tuple[float, float, float, float]]:
+    """(score, x, y, yaw) of the best few separate rim poses one camera sees whose
+    centre is in ``bounds`` and outside every exclusion square, best first."""
+    x0, x1, y0, y1 = bounds
+    centre = ((x0 + x1) / 2, (y0 + y1) / 2)
+    size = int(math.ceil(math.hypot(x1 - x0, y1 - y0) / _RIM_RES)) + 8
+    vv, uu = np.mgrid[0:size, 0:size]
+    cands: list[tuple[float, float, float, float]] = []
+    for yaw in _RIM_YAWS:
+        score, g = _rim_score_map(
+            evidence,
+            valid_img,
+            camera,
+            centre,
+            float(yaw),
+            _RIM_RES,
+            size,
+            (model.length, model.width),
+            model.height,
+        )
+        mx = g[0, 0] * uu + g[0, 1] * vv + g[0, 2]
+        my = g[1, 0] * uu + g[1, 1] * vv + g[1, 2]
+        ok = (mx >= x0) & (mx <= x1) & (my >= y0) & (my <= y1)
+        for ex, ey, half in exclude:
+            ok &= ~((np.abs(mx - ex) < half) & (np.abs(my - ey) < half))
+        score = np.where(ok, score, -1.0)
+        peaks = np.argwhere(
+            (score >= cv.dilate(score, np.ones((9, 9), np.uint8))) & (score > 0)
+        )
+        if len(peaks) == 0:
+            continue
+        vals = score[peaks[:, 0], peaks[:, 1]]
+        for k in np.argsort(-vals)[:5]:
+            r, c = peaks[k]
+            cands.append((float(vals[k]), float(mx[r, c]), float(my[r, c]), float(yaw)))
+    cands.sort(key=lambda t: -t[0])
+    kept: list[tuple[float, float, float, float]] = []
+    for cand in cands:  # one per place (position only)
+        if all(math.hypot(cand[1] - k[1], cand[2] - k[2]) > 0.25 for k in kept):
+            kept.append(cand)
+        if len(kept) >= 6:
+            break
+    return kept
+
+
+def _rim_refine(
+    evidence: Any,
+    valid_img: Any,
+    camera: CeilingCamera,
+    pose: tuple[float, float, float],
+    model: BinModel,
+) -> tuple[float, float, float]:
+    """The pose on a 4 mm grid within 3 cm and 4 degrees of ``pose`` that puts the most
+    edge on the rim."""
+    size = int(round((model.length + 0.36) / _RIM_FINE_RES)) | 1
+    mid, reach = size // 2, int(round(0.03 / _RIM_FINE_RES))
+    best = (-9.0, pose[0], pose[1], pose[2])
+    for dyaw in np.deg2rad(np.arange(-4.0, 4.01, 0.5)):
+        yaw = pose[2] + float(dyaw)
+        score, g = _rim_score_map(
+            evidence,
+            valid_img,
+            camera,
+            pose[:2],
+            yaw,
+            _RIM_FINE_RES,
+            size,
+            (model.length, model.width),
+            model.height,
+            weakest=False,
+        )
+        win = np.full(score.shape, -9.0, np.float32)
+        sl = slice(mid - reach, mid + reach + 1)
+        win[sl, sl] = score[sl, sl]
+        idx = np.unravel_index(int(np.argmax(win)), score.shape)
+        r, c = int(idx[0]), int(idx[1])
+        if score[r, c] > best[0]:
+            mx = g[0, 0] * c + g[0, 1] * r + g[0, 2]
+            my = g[1, 0] * c + g[1, 1] * r + g[1, 2]
+            best = (float(score[r, c]), float(mx), float(my), yaw)
+    return best[1], best[2], best[3]
+
+
+def localize_bin_rim_edges(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-statements
+    frames: Sequence[NDArray[np.uint8]],
+    cameras: Sequence[CeilingCamera],
+    model: BinModel = BinModel(),
+    search_bounds: Sequence[float] = (-1.8, 2.0, -1.8, 1.8),
+    exclude: Sequence[Sequence[float]] = (),
+    min_score: float = RIM_MIN_SCORE,
+    max_darkness: float = RIM_MAX_DARKNESS,
+    diagnostics: dict[str, Any] | None = None,
+) -> BinFit | None:
+    """The bin whose rim is the strongest all-sides-straight-edge rectangle of the
+    model's size, or None.
+
+    The newest few frames are averaged; each camera is searched over the part of
+    ``search_bounds`` it sees, candidates whose centre lies in an ``exclude`` square (x,
+    y, half side) are dropped, and the best candidate of any camera is refined. It is
+    the bin only if its weakest side scores at least ``min_score``, the whole bin lies
+    10 cm inside that camera's view, and its inside is darker than the floor around it
+    (log ratio below ``max_darkness``). The fit's ``iou`` holds the edge score.
+    ``diagnostics``, if given, is filled with the scores and the reason.
+    """
+    t0 = time.perf_counter()
+    stack = [f.astype(np.float32) for f in frames[-_RIM_FRAMES:]]
+    mean = np.mean(stack, axis=0).astype(np.uint8)
+    num = len(cameras)
+    rim_dims = (model.length, model.width)
+    views = []
+    pool: list[tuple[float, int, tuple[float, float, float, float]]] = []
+    for i, (cam, img) in enumerate(zip(cameras, _split(mean, num))):
+        evidence = _log_brightness(img)
+        valid_img = np.full(img.shape[:2], 255, np.uint8)
+        if i > 0:
+            valid_img[:_SEAM_PX] = 0
+        if i < num - 1:
+            valid_img[-_SEAM_PX:] = 0
+        views.append((evidence, valid_img))
+        rows, cols = img.shape[:2]
+        foot = np.array(
+            [
+                cam.to_floor(u, v, model.height)
+                for u, v in ((0, 0), (cols, 0), (0, rows), (cols, rows))
+            ]
+        )
+        seen = (
+            max(search_bounds[0], foot[:, 0].min()),
+            min(search_bounds[1], foot[:, 0].max()),
+            max(search_bounds[2], foot[:, 1].min()),
+            min(search_bounds[3], foot[:, 1].max()),
+        )
+        if seen[0] < seen[1] and seen[2] < seen[3]:
+            for cand in _rim_candidates(evidence, valid_img, cam, exclude, seen, model):
+                pool.append((cand[0], i, cand))
+    pool.sort(key=lambda t: -t[0])
+    diag: dict[str, Any] = {
+        "method": "rim_edges",
+        "reason": "no candidate",
+        "min_score": min_score,
+        "max_darkness": max_darkness,
+        "score": None,
+        "dark": None,
+        "margin_ok": None,
+        "candidates": [
+            {"score": s, "camera": i, "x": k[1], "y": k[2], "yaw": k[3]}
+            for s, i, k in pool[:8]
+        ],
+    }
+    fit: BinFit | None = None
+    if pool:
+        coarse, cam_i, top = pool[0]
+        cam = cameras[cam_i]
+        evidence, valid_img = views[cam_i]
+        fx, fy, fyaw = _rim_refine(evidence, valid_img, cam, top[1:], model)
+        size = int(round((model.length + 0.36) / _RIM_RES)) | 1
+        at_fit, _ = _rim_score_map(
+            evidence,
+            valid_img,
+            cam,
+            (fx, fy),
+            fyaw,
+            _RIM_RES,
+            size,
+            rim_dims,
+            model.height,
+        )
+        score = max(float(at_fit[size // 2, size // 2]), coarse)
+        # The whole bin in view with a margin, and its inside darker than the floor
+        # ring around it.
+        size = int(round((model.length + 0.5) / _RIM_RES)) | 1
+        hom, _ = _rim_grid(cam, (fx, fy), fyaw, _RIM_RES, size, model.height)
+        e = _rim_warp(evidence, hom, size)
+        val = (_rim_warp(valid_img, hom, size, cv.INTER_NEAREST) > 0).astype(np.float32)
+        hl = int(round(model.length / 2 / _RIM_RES))
+        hw = int(round(model.width / 2 / _RIM_RES))
+        m = int(round(_RIM_VIEW_MARGIN_M / _RIM_RES))
+        c0 = size // 2
+        margin_ok = bool(
+            val[c0 - hw - m : c0 + hw + m + 1, c0 - hl - m : c0 + hl + m + 1].min() > 0
+        )
+        inside, ring = _inside_and_ring(e, val, hl - 1, hw - 1, _RIM_RES)
+        dark = float(inside[c0, c0] - ring[c0, c0])
+        yaw = (fyaw + math.pi / 2) % math.pi - math.pi / 2
+        diag.update(
+            x=fx,
+            y=fy,
+            yaw=yaw,
+            camera=cam_i,
+            score=score,
+            dark=dark,
+            margin_ok=margin_ok,
+        )
+        if score < min_score:
+            diag["reason"] = f"edge score {score:.4f} < {min_score}"
+        elif not margin_ok:
+            diag["reason"] = "not wholly in the camera's view"
+        elif dark >= max_darkness:
+            diag["reason"] = f"inside not darker than the floor ({dark:.2f})"
+        else:
+            diag["reason"] = "ok"
+            fit = BinFit(
+                fx,
+                fy,
+                yaw,
+                model.length,
+                model.width,
+                model.height,
+                model.wall,
+                score,
+                1,
+                ((cam_i, fx, fy, yaw, score),),
+                0.0,
+                cam_i,
+            )
+    diag["time_s"] = time.perf_counter() - t0
+    if diagnostics is not None:
+        diagnostics.update(diag)
+    return fit
+
+
 class ConstantBinSource(TargetSource):
     """A bin that is wherever the config says (fake mode)."""
 
@@ -593,8 +1000,12 @@ class CeilingBinSource(TargetSource):
     under ``failure_dir`` (``NN_HH-MM-SS_bin``) so it can be replayed. ``get_target`` is
     the centre of the opening, at rim height.
 
-    ``min_saturation`` is one threshold, or ``{serial: threshold}`` naming every
-    camera (each sees the cardboard under its own exposure and angle).
+    ``method`` picks the detector: ``rim_edges`` (:func:`localize_bin_rim_edges`,
+    thresholds ``rim_min_score`` and ``rim_max_darkness``) or ``saturation``
+    (:func:`localize_bin`, with ``min_saturation``: one threshold, or ``{serial:
+    threshold}`` naming every camera, each seeing the cardboard under its own exposure
+    and angle; None is the darkness mask). Either way the robot's footprint is excluded
+    and a miss is saved, with the rim detector's scores.
     """
 
     def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -615,7 +1026,18 @@ class CeilingBinSource(TargetSource):
         host: str | None = None,
         min_saturation: float | Mapping[str, float] | None = None,
         failure_dir: str | Path | None = None,
+        method: str = "saturation",
+        rim_min_score: float = RIM_MIN_SCORE,
+        rim_max_darkness: float = RIM_MAX_DARKNESS,
     ) -> None:
+        if method not in BIN_METHODS:
+            raise ValueError(
+                f"CeilingBinSource: unknown method {method!r} (one of {BIN_METHODS})"
+            )
+        self._method = method
+        self._rim_min_score = float(rim_min_score)
+        self._rim_max_darkness = float(rim_max_darkness)
+        self.last_diagnostics: dict[str, Any] = {}
         if image_client is None:
             from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
                 CeilingImageClient,
@@ -678,21 +1100,36 @@ class CeilingBinSource(TargetSource):
         """Run the localizer now and return the fit (raises if there is no bin, and
         saves the frames and inputs under ``failure_dir``)."""
         frames, exclude = self._frames(), self._exclusions()
-        fit = localize_bin(
-            frames,
-            self._cameras,
-            self._model,
-            search_bounds=self._search,
-            exclude=exclude,
-            min_iou=self._min_iou,
-            serials=self._serials,
-            darkness=self._darkness,
-            min_saturation=self._per_camera,
-        )
+        self.last_diagnostics = {}
+        if self._method == "rim_edges":
+            fit = localize_bin_rim_edges(
+                frames,
+                self._cameras,
+                self._model,
+                search_bounds=self._search,
+                exclude=exclude,
+                min_score=self._rim_min_score,
+                max_darkness=self._rim_max_darkness,
+                diagnostics=self.last_diagnostics,
+            )
+        else:
+            fit = localize_bin(
+                frames,
+                self._cameras,
+                self._model,
+                search_bounds=self._search,
+                exclude=exclude,
+                min_iou=self._min_iou,
+                serials=self._serials,
+                darkness=self._darkness,
+                min_saturation=self._per_camera,
+            )
         if fit is None:
             self._save_failure(frames, exclude)
+            why = self.last_diagnostics.get("reason")
             raise RuntimeError(
                 f"CeilingBinSource: no bin found in the search box {self._search}"
+                + (f" ({why})" if why else "")
             )
         self.last_fit = fit
         return fit
@@ -713,6 +1150,7 @@ class CeilingBinSource(TargetSource):
         model = self._model
         info = {
             "object": "bin",
+            "method": self._method,
             "time": time.time(),
             "search_bounds": list(self._search),
             "exclusions": [list(e) for e in exclude],
@@ -727,6 +1165,8 @@ class CeilingBinSource(TargetSource):
             },
             "serials": self._serials,
         }
+        if self._method == "rim_edges":
+            info["rim_edges"] = self.last_diagnostics
         (out / "localization.json").write_text(json.dumps(info, indent=1))
         _logger.warning("No bin found; saved the frames and inputs to %s.", out)
 

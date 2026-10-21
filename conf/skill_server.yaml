@@ -45,7 +45,13 @@ pick:
 bin:
   # Both spots: the drivable box plus 0.3 m.
   search_bounds: [-1.8, 2.0, -1.8, 1.8]
-  # The cardboard's HSV saturation threshold per ceiling camera (the lab's
+  # The rim-edge detector (toss_cycles.yaml's bin.method): replaying the 2026-10-20
+  # pilot's 131 looks (51 saved frame sets, 80 video windows) it found the bin in
+  # 131/131 within 2.6 cm, returned no bin in 131/131 of them with the bin hidden
+  # and 8/8 with it against the wall, and is unchanged under dimmer, brighter,
+  # paler and warmer lighting. method: saturation falls back to the thresholds below.
+  method: rim_edges
+  # method: saturation's HSV saturation threshold per ceiling camera (the lab's
   # camera_serials): the top camera sees the far spot, the bottom one the close spot.
   # Replaying the 2026-10-20 pilot's frames, 160/130 found the bin in 57/57 far and
   # 41/41 close looks. One number for both cameras also works: 140 found 56/57 far,
