@@ -62,6 +62,43 @@ class Controller:
 
 CURRENT = Controller(name="current")
 
+_IN_BIN = "pick.top_down.in_bin"
+_MESH = f"{_IN_BIN}.gripper_model=mesh"
+# A: the tilted, partly opened grasp (kinder-baselines #178's semantics) over the
+# tilts the coverage analysis recommends; A178: #178's own tilts.
+_A = (
+    f"{_IN_BIN}.tilts_deg=[0,10,-10,15,-15,20,-20]",
+    f"{_IN_BIN}.openings_mm=[85,70]",
+    _MESH,
+)
+_A178 = (
+    f"{_IN_BIN}.tilts_deg=[0,15,-15,30,-30]",
+    f"{_IN_BIN}.openings_mm=[85,70]",
+    _MESH,
+)
+
+
+def _b(cm: float) -> tuple[str, ...]:
+    """B: the finger links may reach ``cm`` past the inner wall face."""
+    return (_MESH, f"{_IN_BIN}.finger_allowance={cm / 100}")
+
+
+# The candidate controllers, by name (scripts/in_bin_pick_benchmark.py --controller).
+VARIANTS: dict[str, Controller] = {
+    c.name: c
+    for c in [
+        CURRENT,
+        Controller(name="mesh", overrides=(_MESH,)),
+        Controller(name="A", overrides=_A),
+        Controller(name="A178", overrides=_A178),
+        *(Controller(name=f"B{cm}", overrides=_b(cm)) for cm in (0.5, 1.0, 2.0)),
+        *(
+            Controller(name=f"A+B{cm}", overrides=_A + _b(cm)[1:])
+            for cm in (0.5, 1.0, 2.0)
+        ),
+    ]
+}
+
 
 def load_cases(path: Path | str = DEFAULT_FIXTURE) -> list[dict[str, Any]]:
     """The fixture's cases."""
@@ -151,6 +188,8 @@ def run_case(
         "agrees_with_real": None if real is None else _REAL_FOR_SIM[verdict] == real,
         "stand": reply.get("stand"),
         "closing_turn_deg": attempts[-1].get("closing_turn_deg") if attempts else None,
+        "tilt_deg": attempts[-1].get("tilt_deg") if attempts else None,
+        "open_position": attempts[-1].get("open_position") if attempts else None,
         "gripper": reply.get("gripper"),
         "steps": [{"step": m["name"], "reached": m.get("reached")} for m in moves],
         "lifted_above_rim": verdict == "held"
@@ -195,6 +234,7 @@ def summarize(
         "agree": [sum(bool(r["agrees_with_real"]) for r in judged), len(judged)],
         "real_refused_refused_in_sim": count("refused", "refused"),
         "real_picked_held_in_sim": count("picked", "held"),
+        "real_refused_held_in_sim": count("refused", "held"),
         "real_missed_missed_in_sim": count("executed_missed", "missed"),
         "with_wall_contact": [
             sum(bool(r["wall_contacts"]) for r in results),

@@ -27,6 +27,11 @@ from omegaconf import DictConfig
 
 from prpl_tidybot.aimed_toss import Workspace
 from prpl_tidybot.bin_localizer import BinFit, cube_in_bin
+from prpl_tidybot.gripper_shape import (
+    FINGER_LINKS,
+    gripper_link_points,
+    opening_command,
+)
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.real_sim.perceivers.kinematic3d import PrplLab3DPerceiver
 from prpl_tidybot.real_sim.plan_executors.kinematic3d import Kinematic3DPlanExecutor
@@ -70,8 +75,8 @@ def _in_box(xy: Sequence[float], box: Sequence[float]) -> bool:
 
 
 def _find_in(source: Any, box: Sequence[float]) -> tuple[float, float, float] | None:
-    """The cube's (x, y, yaw) inside the floor box, from the source's own in-box
-    search (``find_pose_in_box``, else ``find_in_box`` with yaw 0), or None."""
+    """The cube's (x, y, yaw) inside the floor box, from the source's own in-box search
+    (``find_pose_in_box``, else ``find_in_box`` with yaw 0), or None."""
     finder = getattr(source, "find_pose_in_box", None)
     if callable(finder):
         found = finder(list(box))
@@ -86,14 +91,15 @@ def _find_in(source: Any, box: Sequence[float]) -> tuple[float, float, float] | 
 def _find_cube(
     source: Any, bin_fit: BinFit | None, box: Sequence[float] | None = None
 ) -> dict[str, Any]:
-    """The cube's pose and whether it lies inside the bin (``in_bin``: its centre
-    inside the walls): inside the bin it is in shadow and beyond the floor search, so
-    the bin is looked in first when the source can (run 31). ``box`` (x_min, x_max,
-    y_min, y_max; a bin's fixed floor box, ``bin_stop_box``) counts as the bin too.
+    """The cube's pose and whether it lies inside the bin (``in_bin``: its centre inside
+    the walls): inside the bin it is in shadow and beyond the floor search, so the bin
+    is looked in first when the source can (run 31). ``box`` (x_min, x_max, y_min,
+    y_max; a bin's fixed floor box, ``bin_stop_box``) counts as the bin too.
 
     ``iou`` is the floor localizer's flat-cube fit score when it has one (None for a
     cube found in the bin, whose search fits none). Raises ``RuntimeError`` when the
-    cube is not found."""
+    cube is not found.
+    """
 
     def inside(xy: Sequence[float]) -> bool:
         return bool(
@@ -122,8 +128,8 @@ def _find_cube(
 
 
 def _overlaps(poly: NDArray[np.float64], half: tuple[float, float]) -> bool:
-    """Whether the convex polygon ``poly`` (N x 2) overlaps the rectangle centred on
-    the origin with half extents ``half`` (separating axes)."""
+    """Whether the convex polygon ``poly`` (N x 2) overlaps the rectangle centred on the
+    origin with half extents ``half`` (separating axes)."""
     rect = np.array(
         [
             [-half[0], -half[1]],
@@ -153,36 +159,39 @@ def arm_bin_collision(
     """Why the arm at ``joints``, its base at map pose ``base``, would touch the bin's
     walls, or None.
 
-    Each arm link's collision mesh, and the 2F-85 as a box (the IK model has no
-    gripper mesh), is cut below the rim (plus ``wall_margin``); a part touches a wall
-    unless that cut lies wholly inside the bin's inner footprint or wholly outside its
-    outer one, both by ``wall_margin``. The box is long along the fingers' travel,
-    which is the tool's x axis (the IK site's 'closing' axis is across the fingers).
+    Each arm link's collision mesh, and the 2F-85 (the IK model has no gripper mesh),
+    is cut below the rim (plus ``wall_margin``); a part touches a wall unless that
+    cut lies wholly inside the bin's inner footprint or wholly outside its outer one,
+    both by ``wall_margin`` (:func:`part_wall_problem`). The 2F-85 is one box
+    (``gripper_model: box``), long along the fingers' travel, which is the tool's x
+    axis (the IK site's 'closing' axis is across the fingers); or, with
+    ``gripper_model: mesh``, each of its links as KINDER's gen3_2f85 shapes them at
+    the grasp's opening (:func:`prpl_tidybot.gripper_shape.gripper_link_points`).
     """
     margin = float(in_bin.wall_margin)
     pos, approach, closing = forward_kinematics(joints, geom)
     fingers = np.cross(closing, approach)
-    corners = [
-        pos
-        + a * approach
-        + b * float(in_bin.finger_half_span) * fingers
-        + c * float(in_bin.half_width) * closing
-        for a in (float(in_bin.fingertip_drop), -float(in_bin.gripper_length))
-        for b in (-1.0, 1.0)
-        for c in (-1.0, 1.0)
-    ]
     parts = dict(arm_link_points(joints, geom))
-    parts["gripper"] = np.asarray(corners)
+    if str(_in_bin_option(in_bin, "gripper_model")) == "mesh":
+        tool = np.column_stack([fingers, closing, approach])
+        for name, local in gripper_link_points(geom.open_position).items():
+            parts[f"gripper {name}"] = pos + local @ tool.T
+    else:
+        corners = [
+            pos
+            + a * approach
+            + b * float(in_bin.finger_half_span) * fingers
+            + c * float(in_bin.half_width) * closing
+            for a in (float(in_bin.fingertip_drop), -float(in_bin.gripper_length))
+            for b in (-1.0, 1.0)
+            for c in (-1.0, 1.0)
+        ]
+        parts["gripper"] = np.asarray(corners)
     # Arm frame -> the bin's own frame (its x along its length).
     x, y, theta = base
     mx = x + geom.mounting_offset * math.cos(theta)
     my = y + geom.mounting_offset * math.sin(theta)
     rim = geom.floor_z + bin_fit.height + margin
-    outer = (0.5 * bin_fit.length + margin, 0.5 * bin_fit.width + margin)
-    inner = (
-        0.5 * bin_fit.length - bin_fit.wall - margin,
-        0.5 * bin_fit.width - bin_fit.wall - margin,
-    )
     ct, st = math.cos(theta), math.sin(theta)
     cb, sb = math.cos(bin_fit.yaw), math.sin(bin_fit.yaw)
     for name, points in parts.items():
@@ -192,14 +201,47 @@ def arm_bin_collision(
         wx = mx + ct * low[:, 0] - st * low[:, 1] - bin_fit.x
         wy = my + st * low[:, 0] + ct * low[:, 1] - bin_fit.y
         local = np.c_[cb * wx + sb * wy, -sb * wx + cb * wy]
-        if np.all(np.abs(local[:, 0]) <= inner[0]) and np.all(
-            np.abs(local[:, 1]) <= inner[1]
-        ):
-            continue
-        hull = cv.convexHull(local.astype(np.float32)).reshape(-1, 2).astype(np.float64)
-        if _overlaps(hull, outer):
+        problem = part_wall_problem(name, local, bin_fit, in_bin)
+        if problem is not None:
             depth = (bin_fit.height + geom.floor_z) - float(low[:, 2].min())
-            return f"the {name} would touch the bin wall ({depth:.3f} m below the rim)"
+            return f"{problem} ({depth:.3f} m below the rim)"
+    return None
+
+
+def part_wall_problem(
+    name: str, local: NDArray[np.float64], bin_fit: BinFit, in_bin: Any
+) -> str | None:
+    """Why one part's cut below the rim (``local``: N x 2, the bin's frame) touches a
+    wall, or None: it touches unless it lies wholly inside the inner footprint or wholly
+    outside the outer one, both by ``wall_margin``.
+
+    A finger link (:data:`prpl_tidybot.gripper_shape.FINGER_LINKS`) may instead reach up
+    to ``finger_allowance`` past the inner wall face, when that is set: light contact
+    the cardboard is assumed to give under. The housing and the arm keep the margin.
+    """
+    margin = float(in_bin.wall_margin)
+    inner = (
+        0.5 * bin_fit.length - bin_fit.wall - margin,
+        0.5 * bin_fit.width - bin_fit.wall - margin,
+    )
+    if np.all(np.abs(local[:, 0]) <= inner[0]) and np.all(
+        np.abs(local[:, 1]) <= inner[1]
+    ):
+        return None
+    allowance = float(_in_bin_option(in_bin, "finger_allowance"))
+    link = name.removeprefix("gripper ")
+    if allowance > 0 and link in FINGER_LINKS:
+        past = np.maximum(
+            np.abs(local[:, 0]) - (0.5 * bin_fit.length - bin_fit.wall),
+            np.abs(local[:, 1]) - (0.5 * bin_fit.width - bin_fit.wall),
+        )
+        if float(past.max()) <= allowance:
+            return None
+    outer = (0.5 * bin_fit.length + margin, 0.5 * bin_fit.width + margin)
+    hull = cv.convexHull(local.astype(np.float32)).reshape(-1, 2).astype(np.float64)
+    if _overlaps(hull, outer):
+        label = f"the gripper's {link}" if link != name else f"the {name}"
+        return f"{label} would touch the bin wall"
     return None
 
 
@@ -210,8 +252,8 @@ def _bin_pick_targets(
     in_bin: Any,
     seed: Sequence[float],
 ) -> list[float]:
-    """The waypoint above the cube with the fingertips ``rim_clearance`` above the
-    bin's rim: where the pick into the bin starts and ends."""
+    """The waypoint above the cube with the fingertips ``rim_clearance`` above the bin's
+    rim: where the pick into the bin starts and ends."""
     above_hover = (
         bin_fit.height
         + float(in_bin.rim_clearance)
@@ -232,15 +274,37 @@ def _bin_grasp_geometry(
 ) -> tuple[TopDownPickGeometry | None, str | None]:
     """The pick geometry for a cube inside the bin: of the grasps on its two pairs of
     faces (``closing_turn`` 0 and pi/2), the one that touches no wall, the usual one
-    first; else None and why the usual one would touch."""
-    first: str | None = None
-    for turn in (0.0, math.pi / 2):
-        g = dataclasses.replace(geom, closing_turn=turn)
-        problem = _bin_pick_problem(g, base, cube, bin_fit, in_bin, seed)
-        if problem is None:
-            return g, None
-        first = first or problem
-    return None, first
+    first; else None and why the usual one would touch.
+
+    With more than one tilt or opening configured (``tilts_deg``, ``openings_mm``;
+    kinder-baselines #178's candidates) they are tried in #178's order: tilts as listed
+    (untilted first), within a tilt both pairs of faces, within a pair each opening as
+    listed (fully open first); a refusal then names the untilted reason for each pair of
+    faces and how many candidates were tried.
+    """
+    tilts = [float(t) for t in _in_bin_option(in_bin, "tilts_deg")]
+    openings = [float(o) for o in _in_bin_option(in_bin, "openings_mm")]
+    first: dict[float, str] = {}
+    tried = 0
+    for tilt in tilts:
+        for turn in (0.0, math.pi / 2):
+            for opening in openings:
+                g = dataclasses.replace(
+                    geom,
+                    closing_turn=turn,
+                    tilt=math.radians(tilt),
+                    open_position=opening_command(opening / 1000),
+                )
+                tried += 1
+                problem = _bin_pick_problem(g, base, cube, bin_fit, in_bin, seed)
+                if problem is None:
+                    return g, None
+                first.setdefault(turn, problem)
+    both = "; ".join(f"faces {math.degrees(t):.0f} deg: {p}" for t, p in first.items())
+    _logger.info("No grasp clears the bin's walls (%d tried): %s.", tried, both)
+    if len(tilts) == 1 and len(openings) == 1:
+        return None, first[0.0]
+    return None, f"{both}; {tried} candidates"
 
 
 def _bin_pick_problem(
@@ -251,8 +315,8 @@ def _bin_pick_problem(
     in_bin: Any,
     seed: Sequence[float],
 ) -> str | None:
-    """Why the pick of the cube inside the bin, from ``base``, would touch a wall at
-    the waypoint above the rim, the hover or the grasp, or None."""
+    """Why the pick of the cube inside the bin, from ``base``, would touch a wall at the
+    waypoint above the rim, the hover or the grasp, or None."""
     ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
     yaw = math.radians(cube["yaw_deg"]) - base[2]
     try:
@@ -274,9 +338,12 @@ def _move_arm(
     arm_cfg: DictConfig,
     stop: threading.Event | None = None,
 ) -> bool:
-    """Stream ``goal`` until every joint is within tolerance (wrapped) or time runs
-    out; returns whether it got there. A set ``stop`` ends the move at once
-    (``ArmMotionAborted``), the arm held where it is."""
+    """Stream ``goal`` until every joint is within tolerance (wrapped) or time runs out;
+    returns whether it got there.
+
+    A set ``stop`` ends the move at once (``ArmMotionAborted``), the arm held where it
+    is.
+    """
     for _ in range(int(arm_cfg.max_ticks)):
         _check_stop(stop, arm)
         arm.execute_action(goal, gripper)
@@ -314,8 +381,8 @@ def _cube_source_kwargs(
 def _retract(
     cfg: DictConfig, arm: ArmInterface, stop: threading.Event | None = None
 ) -> None:
-    """Fold the arm to its retract pose under the compliant loop: it needs no
-    precision, and only the grasp itself runs under the stiff onboard controller."""
+    """Fold the arm to its retract pose under the compliant loop: it needs no precision,
+    and only the grasp itself runs under the stiff onboard controller."""
     arm.note_step("retract")
     _move_arm(arm, list(RETRACT_ARM_CONF), arm.get_gripper_state(), cfg.arm_home, stop)
 
@@ -444,13 +511,19 @@ def pick_problem(
 
 
 @dataclasses.dataclass(frozen=True)
-class InBinPick:
+class InBinPick:  # pylint: disable=too-many-instance-attributes
     """The pick out of the bin's clearances (``pick.top_down.in_bin``; m): the
     fingertips ``rim_clearance`` above the rim at the waypoint, the open 2F-85 as a box
     ``finger_half_span`` along its fingers' travel and ``half_width`` across, from
     ``gripper_length`` above the pinch point to ``fingertip_drop`` below it, and no
     planned pose within ``wall_margin`` of a wall. The defaults are the measured ones
-    (conf/same_side_practice.yaml)."""
+    (conf/same_side_practice.yaml).
+
+    The candidates, all off by default: ``tilts_deg`` and ``openings_mm`` (the grasps
+    tried, kinder-baselines #178), ``gripper_model`` (``box`` or ``mesh``: the real
+    2F-85's links) and ``finger_allowance`` (how far past the inner wall face the finger
+    links may reach; mesh only).
+    """
 
     rim_clearance: float = 0.04
     finger_half_span: float = 0.074
@@ -458,6 +531,19 @@ class InBinPick:
     gripper_length: float = 0.124
     fingertip_drop: float = 0.029
     wall_margin: float = 0.01
+    tilts_deg: tuple[float, ...] = (0.0,)
+    openings_mm: tuple[float, ...] = (85.0,)
+    gripper_model: str = "box"
+    finger_allowance: float = 0.0
+
+
+_IN_BIN_DEFAULTS = InBinPick()
+
+
+def _in_bin_option(in_bin: Any, name: str) -> Any:
+    """``in_bin.<name>``, or the default when the block predates the option."""
+    value = in_bin.get(name) if hasattr(in_bin, "get") else getattr(in_bin, name, None)
+    return getattr(_IN_BIN_DEFAULTS, name) if value is None else value
 
 
 # Why a pick may not start because the cube is in the bin and the pick out of it is off.
@@ -519,9 +605,12 @@ def _place_top_down(  # pylint: disable=too-many-arguments,too-many-positional-a
     bin_fit: BinFit | None = None,
 ) -> str | None:
     """The top-down pick in reverse: carry the held cube to the map point `target` and
-    set it down. The closed gripper is lowered to the grasp height, where it lifted the
-    cube off the floor, so the cube rests on the floor before the gripper opens (the
-    foam cube bounces if dropped). Returns a stop reason, or None once placed."""
+    set it down.
+
+    The closed gripper is lowered to the grasp height, where it lifted the cube off the
+    floor, so the cube rests on the floor before the gripper opens (the foam cube
+    bounces if dropped). Returns a stop reason, or None once placed.
+    """
     obs, _ = real_env.reset()
     robot = (obs.map_base_pose.x, obs.map_base_pose.y, obs.map_base_pose.theta())
     stand = standoff_pose(
@@ -580,7 +669,9 @@ _ANGULAR_ARRIVAL_DEG = 1.0
 class _Mover:
     """How the grasp sequence moves the arm and gripper: under the onboard position
     controller (`_AngularMover`) or the compliant torque loop (`_CompliantMover`).
-    One controller is used for a whole run; nothing switches mid-episode."""
+
+    One controller is used for a whole run; nothing switches mid-episode.
+    """
 
     name = ""
     # Set by the skill server: once set, the next move or gripper command raises
@@ -615,8 +706,11 @@ class _Mover:
         """Hand the arm back to the compliant loop, holding where it is."""
 
     def move(self, name: str, goal: list[float], correct: bool = False) -> bool:
-        """Move to `goal`; record it; return whether it arrived. `correct` asks a
-        controller that can settle short of its goal to correct onto it."""
+        """Move to `goal`; record it; return whether it arrived.
+
+        `correct` asks a controller that can settle short of its goal to correct onto
+        it.
+        """
         raise NotImplementedError
 
     def gripper(self, position: float) -> float:
@@ -702,14 +796,14 @@ class _AngularMover(_Mover):
 class _CompliantMover(_Mover):
     """The compliant torque loop.
 
-    As in Tom Silver's cylinder servo, a move streams its joint target and waits for
-    the arm to arrive (or stop): the loop settles a few degrees short wherever its
-    gravity and friction models miss (24 mm at the gripper in run 3), and for the
-    hover and the servo's nudges that does not matter, because the wrist camera
-    measures the cube from wherever the gripper really is. Only the descent, which
-    the camera cannot watch, is corrected (`correct=True`): after the arm settles the
-    pinch point is re-aimed past the goal by the measured error, never below the
-    grasp height, so an arm held up by the floor or the cube is not pushed into it.
+    As in Tom Silver's cylinder servo, a move streams its joint target and waits for the
+    arm to arrive (or stop): the loop settles a few degrees short wherever its gravity
+    and friction models miss (24 mm at the gripper in run 3), and for the hover and the
+    servo's nudges that does not matter, because the wrist camera measures the cube from
+    wherever the gripper really is. Only the descent, which the camera cannot watch, is
+    corrected (`correct=True`): after the arm settles the pinch point is re-aimed past
+    the goal by the measured error, never below the grasp height, so an arm held up by
+    the floor or the cube is not pushed into it.
     """
 
     name = "compliant"
@@ -772,7 +866,7 @@ class _CompliantMover(_Mover):
             if near_floor and aim[2] < goal_pos[2]:
                 aim[2] = goal_pos[2]
             command = pointing_down_joints(
-                aim, yaw, self.geom, seed=self.arm.get_arm_state()
+                aim, yaw, self.geom, seed=self.arm.get_arm_state(), tilt=self.geom.tilt
             )
         measured = list(self.arm.get_arm_state())
         err = forward_kinematics(measured, self.geom)[0] - goal_pos
@@ -834,10 +928,12 @@ class _CompliantMover(_Mover):
         )
 
     def _settle(self, command: list[float]) -> bool:
-        """Stream `command` until the arm is within `arrive_deg` of it, or has moved
-        and stopped (it can settle short of the command), or `max_ticks` pass. The
-        first quiet ticks after a new command are before the arm starts to move, so
-        stillness only counts once it has moved or been streamed for a while."""
+        """Stream `command` until the arm is within `arrive_deg` of it, or has moved and
+        stopped (it can settle short of the command), or `max_ticks` pass.
+
+        The first quiet ticks after a new command are before the arm starts to move, so
+        stillness only counts once it has moved or been streamed for a while.
+        """
         self.command = command
         arrive = math.radians(float(self.td.get("arrive_deg", 1.0)))
         start = np.array(self.arm.get_arm_state())
@@ -885,11 +981,13 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     in_bin: Any = None,
 ) -> tuple[bool, str | None]:
     """One grasp from where the base parked at `cube`: (held, stop reason or None).
+
     ``step`` is told each step (the ceiling video's label); ``read`` maps the gripper's
     reading after closing (fake mode's gripper closes on nothing). The wrist clip
     ``clip`` is left recording when the cube is held. With ``bin_fit`` the cube is
     inside the bin: the arm goes through the waypoint above the rim, and no arm pose
-    touching a wall is commanded."""
+    touching a wall is commanded.
+    """
     td = cfg.pick.top_down
     ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
     yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
@@ -925,6 +1023,8 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         record["pick_attempts"][-1]["closing_turn_deg"] = math.degrees(
             geom.closing_turn
         )
+        record["pick_attempts"][-1]["tilt_deg"] = math.degrees(geom.tilt)
+        record["pick_attempts"][-1]["open_position"] = geom.open_position
         above = _bin_pick_targets(
             geom, (ax, ay, yaw_rel), bin_fit, in_bin, arm.get_arm_state()
         )
@@ -1005,8 +1105,8 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
     waypoint over the rim, and ``clear`` (why a pose would touch the bin, or None)
     refuses any servo step or grasp that would.
 
-    Returns (held, gripper reading, note, servo log); the note says why the gripper
-    was not closed, if it was not.
+    Returns (held, gripper reading, note, servo log); the note says why the gripper was
+    not closed, if it was not.
     """
     td = mover.td
     ax, ay, yaw = start
@@ -1022,7 +1122,7 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
 
     mover.begin()
     try:
-        mover.gripper(0.0)
+        mover.gripper(geom.open_position)
         if above is not None and not mover.move("above", above):
             mover.move("above", above)
             return False, mover.arm.get_gripper_state(), "above did not arrive", None
@@ -1095,9 +1195,9 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
 def _servo_step_is_small(
     here: Sequence[float], target: Sequence[float], td: Any
 ) -> bool:
-    """As in the cylinder servo, refuse a nudge whose IK jumps an arm joint by more
-    than `max_joint_step` (a branch flip near a singularity); the wrist (joint 7) may
-    turn further, up to `max_wrist_step`, to square the fingers to the cube."""
+    """As in the cylinder servo, refuse a nudge whose IK jumps an arm joint by more than
+    `max_joint_step` (a branch flip near a singularity); the wrist (joint 7) may turn
+    further, up to `max_wrist_step`, to square the fingers to the cube."""
     jump = np.abs(_wrap(np.asarray(target) - np.asarray(here)))
     arm_limit = float(td.get("max_joint_step", 0.2))
     wrist_limit = float(td.get("max_wrist_step", 0.9))
@@ -1134,8 +1234,8 @@ def _servo_log(result: TopDownServoResult) -> dict[str, Any]:
 def _build_lateral_servo(
     cfg: DictConfig, source: ImageSource | None, log_dir: Path | None
 ) -> TopDownLateralServo | None:
-    """Tom Silver's align loop from ``pick.top_down.lateral_servo``, or None when it
-    is off or there is no wrist camera."""
+    """Tom Silver's align loop from ``pick.top_down.lateral_servo``, or None when it is
+    off or there is no wrist camera."""
     td = cfg.pick.top_down
     lateral_cfg = td.get("lateral_servo")
     if lateral_cfg is None or not lateral_cfg.get("enabled", False):
@@ -1194,9 +1294,11 @@ def _set_gripper(
 
 
 class _CeilingRecorder:
-    """Films the whole run from the ceiling cameras into <log_dir>/ceiling.mp4,
-    stamping each frame with the time and the step last asked about. Frames are
-    encoded as they arrive (H.264), so a long run costs no memory."""
+    """Films the whole run from the ceiling cameras into <log_dir>/ceiling.mp4, stamping
+    each frame with the time and the step last asked about.
+
+    Frames are encoded as they arrive (H.264), so a long run costs no memory.
+    """
 
     def __init__(self, cfg: DictConfig, log_dir: Path | None) -> None:
         video_cfg = cfg.get("ceiling_video")

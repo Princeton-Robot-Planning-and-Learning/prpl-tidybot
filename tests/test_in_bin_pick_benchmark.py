@@ -7,8 +7,10 @@ import math
 
 import pytest
 
+from prpl_tidybot.gripper_shape import FINGER_LINKS
 from prpl_tidybot.in_bin_pick_benchmark import (
     CURRENT,
+    VARIANTS,
     Controller,
     load_cases,
     run_case,
@@ -151,3 +153,43 @@ def test_the_summary_counts_agreement_as_x_of_y(results):
     picked = [_result(results, i) | {"id": i} for i in PICKED]
     summary = summarize(picked, CASES)
     assert summary["real_picked_held_in_sim"] == [len(PICKED), len(PICKED)]
+
+
+# The candidate controllers on the real rests (sim mode; a "held" is the kinematic
+# sim's geometric hold check, with walls that stop nothing).
+A_RESCUES = {
+    "2026-10-20/11-56-48#c1-1",  # run 39, 6.4 cm, tilt +15 at 70 mm
+    "2026-10-20/12-34-53#c1-1",  # run 40, 4.4 cm, square to the wall, tilt +10
+    "2026-10-20/12-34-53#c1-2",  # run 40, 4.2 cm, square to the wall, tilt -20
+}
+REAL_PICKS_AND_REFUSALS = [
+    c["id"] for c in CASES if c["real"]["verdict"] in ("picked", "refused")
+]
+
+
+@pytest.mark.parametrize("case_id", REAL_PICKS_AND_REFUSALS)
+def test_the_tilted_grasp_keeps_every_real_pick_and_rescues_none_of_run_10(case_id):
+    """A (tilts 0/+-10/+-15/+-20 deg, 85 then 70 mm, the real gripper's links): the 4
+    real picks are still held, untilted and fully open; of the 8 real refusals only runs
+    39-40's 3 hand-placed cubes are rescued, none of run 10's 5 toss rests (2.3-5.6 cm
+    from a wall, 24-60 deg to it); no pose touches a wall in sim."""
+    result = run_case(BY_ID[case_id], VARIANTS["A"])
+    real = BY_ID[case_id]["real"]["verdict"]
+    if real == "picked":
+        assert result["verdict"] == "held"
+        assert (result["tilt_deg"], result["open_position"]) == (0.0, 0.0)
+    else:
+        assert (result["verdict"] == "held") == (case_id in A_RESCUES)
+    assert result["wall_contacts"] == []
+
+
+def test_light_finger_contact_rescues_a_run_10_refusal_by_touching_the_wall():
+    """B (finger links up to 1 cm past the inner face): run 10's 5.6 cm rest is reached,
+    and it is reached by the finger linkage going into the wall in sim:
+
+    what B buys is contact, which the sim's walls do not resist.
+    """
+    result = run_case(BY_ID["2026-10-21/10-29-48#96"], VARIANTS["B1.0"])
+    assert result["verdict"] == "held"
+    links = {c["link"] for c in result["wall_contacts"]}
+    assert links and links <= FINGER_LINKS

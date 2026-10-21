@@ -76,6 +76,18 @@ pick:
       gripper_length: 0.124
       fingertip_drop: 0.029
       wall_margin: 0.01
+      # Candidate controllers, off by default (scripts/in_bin_pick_benchmark.py
+      # compares them in sim). The grasps tried, in order: each tilt (deg, about the
+      # fingers' travel axis, so the pads stay square to their faces; kinder-baselines
+      # #178), both pairs of faces, each opening (mm: 85 fully open, 70 = #178's cube
+      # width + 2 cm). gripper_model: box (the box above) or mesh (KINDER's 2F-85,
+      # link by link, at the grasp's opening). finger_allowance (m, mesh only): how
+      # far past the inner wall face the finger links may reach; the housing, wrist
+      # and arm keep wall_margin.
+      tilts_deg: [0.0]
+      openings_mm: [85.0]
+      gripper_model: box
+      finger_allowance: 0.0
 
 # mode=sim: the same loop on the kinematic TidyBot, with the bin's walls in the scene
 # (sim.bin: x, y, yaw deg; sim_safety.json gives the arm's least clearance to them per
