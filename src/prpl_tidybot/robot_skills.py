@@ -348,7 +348,9 @@ def _cube_source_kwargs(
     """The ceiling localizer searches everywhere the arm can grasp from inside the
     drivable box, not just the box itself (a bin just past its edge), and saves the
     frames of any missed localization beside the run's logs."""
-    if not str(target_cfg["_target_"]).endswith("CeilingCubeTargetSource"):
+    if not str(target_cfg["_target_"]).endswith(
+        ("CeilingCubeTargetSource", "CeilingCubeDetectorSource")
+    ):
         return {}
     bounds = grasp_search_bounds(
         tuple(cfg.preview.floor_bounds), geometry_from_config(cfg.pick.get("top_down"))

@@ -1099,7 +1099,20 @@ class CeilingBinSource(TargetSource):
     def localize(self) -> BinFit:
         """Run the localizer now and return the fit (raises if there is no bin, and
         saves the frames and inputs under ``failure_dir``)."""
-        frames, exclude = self._frames(), self._exclusions()
+        return self.localize_frames(self._frames(), self._exclusions())
+
+    @property
+    def search_bounds(self) -> tuple[float, ...]:
+        """Where the bin's centre is searched for (x_min, x_max, y_min, y_max)."""
+        return self._search
+
+    def localize_frames(
+        self, frames: Sequence[NDArray[np.uint8]], exclude: Sequence[Sequence[float]]
+    ) -> BinFit:
+        """:meth:`localize` on frames grabbed elsewhere (one look's shared grab):
+
+        touches neither client, so it may run on another thread.
+        """
         self.last_diagnostics = {}
         if self._method == "rim_edges":
             fit = localize_bin_rim_edges(
