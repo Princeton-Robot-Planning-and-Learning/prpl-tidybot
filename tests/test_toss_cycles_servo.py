@@ -291,9 +291,9 @@ def test_a_nudge_whose_ik_flips_branch_is_refused(tmp_path, monkeypatch):
     def flipping(ax, ay, yaw, geom, seed=None):
         calls["n"] += 1
         hover, grasp = real(ax, ay, yaw, geom, seed=seed)
-        # The pick's plan and the grasp's own check and targets come first; then the
-        # servo's nudges.
-        if calls["n"] >= 4:
+        # The pick's plan and its bin wall check, the grasp's own check and its bin
+        # wall check, and its targets come first; then the servo's nudges.
+        if calls["n"] >= 6:
             hover = list(hover)
             hover[3] += 1.0
         return hover, grasp
