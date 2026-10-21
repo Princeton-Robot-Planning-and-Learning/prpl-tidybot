@@ -114,7 +114,10 @@ def in_calibrated_region(
 ) -> bool:
     """Whether the floor point (x, y) projects inside the camera's calibrated image
     region (``camera_corners`` in ``camera_params/<lab>/<serial>.json``), where its
-    extrinsics were fitted. Unknown regions count as calibrated."""
+    extrinsics were fitted.
+
+    Unknown regions count as calibrated.
+    """
     path = next(CAMERA_PARAMS_DIR.glob(f"*/{serials[index]}.json"), None)
     if path is None:
         return True
@@ -179,11 +182,12 @@ def _cube_like(  # pylint: disable=too-many-arguments,too-many-positional-argume
 ) -> bool:
     """Whether a blob is the size and shape a cube makes at its spot on the floor.
 
-    Each candidate costs a full pose fit, and the clutter in the lab (shelf edges,
-    tape, specks) is never cube-sized and square-ish there. A blob cut by the stitch
-    line is only held to the upper size bound, since part of the cube is hidden; one
-    cut by the outer image border is rejected (the vignetted border passes the colour
-    test in cube-sized pieces, and no camera sees a cube there whole)."""
+    Each candidate costs a full pose fit, and the clutter in the lab (shelf edges, tape,
+    specks) is never cube-sized and square-ish there. A blob cut by the stitch line is
+    only held to the upper size bound, since part of the cube is hidden; one cut by the
+    outer image border is rejected (the vignetted border passes the colour test in cube-
+    sized pieces, and no camera sees a cube there whole).
+    """
     expected = [
         cv.contourArea(
             cube_silhouette(camera, xy[0], xy[1], yaw, side).astype(np.float32)
@@ -250,8 +254,10 @@ def fit_cube_pose(
     side: float,
     only: Sequence[int] | None = None,
 ) -> CubeFit | None:
-    """3-DoF silhouette fit around `guess_xy`; masks are averaged over `frames`
-    first. ``only`` restricts the fit to those camera indices."""
+    """3-DoF silhouette fit around `guess_xy`; masks are averaged over `frames` first.
+
+    ``only`` restricts the fit to those camera indices.
+    """
     rows = _camera_rows(frames[0], len(cameras))
     views = []
     for i, cam in enumerate(cameras):
@@ -280,27 +286,19 @@ def fit_cube_pose(
         return None
 
     def score(x: float, y: float, yaw: float) -> float:
-        total = 0.0
-        for cam, u0, v0, prob, valid in views:
-            # Sub-pixel, anti-aliased rasterisation keeps the score smooth in the pose.
-            sil = np.zeros(prob.shape, np.float32)
-            poly = ((cube_silhouette(cam, x, y, yaw, side) - [u0, v0]) * 16).astype(
-                np.int32
-            )
-            cv.fillConvexPoly(sil, poly, (1.0,), lineType=cv.LINE_AA, shift=4)
-            sil = sil * valid
-            inter = float((sil * prob).sum())
-            total += inter / (float(prob.sum()) + float(sil.sum()) - inter)
-        return total / len(views)
+        return float(_scores(views, np.array([x]), np.array([y]), yaw, side)[0])
 
+    # The grid, one yaw's (x, y) offsets at a time: the first best pose in yaw, dx, dy
+    # order, as the one-pose-at-a-time loop found it (the scores are bit-identical).
     best_score, best = -1.0, np.zeros(3)
+    offsets = np.arange(-0.04, 0.0401, 0.005)
+    xs = guess_xy[0] + np.repeat(offsets, len(offsets))
+    ys = guess_xy[1] + np.tile(offsets, len(offsets))
     for yaw in np.deg2rad(np.arange(-45.0, 45.0, 3.0)):
-        for dx in np.arange(-0.04, 0.0401, 0.005):
-            for dy in np.arange(-0.04, 0.0401, 0.005):
-                cand = np.array([guess_xy[0] + dx, guess_xy[1] + dy, yaw])
-                sc = score(*cand)
-                if sc > best_score:
-                    best_score, best = sc, cand
+        scores = _scores(views, xs, ys, float(yaw), side)
+        k = int(np.argmax(np.where(np.isnan(scores), -np.inf, scores)))
+        if scores[k] > best_score:
+            best_score, best = float(scores[k]), np.array([xs[k], ys[k], yaw])
     step = np.array([0.0025, 0.0025, math.radians(1.5)])
     while step[0] > 2e-4:  # coordinate descent with shrinking steps
         improved = False
@@ -317,6 +315,66 @@ def fit_cube_pose(
     return CubeFit(float(best[0]), float(best[1]), float(yaw), best_score, len(views))
 
 
+# Poses scored per batch in :func:`_scores`.
+_CHUNK = 8
+_View = tuple[CeilingCamera, int, int, NDArray[np.float64], NDArray[np.float64]]
+
+
+def _scores(
+    views: Sequence[_View],
+    xs: NDArray[np.float64],
+    ys: NDArray[np.float64],
+    yaw: float,
+    side: float,
+) -> NDArray[np.float64]:
+    """The mean silhouette IoU over ``views`` of a cube at each (xs[k], ys[k], yaw).
+
+    Batched over the poses but computed exactly as one pose at a time was: the same
+    per-point projection, hull and anti-aliased fill, and each pose's sums reduced
+    over its own contiguous row, so every score is bit-identical to the scalar one.
+    """
+    c, s = math.cos(yaw), math.sin(yaw)
+    local = _CORNERS * side
+    n = len(xs)
+    world = np.empty((n, len(local), 3))
+    world[:, :, 0] = xs[:, None] + c * local[:, 0] - s * local[:, 1]
+    world[:, :, 1] = ys[:, None] + s * local[:, 0] + c * local[:, 1]
+    world[:, :, 2] = local[:, 2]
+    total: Any = 0.0
+    for cam, u0, v0, prob, valid in views:
+        px = cam.project(world.reshape(-1, 3)).astype(np.float32).reshape(n, -1, 2)
+        # The hull's vertices are input points, so each pose's polygon is its hull's
+        # indices into these (window pixels, 4 fractional bits).
+        fixed = ((px.astype(np.float64) - [u0, v0]) * 16).astype(np.int32)
+        prob_sum = float(prob.sum())
+        inter, sums = np.empty(n), np.empty(n)
+        # Chunks of poses small enough to stay in cache.
+        size = min(n, _CHUNK)
+        sil = np.empty((size, *prob.shape), np.float32)
+        masked = np.empty(sil.shape)
+        both = np.empty(sil.shape)
+        for start in range(0, n, size):
+            m = min(size, n - start)
+            sil[:m] = 0.0
+            for k in range(m):
+                hull = cv.convexHull(px[start + k], returnPoints=False).ravel()
+                # Sub-pixel, anti-aliased rasterisation keeps the score smooth in the
+                # pose.
+                cv.fillConvexPoly(
+                    sil[k],
+                    fixed[start + k][hull],
+                    (1.0,),
+                    lineType=cv.LINE_AA,
+                    shift=4,
+                )
+            np.multiply(sil[:m], valid, out=masked[:m])
+            np.multiply(masked[:m], prob, out=both[:m])
+            inter[start : start + m] = both[:m].reshape(m, -1).sum(axis=1)
+            sums[start : start + m] = masked[:m].reshape(m, -1).sum(axis=1)
+        total = total + inter / (prob_sum + sums - inter)
+    return np.asarray(total / len(views), np.float64)
+
+
 def localize_cube(
     frames: Sequence[NDArray[np.uint8]],
     cameras: Sequence[CeilingCamera],
@@ -328,8 +386,7 @@ def localize_cube(
     serials: Sequence[str] | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> CubeFit | None:
-    """The best-fitting cube in the drivable area, or None if nothing fits well
-    enough.
+    """The best-fitting cube in the drivable area, or None if nothing fits well enough.
 
     ``fusion="best_view"`` (default) fits each camera on its own and keeps the best;
     ``"fused"`` scores every camera that sees the cube together, which is only right
@@ -445,8 +502,8 @@ def find_cube_pose_in_box(  # pylint: disable=too-many-locals
     min_area: float = 40.0,
     side: float = 0.05,
 ) -> tuple[float, float, float] | None:
-    """The cube's (x, y, yaw) inside the floor box ``box`` (x_min, x_max, y_min,
-    y_max), e.g. the bin, or None.
+    """The cube's (x, y, yaw) inside the floor box ``box`` (x_min, x_max, y_min, y_max),
+    e.g. the bin, or None.
 
     Inside the bin the cube is in shadow and beyond the floor search (run 31), so this
     tests hue only, within the box's image: the largest blue blob of the last frame, in
@@ -574,8 +631,9 @@ class CeilingCubeTargetSource(TargetSource):
     def localize(self) -> CubeFit:
         """Run the localizer now and return the fit (raises if there is no cube).
 
-        A miss is retried with fresh frames; each miss saves its frames and inputs
-        under ``failure_dir`` so it can be replayed."""
+        A miss is retried with fresh frames; each miss saves its frames and inputs under
+        ``failure_dir`` so it can be replayed.
+        """
         fit = None
         for _ in range(1 + self._retries):
             frames, exclude = self._frames(), self._exclusions()
@@ -661,8 +719,8 @@ class CeilingCubeTargetSource(TargetSource):
 
     def alternates(self) -> list[tuple[float, float, float]]:
         """The other cameras' estimates of the cube from the last localization, most
-        confident first, where they differ from the chosen one by over 1 cm (the
-        cameras disagree by ~3 cm in their overlap)."""
+        confident first, where they differ from the chosen one by over 1 cm (the cameras
+        disagree by ~3 cm in their overlap)."""
         fit = self.last_fit
         if fit is None:
             return []
