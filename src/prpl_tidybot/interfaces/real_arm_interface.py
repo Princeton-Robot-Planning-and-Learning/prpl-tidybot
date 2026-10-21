@@ -17,6 +17,16 @@ class RealArmInterface(ArmInterface):
         self.manager.connect()
         self.arm = self.manager.Arm()  # type: ignore # pylint: disable=no-member
         self.arm.reset(reset_arm=reset_arm)
+        # Whether the arm server's cyclic loop runs: only then does it update the
+        # joint angles and gripper position that get_arm_state and get_gripper_state
+        # return (reset() ends by resuming it). Bookkeeping on this side only.
+        self._cyclic = True
+
+    def readings_are_live(self) -> bool:
+        """True while the arm server's cyclic loop runs; while it is released (an
+        angular or gripper move under the onboard controller, the toss) the readings
+        hold their last value."""
+        return self._cyclic
 
     def get_arm_state(self) -> list[float]:
         return self.arm.get_joint_angles()
@@ -30,11 +40,13 @@ class RealArmInterface(ArmInterface):
     def release(self) -> None:
         """Stop the low-level loop; the Kinova returns to high-level servoing, where its
         onboard controller and any gamepad plugged into the base take over."""
+        self._cyclic = False
         self.arm.release()
 
     def resume(self) -> None:
         """Restart the low-level loop from the arm's current configuration."""
         self.arm.resume()
+        self._cyclic = True
 
     def move_angular(self, goal: list[float]) -> list[float]:
         """One blocking ``move_angular`` on the arm server. The onboard controller
@@ -61,9 +73,15 @@ class RealArmInterface(ArmInterface):
     ) -> dict[str, float] | None:
         """Run the toss on the arm server (``Arm.toss``); blocks until it is done.
         Returns the swing's start time (after the wind-up)."""
-        result = self.arm.toss(
-            heading=heading, max_vel=max_vel, gripper_release_ms=gripper_release_ms
-        )
+        # The arm server releases the cyclic loop for the toss and always resumes it
+        # after (Arm.toss's finally).
+        self._cyclic = False
+        try:
+            result = self.arm.toss(
+                heading=heading, max_vel=max_vel, gripper_release_ms=gripper_release_ms
+            )
+        finally:
+            self._cyclic = True
         return dict(result) if isinstance(result, dict) else None
 
     def close(self) -> None:

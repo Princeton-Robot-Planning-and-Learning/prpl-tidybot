@@ -74,3 +74,10 @@ skill_server:
   # this IoU (a cube resting on a face fits at ~0.9; the localizer drops a fit below
   # its own min_iou, 0.6).
   upright_min_iou: 0.75
+
+recording:
+  # The skill server samples the arm's joints, the gripper, the base's odometry and
+  # map poses and the skill call in progress this often (Hz) into
+  # <log dir>/motion.jsonl, read only, so a real session can be replayed in sim
+  # (prpl_tidybot.motion_log). 0 turns it off.
+  motion_hz: 20.0

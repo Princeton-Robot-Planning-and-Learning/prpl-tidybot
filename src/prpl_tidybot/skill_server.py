@@ -95,6 +95,8 @@ from prpl_tidybot.aimed_toss import (
 )
 from prpl_tidybot.bin_localizer import BinFit, ConstantBinSource, cube_in_bin
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
+from prpl_tidybot.interfaces.base_interface import RealBaseInterface
+from prpl_tidybot.motion_log import MarkerPoseReader, MotionLog, se2_xyt
 from prpl_tidybot.robot_skills import (
     InBinPick,
     _build_lateral_servo,
@@ -195,6 +197,7 @@ def _logged(method: _F) -> _F:
         bound.apply_defaults()
         call_args = {k: v for k, v in bound.arguments.items() if k != "self"}
         index = self.calls.next_index()
+        self.call_started(index)
         shown = ", ".join(f"{k}={v}" for k, v in call_args.items())
         self.label(f"#{index} {method.__name__}({shown})")
         entry: dict[str, Any] = {
@@ -214,6 +217,7 @@ def _logged(method: _F) -> _F:
         finally:
             entry["end"] = time.time()
             entry["duration_s"] = entry["end"] - entry["start"]
+            self.call_ended(index)
             self.calls.write(entry)
 
     return wrapper  # type: ignore[return-value]
@@ -318,6 +322,11 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         self.stop_event = threading.Event()
         self.gripper_command = 1.0 if arm.get_gripper_state() >= _CLOSED else 0.0
         self.calls = _CallLog(log_dir)
+        # The skill calls in progress (indices), replaced whole so that the motion
+        # log reads it without a lock; the lock is for the writers.
+        self.active_calls: tuple[int, ...] = ()
+        self._active_lock = threading.Lock()
+        self.motion_log: MotionLog | None = None
         self._wrist_source = wrist_source
         record = bool(cfg.pick.top_down.get("record_wrist", True))
         self.wrist = _WristRecorder(wrist_source if record else None, log_dir)
@@ -333,6 +342,16 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         self._look: _Look | None = None
 
     # ----------------------------------------------------------------- perception
+
+    def call_started(self, index: int) -> None:
+        """Mark skill call ``index`` in progress (for the motion log)."""
+        with self._active_lock:
+            self.active_calls = self.active_calls + (index,)
+
+    def call_ended(self, index: int) -> None:
+        """Mark skill call ``index`` finished."""
+        with self._active_lock:
+            self.active_calls = tuple(i for i in self.active_calls if i != index)
 
     def label(self, text: str) -> None:
         """Label the ceiling video (and the log) with what is happening now."""
@@ -833,6 +852,8 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
     def close(self, release_robot: bool = True) -> None:
         """Finish the recordings and release the sources; with ``release_robot`` also
         the robot's clients (the arm's torque loop). Not served."""
+        if self.motion_log is not None:
+            self.motion_log.close()
         self.wrist.close()
         if self._wrist_source is not None and hasattr(self._wrist_source, "close"):
             self._wrist_source.close()
@@ -975,7 +996,7 @@ def build_skills(
         # The fake gripper closes on nothing; pretend it read fake_grasp_reading.
         fake = float(cfg.pick.top_down.get("fake_grasp_reading", 0.49))
         read = functools.partial(_fake_reading, fake)
-    return TossingSkills(
+    skills = TossingSkills(
         cfg,
         real_env,
         arm,
@@ -989,6 +1010,54 @@ def build_skills(
         wrist_source=source,
         ceiling=ceiling,
     )
+    recording = cfg.get("recording")
+    hz = 0.0 if recording is None else float(recording.get("motion_hz") or 0.0)
+    if log_dir is not None and hz > 0:
+        skills.motion_log = start_motion_log(skills, Path(log_dir), hz)
+    return skills
+
+
+def _odom_reader(base: Any) -> Callable[[], Any]:
+    """The base's odometry pose without a state read's side effects: the real and
+    sim interfaces' ``get_base_state`` also re-anchor the heading that the next
+    commanded heading is unwrapped onto."""
+    if isinstance(base, RealBaseInterface):
+        return lambda: base.base.get_state()["base_pose"]
+    world = getattr(base, "world", None)
+    if world is not None and hasattr(world, "base"):
+        return lambda: list(world.base)
+    return lambda: se2_xyt(base.get_base_state())
+
+
+def start_motion_log(skills: TossingSkills, log_dir: Path, hz: float) -> MotionLog:
+    """Sample the robot into ``<log_dir>/motion.jsonl`` at ``hz`` until
+    ``skills.close()`` (see :mod:`prpl_tidybot.motion_log`)."""
+    base = skills.real_env.interface.base_interface
+    closers: list[Callable[[], Any]] = []
+    map_pose: Callable[[], Any] | None
+    if isinstance(base, RealBaseInterface):
+        # The base's own marker client is the skills'; this one is the log's.
+        try:
+            reader = MarkerPoseReader(str(skills.cfg.lab.marker_detector_host))
+            map_pose = reader
+            closers.append(reader.close)
+        except (OSError, EOFError) as e:
+            _logger.warning("motion log: no marker detector (%s); no map pose", e)
+            map_pose = None
+    else:
+        map_pose = lambda: se2_xyt(base.get_map_base_state())
+    readers: dict[str, Callable[[], Any]] = {
+        "i": lambda: skills.active_calls,
+        "live": skills.arm.readings_are_live,
+        "q": skills.arm.get_arm_state,
+        "g": skills.arm.get_gripper_state,
+        "gc": lambda: skills.gripper_command,
+        "odom": _odom_reader(base),
+        "step": lambda: getattr(skills.ceiling, "label", None),
+    }
+    if map_pose is not None:
+        readers["map"] = map_pose
+    return MotionLog(log_dir / "motion.jsonl", readers, hz=hz, on_close=closers).start()
 
 
 class SkillManager(BaseManager):

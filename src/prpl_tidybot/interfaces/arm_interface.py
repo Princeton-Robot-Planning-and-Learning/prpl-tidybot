@@ -35,6 +35,11 @@ class ArmInterface(abc.ABC):
     def get_gripper_state(self) -> float:
         """Get the current gripper state (1 is open, 0 is closed)."""
 
+    def readings_are_live(self) -> bool:
+        """Whether get_arm_state and get_gripper_state are live measurements now
+        (the motion log's ``live``); True unless an implementation knows better."""
+        return True
+
     @abc.abstractmethod
     def execute_action(self, arm_goal: list[float], gripper_goal: float) -> None:
         """Send a single arm + gripper command (1 is open, 0 is closed)."""
@@ -96,6 +101,10 @@ class FakeArmInterface(ArmInterface):
         self.released = False
         # Added to every joint by move_angular, to model an arm that stops short.
         self.angular_offset = 0.0
+
+    def readings_are_live(self) -> bool:
+        """As the real arm's: not while released."""
+        return not self.released
 
     def release(self) -> None:
         self.released = True
