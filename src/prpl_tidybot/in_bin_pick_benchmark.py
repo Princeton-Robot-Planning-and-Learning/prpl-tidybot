@@ -61,7 +61,8 @@ class Controller:
     overrides: tuple[str, ...] = ()
 
 
-# The shipped controller: the skill server's config as it stands (the near-wall pick).
+# The shipped controller: the skill server's config as it stands (the near-wall pick
+# and the oblique extension).
 CURRENT = Controller(name="current")
 
 _IN_BIN = "pick.top_down.in_bin"
@@ -73,18 +74,23 @@ LEGACY = Controller(
         f"{_IN_BIN}.yaw_offsets_deg=[0]",
         f"{_IN_BIN}.tilts_deg=[0]",
         f"{_IN_BIN}.openings_mm=[85]",
+        f"{_IN_BIN}.more_grasps=[]",
         f"{_IN_BIN}.gripper_model=box",
     ),
 )
+# The default before the oblique extension (prpl-tidybot bd85a79): the near-wall set
+# only (yaw to 25 deg, tilt to 20 deg, 85 and 70 mm).
+NEAR_WALL = Controller(name="near-wall", overrides=(f"{_IN_BIN}.more_grasps=[]",))
 
 # The candidate controllers, by name (scripts/in_bin_pick_benchmark.py --controller):
-# the shipped one, the one before it, and B0.5, the option that is off (the finger
+# the shipped one, the two before it, and B0.5, the option that is off (the finger
 # links alone may come to 0.5 cm of a wall).
 VARIANTS: dict[str, Controller] = {
     c.name: c
     for c in [
         CURRENT,
         LEGACY,
+        NEAR_WALL,
         Controller(name="B0.5", overrides=(f"{_IN_BIN}.finger_allowance=0.005",)),
     ]
 }

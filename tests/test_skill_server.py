@@ -311,6 +311,32 @@ def test_a_cube_against_the_bin_wall_is_refused_before_moving():
     assert _still(skills) == before
 
 
+def test_a_cube_in_a_tight_corner_is_refused_cleanly_before_any_motion(monkeypatch):
+    """3 cm from two walls none of the 1612 grasps keeps the 1 cm margin: the pick is
+    refused before any arm, gripper or base command, and the reason says it is a corner
+    and, for each pair of faces, what binds."""
+    hl, hw = 0.5 * 0.39 - 0.005, 0.5 * 0.29 - 0.005  # the bin's inner half extents
+    cube = f"[{CLOSE_BIN[0] - hw + 0.03},{CLOSE_BIN[1] + hl - 0.03},0.025]"
+    skills = build_skills(_cfg(**{"env.cube_pose": cube}))
+    commands = []
+    monkeypatch.setattr(
+        FakeArmInterface,
+        "execute_action",
+        lambda _self, arm, gripper: commands.append((arm, gripper)),
+    )
+    before = _still(skills)
+    reply = skills.pick()
+    assert reply["refused"] is True and reply["held"] is False
+    assert reply["reason"].startswith(
+        "cube too close to the bin wall to grasp (cube in a corner: 3.0 cm from the"
+    ), reply["reason"]
+    for faces in ("faces 0 deg: ", "faces 90 deg: "):
+        assert " binds in " in reply["reason"].split(faces)[1].split("; faces")[0]
+    assert reply["reason"].endswith("; 1612 candidates)")
+    assert not commands
+    assert _still(skills) == before
+
+
 def test_no_cube_is_a_refusal(skills, monkeypatch):
     """Nothing to pick: refused, and the localizer's reason is kept."""
 

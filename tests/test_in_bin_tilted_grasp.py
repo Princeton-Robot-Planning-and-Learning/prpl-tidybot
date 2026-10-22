@@ -1,11 +1,13 @@
 """The pick out of the bin's grasps (conf/same_side_practice.yaml's
-``pick.top_down.in_bin``), the near-wall controller by default:
+``pick.top_down.in_bin``), the near-wall controller and then the oblique extension by
+default:
 
 the gripper's yaw up to 25 degrees off the cube's faces, tilts about the fingers' travel
 axis (kinder-baselines #178), fully open and then at the cube's width plus 2 cm, checked
-against the real 2F-85's links, every link ``wall_margin`` off the walls. The usual
-face-aligned, untilted, fully open grasps come first. ``finger_allowance`` (light wall
-contact for the finger linkage only) stays off.
+against the real 2F-85's links, every link ``wall_margin`` off the walls; then yaw up to
+45 degrees, tilts up to 30 and 85/80/75/70 mm. The usual face-aligned, untilted, fully
+open grasps come first, then the near-wall set in its own order. ``finger_allowance``
+(light wall contact for the finger linkage only) stays off.
 """
 
 import dataclasses
@@ -25,6 +27,8 @@ from prpl_tidybot.gripper_shape import (
 from prpl_tidybot.robot_skills import (
     InBinPick,
     _bin_grasp_geometry,
+    _bin_pick_targets,
+    _BinGraspSearch,
     bin_grasp_candidates,
     part_wall_problem,
 )
@@ -32,6 +36,7 @@ from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
 from prpl_tidybot.top_down_pick import (
     TopDownPickGeometry,
     arm_frame_target,
+    arm_link_points,
     forward_kinematics,
     geometry_from_config,
     top_down_joint_targets,
@@ -49,22 +54,36 @@ def _compose(*overrides):
 
 YAWS = [0.0, 5.0, -5.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0, 25.0, -25.0]
 TILTS = [0.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0]
+EXT_YAWS = [0.0] + [s * k for k in range(5, 50, 5) for s in (1.0, -1.0)]
+EXT_TILTS = [0.0] + [s * k for k in range(5, 35, 5) for s in (1.0, -1.0)]
+EXT_OPENINGS = [85.0, 80.0, 75.0, 70.0]
+# kinder-baselines #178's MuJoCo gap table, interpolated: 85 fully open, 70 measured
+# between 0.1 and 0.2, 80 and 75 interpolated.
+COMMANDS = {85.0: 0.0, 80.0: 0.06892, 75.0: 0.13418, 70.0: 0.19747}
 # The controller the real robot ran through run 10: the usual two grasps, the box.
 LEGACY = (
     "pick.top_down.in_bin.yaw_offsets_deg=[0]",
     "pick.top_down.in_bin.tilts_deg=[0]",
     "pick.top_down.in_bin.openings_mm=[85]",
+    "pick.top_down.in_bin.more_grasps=[]",
     "pick.top_down.in_bin.gripper_model=box",
 )
+# The default before the oblique extension (bd85a79): the near-wall set only.
+NEAR_WALL = ("pick.top_down.in_bin.more_grasps=[]",)
 
 
-def test_the_defaults_are_the_near_wall_controller():
-    """Yaw within +-25 deg of the faces, tilts 0/+-10/+-15/+-20, 85 then 70 mm, the real
-    gripper's links, the 1 cm margin for every link (no finger allowance)."""
+def test_the_defaults_are_the_near_wall_controller_then_the_oblique_extension():
+    """Yaw within +-25 deg of the faces, tilts 0/+-10/+-15/+-20, 85 then 70 mm; then yaw
+    within +-45 deg, tilts every 5 deg to +-30, 85/80/75/70 mm; the real gripper's
+    links, the 1 cm margin for every link (no finger allowance)."""
     in_bin = _compose().pick.top_down.in_bin
     assert [float(v) for v in in_bin.yaw_offsets_deg] == YAWS
     assert [float(v) for v in in_bin.tilts_deg] == TILTS
     assert [float(v) for v in in_bin.openings_mm] == [85.0, 70.0]
+    (more,) = in_bin.more_grasps
+    assert [float(v) for v in more.yaw_offsets_deg] == EXT_YAWS
+    assert [float(v) for v in more.tilts_deg] == EXT_TILTS
+    assert [float(v) for v in more.openings_mm] == EXT_OPENINGS
     assert in_bin.gripper_model == "mesh"
     assert in_bin.finger_allowance == 0.0
     assert in_bin.wall_margin == 0.01
@@ -72,6 +91,10 @@ def test_the_defaults_are_the_near_wall_controller():
     assert [float(v) for v in default.yaw_offsets_deg] == YAWS
     assert [float(v) for v in default.tilts_deg] == TILTS
     assert default.openings_mm == (85.0, 70.0)
+    (ext,) = default.more_grasps
+    assert list(ext.yaw_offsets_deg) == EXT_YAWS
+    assert list(ext.tilts_deg) == EXT_TILTS
+    assert list(ext.openings_mm) == EXT_OPENINGS
     assert (default.gripper_model, default.finger_allowance) == ("mesh", 0.0)
     assert default.wall_margin == 0.01
     geom = TopDownPickGeometry()
@@ -99,15 +122,89 @@ def test_the_usual_two_grasps_come_first_so_every_pick_that_works_keeps_its_gras
     legacy = _candidates(_compose(*LEGACY))
     assert [_key(g, geom) for g in legacy] == keys[:2]
     assert len(set(keys)) == len(keys)
-    # 11 yaws x 7 tilts x 2 pairs of faces x 2 openings, less 70 mm at +-25 deg.
-    assert len(keys) == 11 * 7 * 2 * 2 - 2 * 7 * 2
+    # The near-wall set: 11 yaws x 7 tilts x 2 pairs of faces x 2 openings, less 70 mm
+    # at +-25 deg (280); the oblique extension: 19 yaws x 13 tilts x 2 pairs of faces
+    # x 4 openings, less 70 mm at +-25..+-45 deg and 75 mm at +-40..+-45 deg (1612),
+    # the 280 among them.
+    near_wall = _candidates(_compose(*NEAR_WALL))
+    assert len(near_wall) == 11 * 7 * 2 * 2 - 2 * 7 * 2 == 280
+    assert len(keys) == 19 * 13 * 2 * 4 - 10 * 13 * 2 - 4 * 13 * 2 == 1612
+
+
+def _spec():
+    """The oblique extension's candidate list, written out from the spec (hitl-pmp-
+    results/kb-restack-notes-workstream-c-geometry.md, "Oblique extension"):
+
+    (yaw off the faces, tilt, faces, gripper command), in try order.
+    """
+
+    def grasps(yaws, tilts, openings):
+        for y in yaws:
+            span = 0.05 * (
+                abs(math.cos(math.radians(y))) + abs(math.sin(math.radians(y)))
+            )
+            for t in tilts:
+                for f in (0.0, 90.0):
+                    for o in openings:
+                        if not (y and o / 1000 < span + 0.005):
+                            yield (y, t, f, o)
+
+    near_wall = list(grasps(YAWS, TILTS, [85.0, 70.0]))
+    usual = [g for g in near_wall if g[0] == 0 and g[1] == 0 and g[3] == 85.0]
+    order = usual + [g for g in near_wall if g not in usual]
+    order += [g for g in grasps(EXT_YAWS, EXT_TILTS, EXT_OPENINGS) if g not in order]
+    return [(y, t, f, COMMANDS[o]) for y, t, f, o in order]
+
+
+def test_the_candidate_list_is_the_spec_in_order():
+    """Exactly the spec's 1612 grasps, in its order: the usual two, the rest of the
+    near-wall set as bd85a79 tried it, then the oblique extension's new grasps."""
+    cfg = _compose()
+    geom = geometry_from_config(cfg.pick.top_down)
+    keys = [_key(g, geom) for g in _candidates(cfg)]
+    spec = _spec()
+    assert len(spec) == 1612
+    assert [k[:3] for k in keys] == [s[:3] for s in spec]
+    assert [k[3] for k in keys] == pytest.approx([s[3] for s in spec], abs=1e-5)
+
+
+def test_bd85a79s_280_grasps_come_first_in_their_own_order():
+    """So every pick the near-wall set clears keeps its exact grasp."""
+    cfg = _compose()
+    geom = geometry_from_config(cfg.pick.top_down)
+    keys = [_key(g, geom) for g in _candidates(cfg)]
+    near_wall = [_key(g, geom) for g in _candidates(_compose(*NEAR_WALL))]
+    assert keys[:280] == near_wall
+
+
+def test_75_mm_is_skipped_too_where_the_cube_spans_7_cm():
+    """At 40 and 45 deg off the faces the cube spans 7.0 and 7.1 cm: 85 and 80 mm only;
+    at 25-35 deg (6.6-7.0 cm) every opening but 70 mm; to 20 deg all four."""
+    cfg = _compose()
+    geom = geometry_from_config(cfg.pick.top_down)
+    by_yaw: dict[float, set[float]] = {}
+    for g in _candidates(cfg):
+        by_yaw.setdefault(_key(g, geom)[0], set()).add(round(g.open_position, 5))
+    c = {mm: round(opening_command(mm / 1000), 5) for mm in EXT_OPENINGS}
+    for yaw in (40.0, -40.0, 45.0, -45.0):
+        assert by_yaw[yaw] == {c[85.0], c[80.0]}
+    for yaw in (25.0, -25.0, 30.0, -30.0, 35.0, -35.0):
+        assert by_yaw[yaw] == {c[85.0], c[80.0], c[75.0]}
+    for yaw in (0.0, 5.0, -10.0, 20.0, -20.0):
+        assert by_yaw[yaw] == set(c.values())
+
+
+def test_80_and_75_mm_are_interpolated_in_178s_gap_table():
+    """Between the measured 0.0851 (0.0), 0.0777 (0.1) and 0.0698 (0.2) m gaps."""
+    for mm, command in COMMANDS.items():
+        assert opening_command(mm / 1000) == pytest.approx(command, abs=1e-5)
 
 
 def test_70_mm_is_skipped_where_the_cube_spans_more_than_it_can_take():
     """At 25 deg off the faces the cube spans 6.6 cm across the closing axis, too wide
     for the 70 mm opening with 5 mm to spare: tried fully open only; at 20 deg (6.4
-    cm) both openings."""
-    cfg = _compose()
+    cm) both openings (the near-wall set)."""
+    cfg = _compose(*NEAR_WALL)
     geom = geometry_from_config(cfg.pick.top_down)
     by_yaw: dict[float, set[float]] = {}
     for g in _candidates(cfg):
@@ -256,3 +353,98 @@ def test_a_yaw_relaxed_grasp_turns_the_closing_axis_off_the_faces():
     c0 = forward_kinematics(flat, geom)[2]
     c1 = forward_kinematics(turned, relaxed)[2]
     assert math.degrees(math.acos(abs(float(c0 @ c1)))) == pytest.approx(15.0, abs=1.0)
+
+
+# The test bin's walls as the robot at BASE (facing -x) sees them.
+_HL, _HW = 0.5 * BIN.length - BIN.wall, 0.5 * BIN.width - BIN.wall
+SIDE_WALL_4CM = {"x": BIN.x, "y": BIN.y + _HL - 0.04, "yaw_deg": 35.0}
+FAR_WALL_4CM = {"x": BIN.x - _HW + 0.04, "y": BIN.y, "yaw_deg": 35.0}
+TIGHT_CORNER = {"x": BIN.x - _HW + 0.03, "y": BIN.y + _HL - 0.03, "yaw_deg": 35.0}
+
+
+def _search(cfg, cube):
+    return _bin_grasp_geometry(
+        geometry_from_config(cfg.pick.top_down),
+        BASE,
+        cube,
+        BIN,
+        cfg.pick.top_down.in_bin,
+        RETRACT_ARM_CONF,
+    )
+
+
+@pytest.mark.parametrize("cube", [SIDE_WALL_4CM, FAR_WALL_4CM])
+def test_the_oblique_extension_picks_an_oblique_cube_4_cm_from_one_wall(cube):
+    """4 cm from one wall at 35 deg to it: the near-wall set refuses it; the default
+    clears it with one of the extension's new grasps, every link 1 cm off the walls."""
+    chosen, _ = _search(_compose(*NEAR_WALL), cube)
+    assert chosen is None
+    cfg = _compose()
+    chosen, problem = _search(cfg, cube)
+    assert problem is None and chosen is not None
+    geom = geometry_from_config(cfg.pick.top_down)
+    near_wall = {_key(g, geom) for g in _candidates(_compose(*NEAR_WALL))}
+    assert _key(chosen, geom) not in near_wall
+    assert _reference_problem(chosen, cube, cfg.pick.top_down.in_bin) is None
+
+
+def test_a_tight_corner_is_refused_naming_the_corner_and_what_binds():
+    """3 cm from the far wall and 3 cm from the right wall no grasp of the 1612 keeps
+    the margin: the refusal says it is a corner, which walls, and for each pair of faces
+    the part that binds most often."""
+    chosen, problem = _search(_compose(), TIGHT_CORNER)
+    assert chosen is None
+    assert problem.startswith("cube in a corner: 3.0 cm from the "), problem
+    assert "far wall" in problem.split(";")[0] and "right wall" in problem.split(";")[0]
+    assert "within the open fingers' reach (8.4 cm)" in problem
+    for faces in ("faces 0 deg: ", "faces 90 deg: "):
+        clause = problem.split(faces)[1].split(" grasps (first: ")[0]
+        assert " binds in " in clause and clause.endswith("/806"), clause
+    assert problem.endswith("; 1612 candidates")
+
+
+def _reference_problem(geom, cube, in_bin):
+    """Bd85a79's check of one grasp, every gripper point transformed (no caching, no
+    bounding spheres): the search must give the same answer, the same reason."""
+    ax, ay = arm_frame_target(BASE, (cube["x"], cube["y"]), geom)
+    yaw = math.radians(cube["yaw_deg"]) - BASE[2]
+    try:
+        above = _bin_pick_targets(geom, (ax, ay, yaw), BIN, in_bin, RETRACT_ARM_CONF)
+        hover, grasp = top_down_joint_targets(ax, ay, yaw, geom, seed=above)
+    except ValueError as e:
+        return f"no top-down pick into the bin: {e}"
+    margin = float(in_bin.wall_margin)
+    mx = BASE[0] + geom.mounting_offset * math.cos(BASE[2])
+    my = BASE[1] + geom.mounting_offset * math.sin(BASE[2])
+    rim = geom.floor_z + BIN.height + margin
+    ct, st = math.cos(BASE[2]), math.sin(BASE[2])
+    cb, sb = math.cos(BIN.yaw), math.sin(BIN.yaw)
+    for phase, joints in (("above", above), ("hover", hover), ("grasp", grasp)):
+        pos, approach, closing = forward_kinematics(joints, geom)
+        tool = np.column_stack([np.cross(closing, approach), closing, approach])
+        parts = dict(arm_link_points(joints, geom))
+        for name, local in gripper_link_points(geom.open_position).items():
+            parts[f"gripper {name}"] = pos + np.einsum("ij,kj->ik", local, tool)
+        for name, points in parts.items():
+            low = points[points[:, 2] < rim]
+            if len(low) == 0:
+                continue
+            wx = mx + ct * low[:, 0] - st * low[:, 1] - BIN.x
+            wy = my + st * low[:, 0] + ct * low[:, 1] - BIN.y
+            local = np.c_[cb * wx + sb * wy, -sb * wx + cb * wy]
+            problem = part_wall_problem(name, local, BIN, in_bin)
+            if problem is not None:
+                depth = (BIN.height + geom.floor_z) - float(low[:, 2].min())
+                return f"{phase}: {problem} ({depth:.3f} m below the rim)"
+    return None
+
+
+@pytest.mark.parametrize("cube", [TIGHT_CORNER, SIDE_WALL_4CM])
+def test_the_cheaper_search_answers_as_the_full_check_does(cube):
+    """Every 23rd candidate (each opening, yaw and pair of faces among them): the
+    search's verdict and reason equal the full point-by-point check's."""
+    cfg = _compose()
+    in_bin = cfg.pick.top_down.in_bin
+    search = _BinGraspSearch(BASE, cube, BIN, in_bin, RETRACT_ARM_CONF)
+    for g in _candidates(cfg)[::23]:
+        assert search.problem(g) == _reference_problem(g, cube, in_bin)

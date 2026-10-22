@@ -72,8 +72,19 @@ def gripper_link_points(command: float) -> dict[str, NDArray[np.float64]]:
     """Each gripper link's surface points (tool frame, m) with the fingers settled at
     ``command`` (0 open ..
 
-    1 closed).
+    1 closed), the housing first. The housing is rigid: its points are the fully open
+    gripper's at every command (settling moves them only by float noise, ~1e-16 m), so a
+    check of the housing holds for every opening.
     """
+    points = _settled_link_points(command)
+    housing = (points if command == 0.0 else gripper_link_points(0.0))[GRIPPER_HOUSING]
+    return {
+        GRIPPER_HOUSING: housing,
+        **{k: v for k, v in points.items() if k != GRIPPER_HOUSING},
+    }
+
+
+def _settled_link_points(command: float) -> dict[str, NDArray[np.float64]]:
     model = mujoco.MjModel.from_xml_path(str(_gripper_xml()))
     model.opt.gravity[:] = 0
     data = mujoco.MjData(model)
@@ -102,6 +113,19 @@ def gripper_link_points(command: float) -> dict[str, NDArray[np.float64]]:
         world = data.geom_xpos[g] + np.einsum("ij,kj->ik", local, xmat)
         out.setdefault(body, []).append(np.einsum("ij,jk->ik", world - origin, rot))
     return {body: np.vstack(parts) for body, parts in out.items()}
+
+
+@functools.lru_cache(maxsize=8)
+def gripper_link_spheres(
+    command: float,
+) -> dict[str, tuple[NDArray[np.float64], float]]:
+    """Each gripper link's bounding sphere (centre in the tool frame, radius; m) at
+    ``command``: every point of :func:`gripper_link_points` lies within it."""
+    out: dict[str, tuple[NDArray[np.float64], float]] = {}
+    for name, points in gripper_link_points(command).items():
+        centre = 0.5 * (points.min(axis=0) + points.max(axis=0))
+        out[name] = (centre, float(np.linalg.norm(points - centre, axis=1).max()))
+    return out
 
 
 def _geom_surface(model: mujoco.MjModel, g: int) -> NDArray[np.float64] | None:
