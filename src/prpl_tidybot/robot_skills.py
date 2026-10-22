@@ -175,7 +175,9 @@ def arm_bin_collision(
     if str(_in_bin_option(in_bin, "gripper_model")) == "mesh":
         tool = np.column_stack([fingers, closing, approach])
         for name, local in gripper_link_points(geom.open_position).items():
-            parts[f"gripper {name}"] = pos + local @ tool.T
+            # einsum, not @: a ~100k-point matmul goes multithreaded in OpenBLAS, which
+            # spun forever beside the skill server's other threads (a hung test run).
+            parts[f"gripper {name}"] = pos + np.einsum("ij,kj->ik", local, tool)
     else:
         corners = [
             pos
@@ -269,15 +271,16 @@ def bin_grasp_candidates(
 ) -> list[TopDownPickGeometry]:
     """Every grasp the pick out of the bin may try, in order.
 
-    Gripper yaws off the faces (``yaw_offsets_deg``, as listed: face-aligned first)
-    outermost; within a yaw, kinder-baselines #178's order: tilts as listed
-    (``tilts_deg``, untilted first), both pairs of faces, each opening as listed
-    (``openings_mm``, fully open first). An opening narrower than the cube's span across
-    the closing axis at that yaw, plus 5 mm, is skipped (an edge grasp, 45 degrees off,
-    spans the 7.07 cm diagonal).
+    First the usual grasp on each pair of faces, as listed first (face-aligned,
+    untilted, fully open), so a pick that cleared with them keeps its grasp. Then the
+    rest: gripper yaws off the faces (``yaw_offsets_deg``, as listed) outermost; within
+    a yaw, kinder-baselines #178's order: tilts as listed (``tilts_deg``), both pairs of
+    faces, each opening as listed (``openings_mm``). An opening narrower than the
+    cube's span across the closing axis at that yaw, plus 5 mm, is skipped (at 25
+    degrees off the faces the 5 cm cube spans 6.6 cm).
     """
     width = float(_in_bin_option(in_bin, "cube_width"))
-    out = []
+    out: list[TopDownPickGeometry] = []
     for offset in (float(o) for o in _in_bin_option(in_bin, "yaw_offsets_deg")):
         off = math.radians(offset)
         span = width * (abs(math.cos(off)) + abs(math.sin(off)))
@@ -297,7 +300,15 @@ def bin_grasp_candidates(
                             wrist_yaw_offset=geom.wrist_yaw_offset + off,
                         )
                     )
-    return out
+
+    def first(g: TopDownPickGeometry) -> bool:
+        return (g.wrist_yaw_offset, g.tilt, g.open_position) == (
+            out[0].wrist_yaw_offset,
+            out[0].tilt,
+            out[0].open_position,
+        )
+
+    return [g for g in out if first(g)] + [g for g in out if not first(g)]
 
 
 def _bin_grasp_geometry(
@@ -544,10 +555,13 @@ class InBinPick:  # pylint: disable=too-many-instance-attributes
     planned pose within ``wall_margin`` of a wall. The defaults are the measured ones
     (conf/same_side_practice.yaml).
 
-    The candidates, all off by default: ``tilts_deg`` and ``openings_mm`` (the grasps
-    tried, kinder-baselines #178), ``gripper_model`` (``box`` or ``mesh``: the real
-    2F-85's links) and ``finger_allowance`` (how far past the inner wall face the finger
-    links may reach; mesh only).
+    The grasps tried (:func:`bin_grasp_candidates`), the near-wall controller by
+    default: ``yaw_offsets_deg`` (the gripper's yaw off the cube's faces, up to 25
+    deg), ``tilts_deg`` and ``openings_mm`` (kinder-baselines #178's tilted, partly
+    opened grasp), each checked as ``gripper_model`` (``mesh``: the real 2F-85's links
+    at the grasp's opening; ``box``: the box above). ``finger_allowance`` (how far past
+    the inner wall face the finger links alone may reach; mesh only) is off: every link
+    keeps ``wall_margin``.
     """
 
     rim_clearance: float = 0.04
@@ -556,11 +570,23 @@ class InBinPick:  # pylint: disable=too-many-instance-attributes
     gripper_length: float = 0.124
     fingertip_drop: float = 0.029
     wall_margin: float = 0.01
-    tilts_deg: tuple[float, ...] = (0.0,)
-    openings_mm: tuple[float, ...] = (85.0,)
-    gripper_model: str = "box"
+    tilts_deg: tuple[float, ...] = (0.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0)
+    openings_mm: tuple[float, ...] = (85.0, 70.0)
+    gripper_model: str = "mesh"
     finger_allowance: float = 0.0
-    yaw_offsets_deg: tuple[float, ...] = (0.0,)
+    yaw_offsets_deg: tuple[float, ...] = (
+        0.0,
+        5.0,
+        -5.0,
+        10.0,
+        -10.0,
+        15.0,
+        -15.0,
+        20.0,
+        -20.0,
+        25.0,
+        -25.0,
+    )
     cube_width: float = 0.05
 
 

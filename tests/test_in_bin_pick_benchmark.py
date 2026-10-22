@@ -7,9 +7,9 @@ import math
 
 import pytest
 
-from prpl_tidybot.gripper_shape import FINGER_LINKS
 from prpl_tidybot.in_bin_pick_benchmark import (
     CURRENT,
+    LEGACY,
     VARIANTS,
     Controller,
     load_cases,
@@ -22,8 +22,8 @@ BY_ID = {c["id"]: c for c in CASES}
 WITH_VERDICT = [c["id"] for c in CASES if c["real"]["verdict"] is not None]
 PICKED = [c["id"] for c in CASES if c["real"]["verdict"] == "picked"]
 
-# The current controller in sim disagrees with the real robot here, and why. Each is
-# a sim-to-real finding, kept visible rather than tuned away.
+# The controller the real robot ran (LEGACY) in sim disagrees with the real robot
+# here, and why. Each is a sim-to-real finding, kept visible rather than tuned away.
 KNOWN_DISAGREEMENTS: dict[str, str] = {
     "2026-10-20/11-56-48#c1-2": (
         "run 39: the real pick was planned and started, but the wrist camera's "
@@ -40,14 +40,26 @@ pytestmark = pytest.mark.xdist_group("in_bin_pick_benchmark")
 
 @pytest.fixture(scope="module", name="results")
 def _results():
-    """The current controller on every case, once per module."""
+    """The controller the real robot ran on every case, once per module."""
     return {}
 
 
 def _result(results, case_id):
     if case_id not in results:
-        results[case_id] = run_case(BY_ID[case_id], CURRENT)
+        results[case_id] = run_case(BY_ID[case_id], LEGACY)
     return results[case_id]
+
+
+@pytest.fixture(scope="module", name="default_results")
+def _default_results():
+    """The default (near-wall) controller on every case, once per module."""
+    return {}
+
+
+def _default(default_results, case_id):
+    if case_id not in default_results:
+        default_results[case_id] = run_case(BY_ID[case_id], CURRENT)
+    return default_results[case_id]
 
 
 def test_the_fixture_is_every_near_bin_rest_with_its_real_verdict():
@@ -86,7 +98,9 @@ def test_the_fixture_is_every_near_bin_rest_with_its_real_verdict():
 
 
 @pytest.mark.parametrize("case_id", WITH_VERDICT)
-def test_the_current_controller_in_sim_reproduces_the_real_verdict(results, case_id):
+def test_the_real_robots_controller_in_sim_reproduces_the_real_verdict(
+    results, case_id
+):
     """Refused where the real robot refused, held where it held; a known disagreement
     must still disagree (or be removed from the list)."""
     result = _result(results, case_id)
@@ -117,7 +131,7 @@ def test_a_refusal_carries_the_planners_reason_and_moves_nothing(results):
 
 
 def test_the_controller_under_test_is_selectable_by_config():
-    """A candidate is config overrides on the current controller: a wall margin no grasp
+    """A candidate is config overrides on the default controller: a wall margin no grasp
     can keep turns a real pick into a refusal."""
     case = BY_ID[PICKED[0]]
     strict = Controller(
@@ -155,87 +169,107 @@ def test_the_summary_counts_agreement_as_x_of_y(results):
     assert summary["real_picked_held_in_sim"] == [len(PICKED), len(PICKED)]
 
 
-# The candidate controllers on the real rests (sim mode; a "held" is the kinematic
-# sim's geometric hold check, with walls that stop nothing).
-A_RESCUES = {
-    "2026-10-20/11-56-48#c1-1",  # run 39, 6.4 cm, tilt +15 at 70 mm
-    "2026-10-20/12-34-53#c1-1",  # run 40, 4.4 cm, square to the wall, tilt +10
-    "2026-10-20/12-34-53#c1-2",  # run 40, 4.2 cm, square to the wall, tilt -20
-}
-REAL_PICKS_AND_REFUSALS = [
-    c["id"] for c in CASES if c["real"]["verdict"] in ("picked", "refused")
-]
-
-
-@pytest.mark.parametrize("case_id", REAL_PICKS_AND_REFUSALS)
-def test_the_tilted_grasp_keeps_every_real_pick_and_rescues_none_of_run_10(case_id):
-    """A (tilts 0/+-10/+-15/+-20 deg, 85 then 70 mm, the real gripper's links): the 4
-    real picks are still held, untilted and fully open; of the 8 real refusals only runs
-    39-40's 3 hand-placed cubes are rescued, none of run 10's 5 toss rests (2.3-5.6 cm
-    from a wall, 24-60 deg to it); no pose touches a wall in sim."""
-    result = run_case(BY_ID[case_id], VARIANTS["A"])
-    real = BY_ID[case_id]["real"]["verdict"]
-    if real == "picked":
-        assert result["verdict"] == "held"
-        assert (result["tilt_deg"], result["open_position"]) == (0.0, 0.0)
-    else:
-        assert (result["verdict"] == "held") == (case_id in A_RESCUES)
-    assert result["wall_contacts"] == []
-
-
-def test_light_finger_contact_rescues_a_run_10_refusal_by_touching_the_wall():
-    """B (finger links up to 1 cm past the inner face): run 10's 5.6 cm rest is reached,
-    and it is reached by the finger linkage going into the wall in sim:
-
-    what B buys is contact, which the sim's walls do not resist.
-    """
-    result = run_case(BY_ID["2026-10-21/10-29-48#96"], VARIANTS["B1.0"])
-    assert result["verdict"] == "held"
-    links = {c["link"] for c in result["wall_contacts"]}
-    assert links and links <= FINGER_LINKS
-
-
+# The default (near-wall) controller on the real rests (sim mode; a "held" is the
+# kinematic sim's geometric hold check, with walls that stop nothing).
 RUN_10_REFUSALS = [
     c["id"]
     for c in CASES
     if c["source"]["session"] == "2026-10-21/10-29-48"
     and c["real"]["verdict"] == "refused"
 ]
-# C (the gripper's yaw freed from the faces, with A's tilts and openings): which of
-# run 10's 5 refusals each rescues in sim.
-C_RESCUES = {
-    "C1-25": {"2026-10-21/10-29-48#115"},
-    "C1-25+B0.5": {
-        "2026-10-21/10-29-48#96",
-        "2026-10-21/10-29-48#110",
-        "2026-10-21/10-29-48#115",
-    },
+REAL_REFUSALS = [c["id"] for c in CASES if c["real"]["verdict"] == "refused"]
+RESCUED = {
+    "2026-10-21/10-29-48#115",  # run 10, 5.3 cm, 20 deg off the faces at 70 mm
+    "2026-10-20/11-56-48#c1-1",  # run 39, 6.4 cm, tilt +15 at 70 mm
+    "2026-10-20/12-34-53#c1-1",  # run 40, 4.4 cm, square to the wall, tilt +10
+    "2026-10-20/12-34-53#c1-2",  # run 40, 4.2 cm, square to the wall, tilt -20
 }
 
 
-@pytest.mark.parametrize("variant", sorted(C_RESCUES))
-@pytest.mark.parametrize("case_id", RUN_10_REFUSALS)
-def test_a_yaw_relaxed_grasp_rescues_some_of_run_10s_refusals(variant, case_id):
-    """C1-25 (gripper yaw up to 25 deg off the faces) reaches run 10's 5.3 cm rest (20
-    deg off) without touching a wall; with B0.5 it also reaches the 2.4 cm rest (15 deg
-    off, tilted 15) and the 5.6 cm one (face-aligned at 70 mm, as A+B0.5 does), by the
-    finger linkage touching the wall.
+@pytest.mark.parametrize("case_id", REAL_REFUSALS)
+def test_the_default_rescues_4_of_8_real_refusals_and_1_of_run_10s_5(
+    default_results, case_id
+):
+    """Of run 10's 5 refusals (2.3-5.6 cm from a wall) only the 5.3 cm rest is reached,
+    the gripper 20 deg off the faces; with the 1 cm margin kept for every link the 5.6
+    cm rest (#96) stays refused (its finger drivers would be within 1 cm at the hover),
+    as do 2.3, 2.4 and 3.6 cm.
 
-    Grip stability off the faces' normals is not modelled in sim.
+    Runs 39-40's 3 hand-placed refusals are reached tilted.
     """
-    result = run_case(BY_ID[case_id], VARIANTS[variant])
-    assert (result["verdict"] == "held") == (case_id in C_RESCUES[variant])
-    if result["verdict"] == "held":
-        face_aligned = case_id == "2026-10-21/10-29-48#96"
-        assert (result["yaw_offset_deg"] == 0.0) == face_aligned
-        assert {c["link"] for c in result["wall_contacts"]} <= FINGER_LINKS
-        if variant == "C1-25":
-            assert result["wall_contacts"] == []
+    result = _default(default_results, case_id)
+    assert (result["verdict"] == "held") == (case_id in RESCUED), result["reason"]
+    if case_id in RUN_10_REFUSALS:
+        assert (result["verdict"] == "held") == case_id.endswith("#115")
+
+
+@pytest.mark.parametrize(
+    "case_id", ["2026-10-21/10-29-48#87", "2026-10-21/10-29-48#110"]
+)
+def test_the_rests_against_a_wall_stay_refused_naming_both_pairs_of_faces(
+    default_results, case_id
+):
+    """2.3 and 2.4 cm from a wall: no grasp keeps the margin; the refusal says why for
+    each pair of faces, so the human reset is told what binds."""
+    result = _default(default_results, case_id)
+    assert result["verdict"] == "refused"
+    assert result["reason"].startswith("cube too close to the bin wall to grasp")
+    assert "faces 0 deg" in result["reason"] and "faces 90 deg" in result["reason"]
+    assert result["steps"] == []
 
 
 @pytest.mark.parametrize("case_id", PICKED)
-def test_the_yaw_relaxed_grasp_keeps_every_real_pick_face_aligned(case_id):
-    """With C1-25+B0.5 the real picks are still taken square to the faces."""
-    result = run_case(BY_ID[case_id], VARIANTS["C1-25+B0.5"])
+def test_the_default_keeps_every_real_pick_with_the_identical_grasp(
+    results, default_results, case_id
+):
+    """The 4 real picks: held, face-aligned, untilted, fully open, on the same pair of
+    faces as the controller the real robot ran, from the same standoff."""
+    new, old = _default(default_results, case_id), _result(results, case_id)
+    assert new["verdict"] == old["verdict"] == "held"
+    assert (new["yaw_offset_deg"], new["tilt_deg"], new["open_position"]) == (
+        0.0,
+        0.0,
+        0.0,
+    )
+    assert new["closing_turn_deg"] == old["closing_turn_deg"]
+    assert new["stand"] == old["stand"]
+
+
+@pytest.mark.parametrize("case_id", [c["id"] for c in CASES])
+def test_the_default_holds_everything_held_before_and_touches_no_wall(
+    results, default_results, case_id
+):
+    """Every case the old controller held is still held, and no case's motion touches a
+    wall in sim."""
+    new, old = _default(default_results, case_id), _result(results, case_id)
+    if old["verdict"] == "held":
+        assert new["verdict"] == "held"
+    assert new["wall_contacts"] == []
+
+
+# Run 39's fit is the placeholder 0.40 x 0.32 bin; the sim's walls are the measured
+# 0.39 x 0.29 one, 1.5 cm further in, so its margin holds only against the fit.
+_PLACEHOLDER_BIN = "2026-10-20/11-56-48"
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    [i for i in sorted(RESCUED) + PICKED if not i.startswith(_PLACEHOLDER_BIN)],
+)
+def test_no_planned_pose_puts_a_link_inside_the_1_cm_margin(default_results, case_id):
+    """At the planned waypoints (above the rim, hover, grasp) the sim's TidyBot model,
+    arm and gripper, keeps 1 cm off every wall (to the mesh sampling, 1 mm).
+
+    The executed motion may come closer: the arm arrives within its joint tolerance of
+    each waypoint, not on it.
+    """
+    planned = _default(default_results, case_id)["planned_min_wall_clearance_m"]
+    assert min(planned.values()) >= 0.009, planned
+
+
+def test_finger_allowance_is_off_and_would_reach_96_without_contact():
+    """The tested option, off by default (B0.5): the finger links alone may come to
+    0.5 cm of the wall; the 5.6 cm rest is then reached, touching nothing in sim."""
+    result = run_case(BY_ID["2026-10-21/10-29-48#96"], VARIANTS["B0.5"])
     assert result["verdict"] == "held"
-    assert result["yaw_offset_deg"] == 0.0 and result["tilt_deg"] == 0.0
+    assert result["wall_contacts"] == []

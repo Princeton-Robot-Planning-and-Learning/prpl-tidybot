@@ -2,12 +2,12 @@
 
     python scripts/in_bin_pick_benchmark.py --out-dir <dir>
     python scripts/in_bin_pick_benchmark.py --out-dir <dir> \
-        --controller current --controller A --controller B1.0 \
+        --controller current --controller legacy --controller B0.5 \
         --controller "margin5=pick.top_down.in_bin.wall_margin=0.005"
 
-Each ``--controller`` is a named candidate (``VARIANTS``: current, mesh, A, A178,
-B0.5/B1.0/B2.0, A+B0.5/A+B1.0/A+B2.0) or ``name=override[;override...]`` (Hydra
-overrides on conf/skill_server.yaml). Writes
+Each ``--controller`` is a named candidate (``VARIANTS``: current, the shipped config;
+legacy, the controller run 10 ran; B0.5, the finger links allowed to 0.5 cm of a wall)
+or ``name=override[;override...]`` (Hydra overrides on conf/skill_server.yaml). Writes
 ``<name>.json`` (every case's sim result and the summary) and ``<name>.md`` (the
 table) per controller, and prints the summary. See
 :mod:`prpl_tidybot.in_bin_pick_benchmark`.

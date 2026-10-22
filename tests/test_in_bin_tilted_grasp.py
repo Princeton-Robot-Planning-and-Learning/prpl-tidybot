@@ -1,11 +1,11 @@
-"""Candidate controllers for the pick out of the bin, each a config option that is off
-by default (conf/same_side_practice.yaml's ``pick.top_down.in_bin``):
+"""The pick out of the bin's grasps (conf/same_side_practice.yaml's
+``pick.top_down.in_bin``), the near-wall controller by default:
 
-A. the tilted, partly opened grasp of kinder-baselines #178: tilts about the fingers'
-travel axis, each tried fully open and then at the cube's width plus 2 cm, checked
-against the real 2F-85's links (``gripper_model: mesh``) instead of one box; B. light
-wall contact for the finger linkage only (``finger_allowance``, m past the    inner wall
-face), the housing, wrist and arm keeping ``wall_margin``.
+the gripper's yaw up to 25 degrees off the cube's faces, tilts about the fingers' travel
+axis (kinder-baselines #178), fully open and then at the cube's width plus 2 cm, checked
+against the real 2F-85's links, every link ``wall_margin`` off the walls. The usual
+face-aligned, untilted, fully open grasps come first. ``finger_allowance`` (light wall
+contact for the finger linkage only) stays off.
 """
 
 import dataclasses
@@ -25,6 +25,7 @@ from prpl_tidybot.gripper_shape import (
 from prpl_tidybot.robot_skills import (
     InBinPick,
     _bin_grasp_geometry,
+    bin_grasp_candidates,
     part_wall_problem,
 )
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
@@ -39,7 +40,6 @@ from prpl_tidybot.top_down_pick import (
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
 BIN = BinFit(-0.29, -0.77, math.pi / 2, 0.39, 0.29, 0.21, 0.005)
 BASE = (BIN.x + 0.67, BIN.y, math.pi)
-TILTS_A = "[0,10,-10,15,-15,20,-20]"
 
 
 def _compose(*overrides):
@@ -47,28 +47,74 @@ def _compose(*overrides):
         return compose(config_name="skill_server", overrides=["mode=fake", *overrides])
 
 
-def _variant_a(*extra):
-    return _compose(
-        f"pick.top_down.in_bin.tilts_deg={TILTS_A}",
-        "pick.top_down.in_bin.openings_mm=[85,70]",
-        "pick.top_down.in_bin.gripper_model=mesh",
-        *extra,
+YAWS = [0.0, 5.0, -5.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0, 25.0, -25.0]
+TILTS = [0.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0]
+# The controller the real robot ran through run 10: the usual two grasps, the box.
+LEGACY = (
+    "pick.top_down.in_bin.yaw_offsets_deg=[0]",
+    "pick.top_down.in_bin.tilts_deg=[0]",
+    "pick.top_down.in_bin.openings_mm=[85]",
+    "pick.top_down.in_bin.gripper_model=box",
+)
+
+
+def test_the_defaults_are_the_near_wall_controller():
+    """Yaw within +-25 deg of the faces, tilts 0/+-10/+-15/+-20, 85 then 70 mm, the real
+    gripper's links, the 1 cm margin for every link (no finger allowance)."""
+    in_bin = _compose().pick.top_down.in_bin
+    assert [float(v) for v in in_bin.yaw_offsets_deg] == YAWS
+    assert [float(v) for v in in_bin.tilts_deg] == TILTS
+    assert [float(v) for v in in_bin.openings_mm] == [85.0, 70.0]
+    assert in_bin.gripper_model == "mesh"
+    assert in_bin.finger_allowance == 0.0
+    assert in_bin.wall_margin == 0.01
+    default = InBinPick()
+    assert [float(v) for v in default.yaw_offsets_deg] == YAWS
+    assert [float(v) for v in default.tilts_deg] == TILTS
+    assert default.openings_mm == (85.0, 70.0)
+    assert (default.gripper_model, default.finger_allowance) == ("mesh", 0.0)
+    assert default.wall_margin == 0.01
+    geom = TopDownPickGeometry()
+    assert (geom.tilt, geom.open_position) == (0.0, 0.0)
+
+
+def _key(g, geom):
+    return (
+        round(math.degrees(g.wrist_yaw_offset - geom.wrist_yaw_offset), 6),
+        round(math.degrees(g.tilt), 6),
+        round(math.degrees(g.closing_turn), 6),
+        round(g.open_position, 6),
     )
 
 
-def test_the_defaults_are_the_current_controller():
-    """Nothing changes unless asked: one untilted, fully open grasp per pair of faces,
-    checked against the box, no wall contact allowed."""
-    in_bin = _compose().pick.top_down.in_bin
-    assert list(in_bin.tilts_deg) == [0.0]
-    assert list(in_bin.openings_mm) == [85.0]
-    assert in_bin.gripper_model == "box"
-    assert in_bin.finger_allowance == 0.0
-    default = InBinPick()
-    assert (default.tilts_deg, default.openings_mm) == ((0.0,), (85.0,))
-    assert (default.gripper_model, default.finger_allowance) == ("box", 0.0)
-    geom = TopDownPickGeometry()
-    assert (geom.tilt, geom.open_position) == (0.0, 0.0)
+def test_the_usual_two_grasps_come_first_so_every_pick_that_works_keeps_its_grasp():
+    """Face-aligned, untilted, fully open on the first pair of faces and then the
+    second, exactly the old controller's two grasps, before any new one; no grasp is
+    tried twice."""
+    cfg = _compose()
+    geom = geometry_from_config(cfg.pick.top_down)
+    cands = _candidates(cfg)
+    keys = [_key(g, geom) for g in cands]
+    assert keys[:2] == [(0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 90.0, 0.0)]
+    legacy = _candidates(_compose(*LEGACY))
+    assert [_key(g, geom) for g in legacy] == keys[:2]
+    assert len(set(keys)) == len(keys)
+    # 11 yaws x 7 tilts x 2 pairs of faces x 2 openings, less 70 mm at +-25 deg.
+    assert len(keys) == 11 * 7 * 2 * 2 - 2 * 7 * 2
+
+
+def test_70_mm_is_skipped_where_the_cube_spans_more_than_it_can_take():
+    """At 25 deg off the faces the cube spans 6.6 cm across the closing axis, too wide
+    for the 70 mm opening with 5 mm to spare: tried fully open only; at 20 deg (6.4
+    cm) both openings."""
+    cfg = _compose()
+    geom = geometry_from_config(cfg.pick.top_down)
+    by_yaw: dict[float, set[float]] = {}
+    for g in _candidates(cfg):
+        by_yaw.setdefault(_key(g, geom)[0], set()).add(round(g.open_position, 6))
+    partial = round(opening_command(0.070), 6)
+    assert by_yaw[25.0] == by_yaw[-25.0] == {0.0}
+    assert by_yaw[20.0] == by_yaw[-20.0] == by_yaw[0.0] == {0.0, partial}
 
 
 def test_an_untilted_grasp_is_the_current_one_bit_for_bit():
@@ -156,9 +202,9 @@ def test_finger_allowance_lets_only_the_linkage_touch(name, past, allowance, tou
 
 
 def test_a_refusal_names_both_pairs_of_faces():
-    """With the candidates on, a cube against a wall is refused with the reason for each
-    pair of faces, so a bracelet collision on the other pair is visible."""
-    cfg = _variant_a()
+    """A cube against a wall is refused with the reason for each pair of faces, so a
+    bracelet collision on the other pair is visible."""
+    cfg = _compose()
     geom = geometry_from_config(cfg.pick.top_down)
     in_bin = cfg.pick.top_down.in_bin
     cube = {"x": BIN.x + 0.15, "y": BIN.y + 0.11, "yaw_deg": 45.0}  # a corner
@@ -170,16 +216,16 @@ def test_a_refusal_names_both_pairs_of_faces():
 
 
 def test_the_tilted_candidates_pick_a_cube_the_current_grasp_refuses():
-    """6.0 cm from the far wall (the one away from the robot), at 30 degrees: the
-    current grasp refuses; a tilted candidate of A clears it."""
+    """6.0 cm from the far wall (the one away from the robot), at 30 degrees: the old
+    controller refuses; a tilted grasp of the default clears it."""
     cube = {"x": BIN.x - 0.08, "y": BIN.y, "yaw_deg": 30.0}
-    current = _compose()
+    current = _compose(*LEGACY)
     geom = geometry_from_config(current.pick.top_down)
     chosen, _ = _bin_grasp_geometry(
         geom, BASE, cube, BIN, current.pick.top_down.in_bin, RETRACT_ARM_CONF
     )
     assert chosen is None
-    cfg = _variant_a()
+    cfg = _compose()
     chosen, problem = _bin_grasp_geometry(
         geometry_from_config(cfg.pick.top_down),
         BASE,
@@ -193,38 +239,10 @@ def test_the_tilted_candidates_pick_a_cube_the_current_grasp_refuses():
     assert chosen.tilt != 0.0
 
 
-def test_the_gripper_yaw_is_tied_to_the_faces_by_default():
-    """C is off by default: one gripper yaw per pair of faces."""
-    assert list(_compose().pick.top_down.in_bin.yaw_offsets_deg) == [0.0]
-    assert InBinPick().yaw_offsets_deg == (0.0,)
-
-
 def _candidates(cfg):
-    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
-        bin_grasp_candidates,
-    )
-
     return bin_grasp_candidates(
         geometry_from_config(cfg.pick.top_down), cfg.pick.top_down.in_bin
     )
-
-
-def test_an_edge_grasp_closes_across_the_diagonal_fully_open_only():
-    """C2: the fingers close on two opposite vertical edges, the gripper turned 45
-    degrees off the faces.
-
-    The diagonal (7.07 cm) does not fit the 70 mm opening, so an edge grasp is tried
-    fully open only; face-aligned grasps come first.
-    """
-    cfg = _variant_a("pick.top_down.in_bin.yaw_offsets_deg=[0,45]")
-    cands = _candidates(cfg)
-    offsets = [round(math.degrees(g.wrist_yaw_offset)) for g in cands]
-    assert offsets[0] == 0 and offsets[-1] == 45
-    assert offsets.index(45) > max(i for i, o in enumerate(offsets) if o == 0)
-    edge = [g for g in cands if round(math.degrees(g.wrist_yaw_offset)) == 45]
-    assert edge and all(g.open_position == 0.0 for g in edge)
-    face = [g for g in cands if g.wrist_yaw_offset == 0.0]
-    assert {g.open_position for g in face} == {0.0, opening_command(0.070)}
 
 
 def test_a_yaw_relaxed_grasp_turns_the_closing_axis_off_the_faces():

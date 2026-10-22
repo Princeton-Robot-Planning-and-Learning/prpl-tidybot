@@ -97,8 +97,10 @@ def gripper_link_points(command: float) -> dict[str, NDArray[np.float64]]:
         local = _geom_surface(model, g)
         if local is None:
             continue
-        world = data.geom_xpos[g] + local @ data.geom_xmat[g].reshape(3, 3).T
-        out.setdefault(body, []).append((world - origin) @ rot)
+        # einsum, not @: see arm_bin_collision (OpenBLAS threads on large matmuls).
+        xmat = data.geom_xmat[g].reshape(3, 3)
+        world = data.geom_xpos[g] + np.einsum("ij,kj->ik", local, xmat)
+        out.setdefault(body, []).append(np.einsum("ij,jk->ik", world - origin, rot))
     return {body: np.vstack(parts) for body, parts in out.items()}
 
 
