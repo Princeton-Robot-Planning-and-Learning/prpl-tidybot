@@ -1,12 +1,12 @@
 """Top-down cube pick, ported from Jimmy Wu's TidyBot ``pick_object``.
 
 The original (``tidybot_real/robot/controller.py``, as adapted by Yixuan Huang for the
-Princeton robots) parks the base so the object is a fixed reach away, then moves the
-arm to a point 10 cm above the object with the tool pointing straight down and the
-wrist turned to the object's orientation, descends vertically, closes the gripper and
-checks the gripper position to tell a grasp from a miss. A vertical approach turns a
-centimetre of localization or parking error into an off-centre grasp rather than a
-push, which is why it works open-loop.
+Princeton robots) parks the base so the object is a fixed reach away, then moves the arm
+to a point 10 cm above the object with the tool pointing straight down and the wrist
+turned to the object's orientation, descends vertically, closes the gripper and checks
+the gripper position to tell a grasp from a miss. A vertical approach turns a centimetre
+of localization or parking error into an off-centre grasp rather than a push, which is
+why it works open-loop.
 
 Here the object is the floor cube, localized by the ceiling cameras
 (:mod:`prpl_tidybot.cube_localizer`), and the arm is driven through prpl-tidybot's
@@ -14,9 +14,9 @@ normal arm path (streamed joint targets) instead of Kortex's high-level moves. T
 faces the cube from the standoff, so the cube lies straight ahead of the arm mount.
 
 Frames: the IK solver works in the arm's base frame (+x along the robot's heading when
-joint 1 is at 0, +z up). The arm mount sits ``mounting_offset`` ahead of the base
-centre (``MOUNTING_OFFSET`` in ``third_party/constants.py``) and the floor is at
-``floor_z`` in the arm frame.
+joint 1 is at 0, +z up). The arm mount sits ``mounting_offset`` ahead of the base centre
+(``MOUNTING_OFFSET`` in ``third_party/constants.py``) and the floor is at ``floor_z`` in
+the arm frame.
 """
 
 # mujoco is a compiled extension; pylint cannot see its members.
@@ -69,6 +69,12 @@ class TopDownPickGeometry:
     # Gripper readings: closing on nothing reaches ~1.0; on the 5 cm cube it read 0.49.
     grasp_min: float = 0.2
     grasp_max: float = 0.9
+    # The pick out of the bin's candidates (``pick.top_down.in_bin``; kinder-baselines
+    # #178): the tool turned this far (rad) about the fingers' travel axis, so the
+    # pads stay square to the faces they close on, and the gripper command it opens to
+    # for the approach (0: fully open).
+    tilt: float = 0.0
+    open_position: float = 0.0
 
     @property
     def grasp_height(self) -> float:
@@ -121,8 +127,10 @@ def grasp_search_bounds(
     clearance: float = 0.05,
 ) -> tuple[float, float, float, float]:
     """Where a cube can be and still be picked with the base inside `floor_bounds`:
+
     the drivable box grown on every side by standoff - (base front + clearance), so a
-    cube just past the box edge (e.g. in a bin there) is still searched for."""
+    cube just past the box edge (e.g. in a bin there) is still searched for.
+    """
     margin = geom.standoff - base_front - clearance
     return (
         float(floor_bounds[0]) - margin,
@@ -146,19 +154,29 @@ def arm_frame_target(
     return (c * dx + s * dy, -s * dx + c * dy)
 
 
-def _down_quat(closing_yaw: float) -> NDArray[np.float64]:
-    """(x, y, z, w) of a tool frame whose approach axis (z) points down and whose
-    closing axis (y) lies along `closing_yaw` in the horizontal plane."""
+def _tool_rotation(closing_yaw: float, tilt: float = 0.0) -> NDArray[np.float64]:
+    """The tool frame whose approach axis (z) points down and whose closing axis (y)
+    lies along `closing_yaw` in the horizontal plane, then turned by `tilt` about its
+    own x axis (the fingers' travel)."""
     c, s = math.cos(closing_yaw), math.sin(closing_yaw)
     rot = np.column_stack([[-s, c, 0.0], [c, s, 0.0], [0.0, 0.0, -1.0]])
+    if tilt:
+        ct, st = math.cos(tilt), math.sin(tilt)
+        rot = rot @ np.array([[1.0, 0.0, 0.0], [0.0, ct, -st], [0.0, st, ct]])
+    return rot
+
+
+def _down_quat(closing_yaw: float, tilt: float = 0.0) -> NDArray[np.float64]:
+    """(x, y, z, w) of :func:`_tool_rotation`."""
+    rot = _tool_rotation(closing_yaw, tilt)
     quat_wxyz = np.empty(4)
     mujoco.mju_mat2Quat(quat_wxyz, rot.flatten())
     return np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
 
 
 def cube_closing_yaw(cube_yaw_rel: float, geom: TopDownPickGeometry) -> float:
-    """The cube is 90-degree symmetric: pick the equivalent yaw nearest straight
-    ahead, so the wrist turns as little as possible."""
+    """The cube is 90-degree symmetric: pick the equivalent yaw nearest straight ahead,
+    so the wrist turns as little as possible."""
     yaw = cube_yaw_rel + geom.wrist_yaw_offset
     folded = (yaw + math.pi / 4) % (math.pi / 2) - math.pi / 4
     if not geom.closing_turn:
@@ -199,8 +217,8 @@ def forward_kinematics(
 def arm_link_points(
     joints: Sequence[float], geom: TopDownPickGeometry
 ) -> dict[str, NDArray[np.float64]]:
-    """Every collision mesh vertex of each arm link at ``joints``, in the arm frame
-    (the IK model has no gripper mesh: the 2F-85 is only its pinch-point offset)."""
+    """Every collision mesh vertex of each arm link at ``joints``, in the arm frame (the
+    IK model has no gripper mesh: the 2F-85 is only its pinch-point offset)."""
     with _SOLVER_LOCK:
         return _arm_link_points(joints, geom)
 
@@ -236,9 +254,13 @@ def top_down_joint_targets(
 ) -> tuple[list[float], list[float]]:
     """Joint targets above the cube and at the grasp (straight below), pointing down.
 
+    With ``geom.tilt`` the tool is turned about the fingers' travel at both poses, and
+    the hover is ``hover_height`` higher than the grasp back along the tilted tool axis.
     Raises if the IK does not converge to within 5 mm and 2 degrees of either pose.
     """
     closing = cube_closing_yaw(cube_yaw_rel, geom)
+    if geom.tilt:
+        return _tilted_joint_targets(ax, ay, closing, geom, seed)
     hover = pointing_down_joints(
         (ax, ay, geom.floor_z + geom.grasp_height + geom.hover_height),
         closing,
@@ -251,24 +273,53 @@ def top_down_joint_targets(
     return hover, grasp
 
 
+def _tilted_joint_targets(
+    ax: float,
+    ay: float,
+    closing: float,
+    geom: TopDownPickGeometry,
+    seed: Sequence[float] | None,
+) -> tuple[list[float], list[float]]:
+    grasp_pos = np.array([ax, ay, geom.floor_z + geom.grasp_height])
+    approach = _tool_rotation(closing, geom.tilt)[:, 2]
+    hover_pos = grasp_pos - approach * (geom.hover_height / -approach[2])
+    hover = pointing_down_joints(
+        hover_pos.tolist(), closing, geom, seed, tilt=geom.tilt
+    )
+    grasp = pointing_down_joints(
+        grasp_pos.tolist(), closing, geom, hover, tilt=geom.tilt
+    )
+    return hover, grasp
+
+
 def pointing_down_joints(
     position: Sequence[float],
     closing_yaw: float,
     geom: TopDownPickGeometry,
     seed: Sequence[float] | None = None,
+    tilt: float = 0.0,
 ) -> list[float]:
     """Joints putting the pinch point at `position` (arm frame), tool pointing straight
-    down, fingers closing along `closing_yaw`. Raises if the IK does not get within 5
-    mm and 2 degrees."""
-    quat = _down_quat(closing_yaw)
-    q = np.asarray(seed if seed is not None else RETRACT_ARM_CONF, float)
+    down (turned by `tilt` about the fingers' travel), fingers closing along
+    `closing_yaw`. Raises if the IK does not get within 5 mm and 2 degrees.
+
+    A tilted pose that the seed does not converge to is tried once more from the retract
+    pose (a tilted hover's joints can sit on a branch the grasp below it cannot follow).
+    """
+    quat = _down_quat(closing_yaw, tilt)
+    want = _tool_rotation(closing_yaw, tilt)[:, 2]
     goal = np.asarray(position, float)
+    seeds = [seed if seed is not None else RETRACT_ARM_CONF]
+    if tilt and seed is not None:
+        seeds.append(RETRACT_ARM_CONF)
     with _SOLVER_LOCK:
-        for _ in range(10):  # the solver takes 20 steps per call; restart from it
-            q = _solver(geom).solve(goal, quat, q)  # type: ignore[no-untyped-call]
-            pos, approach, _ = forward_kinematics(q, geom)
-            if np.linalg.norm(pos - goal) < 0.005 and approach[2] < -0.9994:
-                return [float(v) for v in q]
+        for start in seeds:
+            q = np.asarray(start, float)
+            for _ in range(10):  # the solver takes 20 steps per call; restart from it
+                q = _solver(geom).solve(goal, quat, q)  # type: ignore[no-untyped-call]
+                pos, approach, _ = forward_kinematics(q, geom)
+                if np.linalg.norm(pos - goal) < 0.005 and approach @ want > 0.9994:
+                    return [float(v) for v in q]
     raise ValueError(f"IK did not reach {goal.round(3).tolist()} pointing down.")
 
 

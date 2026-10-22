@@ -220,7 +220,7 @@ def test_the_collision_check_refuses_a_gripper_over_a_wall():
 def test_a_cube_against_the_bin_wall_is_handed_to_the_person(tmp_path, monkeypatch):
     """A cube the gripper cannot reach without touching a wall is not grasped: the
     person is asked to nudge it, and the pick goes on once it has moved."""
-    cube = [BIN[0] + 0.10, BIN[1], 0.025]  # 4 cm from the inner wall
+    cube = [BIN[0] + 0.12, BIN[1], 0.025]  # 2 cm from the inner wall
 
     monkeypatch.setattr(ConstantTargetSource, "get_target", lambda self: tuple(cube))
 
@@ -304,7 +304,11 @@ def test_the_grasp_on_the_other_faces_is_used_when_only_it_clears():
     """With a gripper wide enough that its finger direction decides, a cube near a
     wall gets the grasp turned a quarter (fingers along the wall)."""
     cfg = _compose(
-        **{"pick.top_down.in_bin.finger_half_span": 0.10, "env.cube_pose": IN_BIN}
+        **{
+            "pick.top_down.in_bin.finger_half_span": 0.10,
+            "pick.top_down.in_bin.gripper_model": "box",
+            "env.cube_pose": IN_BIN,
+        }
     )
     geom = geometry_from_config(cfg.pick.top_down)
     fit = _bin_fit()

@@ -2,11 +2,12 @@
 
     python scripts/in_bin_pick_benchmark.py --out-dir <dir>
     python scripts/in_bin_pick_benchmark.py --out-dir <dir> \
-        --controller current \
+        --controller current --controller legacy --controller B0.5 \
         --controller "margin5=pick.top_down.in_bin.wall_margin=0.005"
 
-Each ``--controller`` is ``name`` or ``name=override[,override...]`` (Hydra overrides
-on conf/skill_server.yaml; ``current`` is the config as it stands). Writes
+Each ``--controller`` is a named candidate (``VARIANTS``: current, the shipped config;
+legacy, the controller run 10 ran; B0.5, the finger links allowed to 0.5 cm of a wall)
+or ``name=override[;override...]`` (Hydra overrides on conf/skill_server.yaml). Writes
 ``<name>.json`` (every case's sim result and the summary) and ``<name>.md`` (the
 table) per controller, and prints the summary. See
 :mod:`prpl_tidybot.in_bin_pick_benchmark`.
@@ -20,6 +21,7 @@ from pathlib import Path
 from prpl_tidybot.in_bin_pick_benchmark import (
     CURRENT,
     DEFAULT_FIXTURE,
+    VARIANTS,
     Controller,
     format_table,
     load_cases,
@@ -29,11 +31,11 @@ from prpl_tidybot.in_bin_pick_benchmark import (
 
 
 def parse_controller(text: str) -> Controller:
-    """``name`` or ``name=override[,override...]``."""
-    if text == CURRENT.name:
-        return CURRENT
+    """A named candidate, or ``name=override[;override...]``."""
+    if text in VARIANTS:
+        return VARIANTS[text]
     name, _, rest = text.partition("=")
-    return Controller(name=name, overrides=tuple(o for o in rest.split(",") if o))
+    return Controller(name=name, overrides=tuple(o for o in rest.split(";") if o))
 
 
 def main() -> None:

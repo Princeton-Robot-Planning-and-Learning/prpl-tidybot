@@ -302,8 +302,8 @@ def test_a_cube_in_the_far_bin_is_refused_for_the_person(skills, monkeypatch):
 
 
 def test_a_cube_against_the_bin_wall_is_refused_before_moving():
-    """4 cm from the inner wall no grasp clears it: refused, nothing moved."""
-    cube = f"[{CLOSE_BIN[0] + 0.10},{CLOSE_BIN[1]},0.025]"
+    """2 cm from the inner wall no grasp clears it: refused, nothing moved."""
+    cube = f"[{CLOSE_BIN[0] + 0.12},{CLOSE_BIN[1]},0.025]"
     skills = build_skills(_cfg(**{"env.cube_pose": cube}))
     before = _still(skills)
     reply = skills.pick()
@@ -406,7 +406,7 @@ def test_observe_says_whether_the_pick_could_start_from_the_same_look(
 )
 def test_observes_can_pick_refuses_what_can_pick_refuses(cube, reason):
     """Past the barrier, against the bin wall: the same refusal, the same reason."""
-    cube = cube or f"[{CLOSE_BIN[0] + 0.10},{CLOSE_BIN[1]},0.025]"
+    cube = cube or f"[{CLOSE_BIN[0] + 0.12},{CLOSE_BIN[1]},0.025]"
     skills = build_skills(_cfg(**{"env.cube_pose": cube}))
     answer = skills.observe()["can_pick"]
     assert answer["refused"] is True and reason in answer["reason"]

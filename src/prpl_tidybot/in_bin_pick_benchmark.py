@@ -29,7 +29,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from hydra import compose, initialize_config_dir
@@ -37,6 +37,7 @@ from omegaconf import DictConfig
 
 from prpl_tidybot import robot_skills
 from prpl_tidybot.bin_localizer import ConstantBinSource
+from prpl_tidybot.sim_robot import SimWorld
 from prpl_tidybot.sim_video import SimMarkers, bin_wall_contacts
 from prpl_tidybot.third_party import arm_server
 from prpl_tidybot.top_down_pick import forward_kinematics
@@ -60,7 +61,33 @@ class Controller:
     overrides: tuple[str, ...] = ()
 
 
+# The shipped controller: the skill server's config as it stands (the near-wall pick).
 CURRENT = Controller(name="current")
+
+_IN_BIN = "pick.top_down.in_bin"
+# The controller the real robot ran through run 10: the usual grasp on each pair of
+# faces only (face-aligned, untilted, fully open), checked against the gripper box.
+LEGACY = Controller(
+    name="legacy",
+    overrides=(
+        f"{_IN_BIN}.yaw_offsets_deg=[0]",
+        f"{_IN_BIN}.tilts_deg=[0]",
+        f"{_IN_BIN}.openings_mm=[85]",
+        f"{_IN_BIN}.gripper_model=box",
+    ),
+)
+
+# The candidate controllers, by name (scripts/in_bin_pick_benchmark.py --controller):
+# the shipped one, the one before it, and B0.5, the option that is off (the finger
+# links alone may come to 0.5 cm of a wall).
+VARIANTS: dict[str, Controller] = {
+    c.name: c
+    for c in [
+        CURRENT,
+        LEGACY,
+        Controller(name="B0.5", overrides=(f"{_IN_BIN}.finger_allowance=0.005",)),
+    ]
+}
 
 
 def load_cases(path: Path | str = DEFAULT_FIXTURE) -> list[dict[str, Any]]:
@@ -109,8 +136,9 @@ def run_case(
 ) -> dict[str, Any]:
     """The controller's pick of the case's cube in sim: ``verdict`` (``refused``,
     ``held`` or ``missed``), ``reason`` (the planner's refusal, or why a grasp missed),
-    the arm's ``steps``, whether the held cube cleared the rim, and any
-    ``wall_contacts`` (link and depth) of the TidyBot model with the walls."""
+    the arm's ``steps``, whether the held cube cleared the rim, any ``wall_contacts``
+    (link and depth) of the TidyBot model with the walls, and its least wall gap over
+    the motion and at the planned waypoints."""
     # pylint: disable=import-outside-toplevel
     from prpl_tidybot.skill_server import build_skills
     from prpl_tidybot.toss_sim import TossSim
@@ -140,7 +168,8 @@ def run_case(
         verdict, reason = "held", None
     else:
         verdict, reason = "missed", reply.get("note")
-    walls = bin_wall_contacts(world, SimMarkers.from_config(cfg))
+    markers = SimMarkers.from_config(cfg)
+    walls = bin_wall_contacts(world, markers)
     real = case["real"]["verdict"]
     return {
         "id": case["id"],
@@ -151,13 +180,49 @@ def run_case(
         "agrees_with_real": None if real is None else _REAL_FOR_SIM[verdict] == real,
         "stand": reply.get("stand"),
         "closing_turn_deg": attempts[-1].get("closing_turn_deg") if attempts else None,
+        "tilt_deg": attempts[-1].get("tilt_deg") if attempts else None,
+        "open_position": attempts[-1].get("open_position") if attempts else None,
+        "yaw_offset_deg": (
+            attempts[-1].get("wrist_yaw_offset_deg") if attempts else None
+        ),
         "gripper": reply.get("gripper"),
         "steps": [{"step": m["name"], "reached": m.get("reached")} for m in moves],
         "lifted_above_rim": verdict == "held"
         and _lifted_above(world, float(cfg.bin.height)),
         "wall_contacts": walls["contacts"],
         "min_wall_clearance_m": walls["min_clearance_m"],
+        "planned_min_wall_clearance_m": _planned_clearance(
+            world, attempts[-1] if attempts else {}, markers
+        ),
     }
+
+
+_PLANNED = ("above", "hover", "grasp")
+
+
+def _planned_clearance(
+    world: Any, attempt: dict[str, Any], markers: SimMarkers
+) -> dict[str, float | None]:
+    """The arm's and the gripper's least gap to a wall with the TidyBot model as
+    planned: the planned joints of the waypoint above the rim, the hover and the grasp
+    (the poses the planner checks) with the base where the planner took it to be (the
+    attempt's ``base``, the pose the drive reported); None if nothing was planned.
+
+    The executed motion's gap (``min_wall_clearance_m``) can be smaller: the base
+    stands a few mm off the pose it reported, and the arm arrives within its joint
+    tolerance of each waypoint, not on it.
+    """
+    last = {(s[6] or s[5]): s for s in world.samples if (s[6] or s[5]) in _PLANNED}
+    posed = [
+        (float(i), np.asarray(attempt["base"]), np.radians(m["planned_deg"]))
+        + tuple(last[m["name"]][3:])
+        for i, m in enumerate(attempt.get("moves", []))
+        if m["name"] in _PLANNED and m["name"] in last
+    ]
+    planned: dict[str, float | None] = bin_wall_contacts(
+        cast(SimWorld, SimpleNamespace(samples=posed)), markers
+    )["min_clearance_m"]
+    return planned
 
 
 def _lifted_above(world: Any, rim: float) -> bool:
@@ -195,6 +260,7 @@ def summarize(
         "agree": [sum(bool(r["agrees_with_real"]) for r in judged), len(judged)],
         "real_refused_refused_in_sim": count("refused", "refused"),
         "real_picked_held_in_sim": count("picked", "held"),
+        "real_refused_held_in_sim": count("refused", "held"),
         "real_missed_missed_in_sim": count("executed_missed", "missed"),
         "with_wall_contact": [
             sum(bool(r["wall_contacts"]) for r in results),

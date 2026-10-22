@@ -65,9 +65,10 @@ pick:
     # walls: the arm's own meshes, and the 2F-85 (no mesh in the IK model) as a box
     # `finger_half_span` along the fingers' travel and `half_width` across them, from
     # `gripper_length` above the pinch point to `fingertip_drop` below it (the open
-    # gripper in the TidyBot MuJoCo model: 14.8 x 7.6 cm, 12.4 cm up, 2.9 cm down). Of
-    # the grasps on the cube's two pairs of faces, one that clears is used; if neither
-    # does (a pose within `wall_margin` of a wall) the person nudges the cube.
+    # gripper in the TidyBot MuJoCo model: 14.8 x 7.6 cm, 12.4 cm up, 2.9 cm down), or
+    # link by link (gripper_model: mesh, the default). Of the grasps below, the first
+    # that clears is used; if none does (a pose within `wall_margin` of a wall) the
+    # person nudges the cube.
     in_bin:
       enabled: true
       rim_clearance: 0.04
@@ -76,6 +77,21 @@ pick:
       gripper_length: 0.124
       fingertip_drop: 0.029
       wall_margin: 0.01
+      # The grasps tried, the usual two first (face-aligned, untilted, 85 mm open, on
+      # each pair of faces), then every combination of: gripper yaw off the faces
+      # (deg), tilt about the fingers' travel axis (deg, so the pads stay square to
+      # their faces; kinder-baselines #178), both pairs of faces, opening (mm: 85
+      # fully open, 70 = the cube's width + 2 cm; an opening narrower than the cube's
+      # span at that yaw + 5 mm is skipped). Each is checked against the real 2F-85's
+      # links at its opening (gripper_model: mesh; box = the box above), every link
+      # kept wall_margin off the walls. finger_allowance (m, mesh only), off: how far
+      # past the inner wall face the finger links alone may reach instead.
+      yaw_offsets_deg: [0, 5, -5, 10, -10, 15, -15, 20, -20, 25, -25]
+      tilts_deg: [0, 10, -10, 15, -15, 20, -20]
+      openings_mm: [85, 70]
+      gripper_model: mesh
+      finger_allowance: 0.0
+      cube_width: 0.05
 
 # mode=sim: the same loop on the kinematic TidyBot, with the bin's walls in the scene
 # (sim.bin: x, y, yaw deg; sim_safety.json gives the arm's least clearance to them per
