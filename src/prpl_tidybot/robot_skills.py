@@ -10,6 +10,7 @@ and the ceiling and wrist recorders.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import functools
 import logging
@@ -29,7 +30,9 @@ from prpl_tidybot.aimed_toss import Workspace
 from prpl_tidybot.bin_localizer import BinFit, cube_in_bin
 from prpl_tidybot.gripper_shape import (
     FINGER_LINKS,
+    GRIPPER_HOUSING,
     gripper_link_points,
+    gripper_link_spheres,
     opening_command,
 )
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
@@ -60,6 +63,10 @@ from prpl_tidybot.visual_servo.top_down_cube import (
 _logger = logging.getLogger(__name__)
 
 _MAX_DRIVE_TICKS = 600
+# Slack (m) on the wall checks' shortcuts (a link's bounding sphere, a point inside the
+# outer footprint), for float rounding: a shortcut only ever gives the full check's
+# answer.
+_SHORTCUT_EPS = 1e-9
 
 
 def _bin_box(bin_fit: BinFit) -> list[float]:
@@ -167,47 +174,121 @@ def arm_bin_collision(
     axis (the IK site's 'closing' axis is across the fingers); or, with
     ``gripper_model: mesh``, each of its links as KINDER's gen3_2f85 shapes them at
     the grasp's opening (:func:`prpl_tidybot.gripper_shape.gripper_link_points`).
+    The arm's links are checked first, then the gripper's.
     """
-    margin = float(in_bin.wall_margin)
-    pos, approach, closing = forward_kinematics(joints, geom)
-    fingers = np.cross(closing, approach)
-    parts = dict(arm_link_points(joints, geom))
-    if str(_in_bin_option(in_bin, "gripper_model")) == "mesh":
+    frame = _BinFrame(geom, base, bin_fit, in_bin)
+    return frame.arm_problem(joints) or frame.gripper_problem(
+        forward_kinematics(joints, geom), geom.open_position
+    )
+
+
+class _BinFrame:
+    """The bin's walls seen from the arm, its base at map pose ``base``: what
+    :func:`arm_bin_collision` checks each part against."""
+
+    def __init__(
+        self,
+        geom: TopDownPickGeometry,
+        base: Sequence[float],
+        bin_fit: BinFit,
+        in_bin: Any,
+    ) -> None:
+        self.geom, self.bin_fit, self.in_bin = geom, bin_fit, in_bin
+        margin = float(in_bin.wall_margin)
+        x, y, theta = base
+        self.mx = x + geom.mounting_offset * math.cos(theta)
+        self.my = y + geom.mounting_offset * math.sin(theta)
+        self.rim = geom.floor_z + bin_fit.height + margin
+        self.ct, self.st = math.cos(theta), math.sin(theta)
+        self.cb, self.sb = math.cos(bin_fit.yaw), math.sin(bin_fit.yaw)
+        self.inner = (
+            0.5 * bin_fit.length - bin_fit.wall - margin,
+            0.5 * bin_fit.width - bin_fit.wall - margin,
+        )
+        self.mesh = str(_in_bin_option(in_bin, "gripper_model")) == "mesh"
+
+    def local(self, points: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Arm-frame points (N x >=2) in the bin's own frame (N x 2, its x along its
+        length)."""
+        wx = self.mx + self.ct * points[:, 0] - self.st * points[:, 1] - self.bin_fit.x
+        wy = self.my + self.st * points[:, 0] + self.ct * points[:, 1] - self.bin_fit.y
+        return np.c_[self.cb * wx + self.sb * wy, -self.sb * wx + self.cb * wy]
+
+    def part_problem(self, name: str, points: NDArray[np.float64]) -> str | None:
+        """Why one part (arm-frame points) touches a wall below the rim, or None."""
+        low = points[points[:, 2] < self.rim]
+        if len(low) == 0:
+            return None
+        problem = part_wall_problem(name, self.local(low), self.bin_fit, self.in_bin)
+        if problem is None:
+            return None
+        depth = (self.bin_fit.height + self.geom.floor_z) - float(low[:, 2].min())
+        return f"{problem} ({depth:.3f} m below the rim)"
+
+    def arm_problem(self, joints: Sequence[float]) -> str | None:
+        """The first arm link at ``joints`` that touches a wall, as why."""
+        for name, points in arm_link_points(joints, self.geom).items():
+            problem = self.part_problem(name, points)
+            if problem is not None:
+                return problem
+        return None
+
+    def gripper_problem(
+        self,
+        tool_pose: tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]],
+        open_position: float,
+        links: str = "all",
+    ) -> str | None:
+        """The first gripper part at the tool pose (pinch point, approach, closing:
+        :func:`forward_kinematics`) that touches a wall, as why: the housing (or the
+        box), then the finger links. ``links``: ``housing`` or ``fingers`` checks only
+        those (the housing does not depend on the opening).
+
+        A mesh link whose bounding sphere lies wholly above the rim or wholly inside
+        the inner footprint less the margin is passed without transforming its
+        points: its points would give the same answer (no problem).
+        """
+        pos, approach, closing = tool_pose
+        fingers = np.cross(closing, approach)
+        if not self.mesh:
+            if links == "fingers":
+                return None
+            in_bin = self.in_bin
+            corners = [
+                pos
+                + a * approach
+                + b * float(in_bin.finger_half_span) * fingers
+                + c * float(in_bin.half_width) * closing
+                for a in (float(in_bin.fingertip_drop), -float(in_bin.gripper_length))
+                for b in (-1.0, 1.0)
+                for c in (-1.0, 1.0)
+            ]
+            return self.part_problem("gripper", np.asarray(corners))
         tool = np.column_stack([fingers, closing, approach])
-        for name, local in gripper_link_points(geom.open_position).items():
+        spheres = gripper_link_spheres(open_position)
+        for name, local in gripper_link_points(open_position).items():
+            if (links == "housing" and name != GRIPPER_HOUSING) or (
+                links == "fingers" and name == GRIPPER_HOUSING
+            ):
+                continue
+            centre, radius = spheres[name]
+            c = pos + tool @ centre
+            if c[2] - radius >= self.rim + _SHORTCUT_EPS:
+                continue
+            u, v = self.local(c[None, :])[0]
+            if (
+                abs(u) + radius <= self.inner[0] - _SHORTCUT_EPS
+                and abs(v) + radius <= self.inner[1] - _SHORTCUT_EPS
+            ):
+                continue
             # einsum, not @: a ~100k-point matmul goes multithreaded in OpenBLAS, which
             # spun forever beside the skill server's other threads (a hung test run).
-            parts[f"gripper {name}"] = pos + np.einsum("ij,kj->ik", local, tool)
-    else:
-        corners = [
-            pos
-            + a * approach
-            + b * float(in_bin.finger_half_span) * fingers
-            + c * float(in_bin.half_width) * closing
-            for a in (float(in_bin.fingertip_drop), -float(in_bin.gripper_length))
-            for b in (-1.0, 1.0)
-            for c in (-1.0, 1.0)
-        ]
-        parts["gripper"] = np.asarray(corners)
-    # Arm frame -> the bin's own frame (its x along its length).
-    x, y, theta = base
-    mx = x + geom.mounting_offset * math.cos(theta)
-    my = y + geom.mounting_offset * math.sin(theta)
-    rim = geom.floor_z + bin_fit.height + margin
-    ct, st = math.cos(theta), math.sin(theta)
-    cb, sb = math.cos(bin_fit.yaw), math.sin(bin_fit.yaw)
-    for name, points in parts.items():
-        low = points[points[:, 2] < rim]
-        if len(low) == 0:
-            continue
-        wx = mx + ct * low[:, 0] - st * low[:, 1] - bin_fit.x
-        wy = my + st * low[:, 0] + ct * low[:, 1] - bin_fit.y
-        local = np.c_[cb * wx + sb * wy, -sb * wx + cb * wy]
-        problem = part_wall_problem(name, local, bin_fit, in_bin)
-        if problem is not None:
-            depth = (bin_fit.height + geom.floor_z) - float(low[:, 2].min())
-            return f"{problem} ({depth:.3f} m below the rim)"
-    return None
+            problem = self.part_problem(
+                f"gripper {name}", pos + np.einsum("ij,kj->ik", local, tool)
+            )
+            if problem is not None:
+                return problem
+        return None
 
 
 def part_wall_problem(
@@ -240,8 +321,14 @@ def part_wall_problem(
         if float(past.max()) <= allowance:
             return None
     outer = (0.5 * bin_fit.length + margin, 0.5 * bin_fit.width + margin)
-    hull = cv.convexHull(local.astype(np.float32)).reshape(-1, 2).astype(np.float64)
-    if _overlaps(hull, outer):
+    flat = local.astype(np.float32)
+    # A point inside the outer footprint puts the hull over it: no hull needed.
+    inside = (np.abs(flat[:, 0]) < outer[0] - _SHORTCUT_EPS) & (
+        np.abs(flat[:, 1]) < outer[1] - _SHORTCUT_EPS
+    )
+    if bool(np.any(inside)) or _overlaps(
+        cv.convexHull(flat).reshape(-1, 2).astype(np.float64), outer
+    ):
         label = f"the gripper's {link}" if link != name else f"the {name}"
         return f"{label} would touch the bin wall"
     return None
@@ -273,33 +360,44 @@ def bin_grasp_candidates(
 
     First the usual grasp on each pair of faces, as listed first (face-aligned,
     untilted, fully open), so a pick that cleared with them keeps its grasp. Then the
-    rest: gripper yaws off the faces (``yaw_offsets_deg``, as listed) outermost; within
-    a yaw, kinder-baselines #178's order: tilts as listed (``tilts_deg``), both pairs of
-    faces, each opening as listed (``openings_mm``). An opening narrower than the
-    cube's span across the closing axis at that yaw, plus 5 mm, is skipped (at 25
-    degrees off the faces the 5 cm cube spans 6.6 cm).
+    rest of the first set: gripper yaws off the faces (``yaw_offsets_deg``, as listed)
+    outermost; within a yaw, kinder-baselines #178's order: tilts as listed
+    (``tilts_deg``), both pairs of faces, each opening as listed (``openings_mm``).
+    Then each set of ``more_grasps`` (the same three lists) in the same order, less the
+    grasps already listed, so a pick the first set clears keeps its grasp. An opening
+    narrower than the cube's span across the closing axis at that yaw, plus 5 mm, is
+    skipped (at 25 degrees off the faces the 5 cm cube spans 6.6 cm, at 40 degrees 7.0
+    cm).
     """
     width = float(_in_bin_option(in_bin, "cube_width"))
+    lists = ("yaw_offsets_deg", "tilts_deg", "openings_mm")
+    sets = [tuple(_in_bin_option(in_bin, n) for n in lists)] + [
+        tuple(_grasp_option(more, n) for n in lists)
+        for more in _in_bin_option(in_bin, "more_grasps")
+    ]
     out: list[TopDownPickGeometry] = []
-    for offset in (float(o) for o in _in_bin_option(in_bin, "yaw_offsets_deg")):
-        off = math.radians(offset)
-        span = width * (abs(math.cos(off)) + abs(math.sin(off)))
-        for tilt in (float(t) for t in _in_bin_option(in_bin, "tilts_deg")):
-            for turn in (0.0, math.pi / 2):
-                for opening in (
-                    float(o) for o in _in_bin_option(in_bin, "openings_mm")
-                ):
-                    if opening / 1000 < span + 0.005 and offset:
-                        continue
-                    out.append(
-                        dataclasses.replace(
-                            geom,
-                            closing_turn=turn,
-                            tilt=math.radians(tilt),
-                            open_position=opening_command(opening / 1000),
-                            wrist_yaw_offset=geom.wrist_yaw_offset + off,
+    seen: set[tuple[float, float, float, float]] = set()
+    for yaws, tilts, openings in sets:
+        for offset in (float(o) for o in yaws):
+            off = math.radians(offset)
+            span = width * (abs(math.cos(off)) + abs(math.sin(off)))
+            for tilt in (float(t) for t in tilts):
+                for turn in (0.0, math.pi / 2):
+                    for opening in (float(o) for o in openings):
+                        if opening / 1000 < span + 0.005 and offset:
+                            continue
+                        if (offset, tilt, turn, opening) in seen:
+                            continue
+                        seen.add((offset, tilt, turn, opening))
+                        out.append(
+                            dataclasses.replace(
+                                geom,
+                                closing_turn=turn,
+                                tilt=math.radians(tilt),
+                                open_position=opening_command(opening / 1000),
+                                wrist_yaw_offset=geom.wrist_yaw_offset + off,
+                            )
                         )
-                    )
 
     def first(g: TopDownPickGeometry) -> bool:
         return (g.wrist_yaw_offset, g.tilt, g.open_position) == (
@@ -309,6 +407,13 @@ def bin_grasp_candidates(
         )
 
     return [g for g in out if first(g)] + [g for g in out if not first(g)]
+
+
+def _grasp_option(more: Any, name: str) -> Any:
+    """``more.<name>`` for an entry of ``more_grasps`` (config or :class:`GraspSet`), or
+    the oblique extension's list when the entry leaves it out."""
+    value = more.get(name) if hasattr(more, "get") else getattr(more, name, None)
+    return getattr(_GRASP_SET_DEFAULTS, name) if value is None else value
 
 
 def _bin_grasp_geometry(
@@ -324,23 +429,168 @@ def _bin_grasp_geometry(
     first; else None and why the usual one would touch.
 
     With more candidates configured (:func:`bin_grasp_candidates`) the first that clears
-    is used; a refusal then names the first reason for each pair of faces and how many
-    candidates were tried.
+    is used; a refusal then says where the cube sits against the walls (a corner when
+    two walls are within the open fingers' reach), and for each pair of faces the part
+    that binds most often, how often, and the first reason; and how many candidates were
+    tried. Nothing moves either way.
     """
     candidates = bin_grasp_candidates(geom, in_bin)
+    search = _BinGraspSearch(base, cube, bin_fit, in_bin, seed)
     first: dict[float, str] = {}
+    binds: dict[float, collections.Counter[str]] = {}
     for g in candidates:
-        problem = _bin_pick_problem(g, base, cube, bin_fit, in_bin, seed)
+        problem = search.problem(g)
         if problem is None:
             return g, None
         first.setdefault(g.closing_turn, problem)
-    both = "; ".join(f"faces {math.degrees(t):.0f} deg: {p}" for t, p in first.items())
-    _logger.info(
-        "No grasp clears the bin's walls (%d tried): %s.", len(candidates), both
-    )
+        binds.setdefault(g.closing_turn, collections.Counter())[_binding(problem)] += 1
     if len(candidates) == 2:
+        _logger.info("No grasp clears the bin's walls: %s.", first[0.0])
         return None, first[0.0]
-    return None, f"{both}; {len(candidates)} candidates"
+    faces = []
+    for turn, problem in first.items():
+        body, n = binds[turn].most_common(1)[0]
+        total = sum(binds[turn].values())
+        faces.append(
+            f"faces {math.degrees(turn):.0f} deg: {body} binds in {n}/{total} "
+            f"grasps (first: {problem})"
+        )
+    why = (
+        f"{_wall_situation(base, cube, bin_fit, in_bin)}; {'; '.join(faces)}; "
+        f"{len(candidates)} candidates"
+    )
+    _logger.info("No grasp clears the bin's walls: %s.", why)
+    return None, why
+
+
+_PHASES = {"above": "above the rim", "hover": "hover", "grasp": "grasp"}
+
+
+def _binding(problem: str) -> str:
+    """The part and pose a candidate's refusal names, e.g. "the gripper's base at the
+    hover" (or "no IK")."""
+    phase, _, rest = problem.partition(": ")
+    if phase not in _PHASES:
+        return "no IK"
+    part = rest.split(" would touch")[0]
+    return f"{part} at the {_PHASES[phase]}"
+
+
+def _wall_situation(
+    base: Sequence[float], cube: dict[str, Any], bin_fit: BinFit, in_bin: Any
+) -> str:
+    """Where the cube sits against the bin's walls, each wall named as the robot at
+    ``base`` sees it: in a corner when two walls are within the open fingers' reach
+    along their travel plus ``wall_margin``, else the nearest wall."""
+    dx, dy = cube["x"] - bin_fit.x, cube["y"] - bin_fit.y
+    cb, sb = math.cos(bin_fit.yaw), math.sin(bin_fit.yaw)
+    u, v = cb * dx + sb * dy, -sb * dx + cb * dy
+    hl, hw = 0.5 * bin_fit.length - bin_fit.wall, 0.5 * bin_fit.width - bin_fit.wall
+    walls = [  # (distance to the inner face, outward normal in the map)
+        (hl - u, (cb, sb)),
+        (hl + u, (-cb, -sb)),
+        (hw - v, (-sb, cb)),
+        (hw + v, (sb, -cb)),
+    ]
+    ahead = (math.cos(base[2]), math.sin(base[2]))
+
+    def name(normal: tuple[float, float]) -> str:
+        along = normal[0] * ahead[0] + normal[1] * ahead[1]
+        left = -normal[0] * ahead[1] + normal[1] * ahead[0]
+        if abs(along) >= abs(left):
+            return "far wall" if along > 0 else "near wall"
+        return "left wall" if left > 0 else "right wall"
+
+    reach = _finger_reach(in_bin) + float(in_bin.wall_margin)
+    walls.sort(key=lambda w: w[0])
+    (d1, n1), (d2, n2) = walls[0], walls[1]
+    if d2 < reach:
+        return (
+            f"cube in a corner: {100 * d1:.1f} cm from the {name(n1)} and "
+            f"{100 * d2:.1f} cm from the {name(n2)}, both within the open fingers' "
+            f"reach ({100 * reach:.1f} cm)"
+        )
+    return f"cube {100 * d1:.1f} cm from the {name(n1)}"
+
+
+def _finger_reach(in_bin: Any) -> float:
+    """How far the fully open 2F-85 reaches along its fingers' travel from the pinch
+    point (m): the mesh links' farthest point, or the box's half span."""
+    if str(_in_bin_option(in_bin, "gripper_model")) != "mesh":
+        return float(in_bin.finger_half_span)
+    return max(float(np.abs(p[:, 0]).max()) for p in gripper_link_points(0.0).values())
+
+
+class _BinGraspSearch:
+    """:func:`_bin_pick_problem` for many candidates on one cube, the same answers
+    cheaper: the joints (IK), the arm links' and the housing's check of a grasp do
+    not depend on its opening, so they are found once per yaw, tilt and pair of faces
+    and reused across openings, and only the finger links are checked per opening
+    (bounding spheres first, :meth:`_BinFrame.gripper_problem`)."""
+
+    def __init__(
+        self,
+        base: Sequence[float],
+        cube: dict[str, Any],
+        bin_fit: BinFit,
+        in_bin: Any,
+        seed: Sequence[float],
+    ) -> None:
+        self.base, self.cube, self.bin_fit = base, cube, bin_fit
+        self.in_bin, self.seed = in_bin, seed
+        self._poses: dict[TopDownPickGeometry, _PlannedGrasp | str] = {}
+
+    def problem(self, geom: TopDownPickGeometry) -> str | None:
+        """Why the grasp ``geom`` would touch a wall, or None (as
+        :func:`_bin_pick_problem`)."""
+        key = dataclasses.replace(geom, open_position=0.0)
+        planned = self._poses.get(key)
+        if planned is None:
+            planned = self._plan(key)
+            self._poses[key] = planned
+        if isinstance(planned, str):
+            return planned
+        for k, phase in enumerate(("above", "hover", "grasp")):
+            problem = planned.problem(k) or planned.frame.gripper_problem(
+                planned.tool_poses[k], geom.open_position, links="fingers"
+            )
+            if problem is not None:
+                return f"{phase}: {problem}"
+        return None
+
+    def _plan(self, geom: TopDownPickGeometry) -> _PlannedGrasp | str:
+        ax, ay = arm_frame_target(self.base, (self.cube["x"], self.cube["y"]), geom)
+        yaw = math.radians(self.cube["yaw_deg"]) - self.base[2]
+        try:
+            above = _bin_pick_targets(
+                geom, (ax, ay, yaw), self.bin_fit, self.in_bin, self.seed
+            )
+            hover, grasp = top_down_joint_targets(ax, ay, yaw, geom, seed=above)
+        except ValueError as e:
+            return f"no top-down pick into the bin: {e}"
+        return _PlannedGrasp(
+            _BinFrame(geom, self.base, self.bin_fit, self.in_bin),
+            [above, hover, grasp],
+        )
+
+
+class _PlannedGrasp:
+    """One grasp's planned joints (above the rim, hover, grasp) and their tool poses,
+    with each pose's check of the arm links and the gripper's housing, which no opening
+    changes, done at most once."""
+
+    def __init__(self, frame: _BinFrame, joints: list[list[float]]) -> None:
+        self.frame, self.joints = frame, joints
+        self.tool_poses = [forward_kinematics(q, frame.geom) for q in joints]
+        self._arm: dict[int, str | None] = {}
+
+    def problem(self, k: int) -> str | None:
+        """The arm links' or the housing's problem at pose ``k``."""
+        if k not in self._arm:
+            self._arm[k] = self.frame.arm_problem(
+                self.joints[k]
+            ) or self.frame.gripper_problem(self.tool_poses[k], 0.0, links="housing")
+        return self._arm[k]
 
 
 def _bin_pick_problem(
@@ -546,6 +796,30 @@ def pick_problem(
     return None
 
 
+def _plus_minus(step: float, top: float) -> tuple[float, ...]:
+    """0, +step, -step, +2 step, ...
+
+    up to +-top.
+    """
+    n = int(round(top / step))
+    return (0.0, *(s * k * step for k in range(1, n + 1) for s in (1.0, -1.0)))
+
+
+@dataclasses.dataclass(frozen=True)
+class GraspSet:
+    """One set of grasps the pick out of the bin tries after the first
+    (``pick.top_down.in_bin.more_grasps``): every combination of the three lists
+    (:func:`bin_grasp_candidates`).
+
+    The default is the oblique extension: yaws up to 45
+    deg off the faces, tilts up to 30 deg, 85, 80, 75 and 70 mm.
+    """
+
+    yaw_offsets_deg: tuple[float, ...] = _plus_minus(5.0, 45.0)
+    tilts_deg: tuple[float, ...] = _plus_minus(5.0, 30.0)
+    openings_mm: tuple[float, ...] = (85.0, 80.0, 75.0, 70.0)
+
+
 @dataclasses.dataclass(frozen=True)
 class InBinPick:  # pylint: disable=too-many-instance-attributes
     """The pick out of the bin's clearances (``pick.top_down.in_bin``; m): the
@@ -555,12 +829,13 @@ class InBinPick:  # pylint: disable=too-many-instance-attributes
     planned pose within ``wall_margin`` of a wall. The defaults are the measured ones
     (conf/same_side_practice.yaml).
 
-    The grasps tried (:func:`bin_grasp_candidates`), the near-wall controller by
-    default: ``yaw_offsets_deg`` (the gripper's yaw off the cube's faces, up to 25
-    deg), ``tilts_deg`` and ``openings_mm`` (kinder-baselines #178's tilted, partly
-    opened grasp), each checked as ``gripper_model`` (``mesh``: the real 2F-85's links
-    at the grasp's opening; ``box``: the box above). ``finger_allowance`` (how far past
-    the inner wall face the finger links alone may reach; mesh only) is off: every link
+    The grasps tried (:func:`bin_grasp_candidates`): first the near-wall set,
+    ``yaw_offsets_deg`` (the gripper's yaw off the cube's faces, up to 25 deg),
+    ``tilts_deg`` and ``openings_mm`` (kinder-baselines #178's tilted, partly opened
+    grasp); then ``more_grasps``, by default the oblique extension (:class:`GraspSet`).
+    Each is checked as ``gripper_model`` (``mesh``: the real 2F-85's links at the
+    grasp's opening; ``box``: the box above). ``finger_allowance`` (how far past the
+    inner wall face the finger links alone may reach; mesh only) is off: every link
     keeps ``wall_margin``.
     """
 
@@ -574,23 +849,13 @@ class InBinPick:  # pylint: disable=too-many-instance-attributes
     openings_mm: tuple[float, ...] = (85.0, 70.0)
     gripper_model: str = "mesh"
     finger_allowance: float = 0.0
-    yaw_offsets_deg: tuple[float, ...] = (
-        0.0,
-        5.0,
-        -5.0,
-        10.0,
-        -10.0,
-        15.0,
-        -15.0,
-        20.0,
-        -20.0,
-        25.0,
-        -25.0,
-    )
+    yaw_offsets_deg: tuple[float, ...] = _plus_minus(5.0, 25.0)
+    more_grasps: tuple[GraspSet, ...] = (GraspSet(),)
     cube_width: float = 0.05
 
 
 _IN_BIN_DEFAULTS = InBinPick()
+_GRASP_SET_DEFAULTS = GraspSet()
 
 
 def _in_bin_option(in_bin: Any, name: str) -> Any:

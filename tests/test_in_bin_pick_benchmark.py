@@ -10,6 +10,7 @@ import pytest
 from prpl_tidybot.in_bin_pick_benchmark import (
     CURRENT,
     LEGACY,
+    NEAR_WALL,
     VARIANTS,
     Controller,
     load_cases,
@@ -60,6 +61,18 @@ def _default(default_results, case_id):
     if case_id not in default_results:
         default_results[case_id] = run_case(BY_ID[case_id], CURRENT)
     return default_results[case_id]
+
+
+@pytest.fixture(scope="module", name="near_wall_results")
+def _near_wall_results():
+    """The default before the oblique extension (bd85a79) on every case."""
+    return {}
+
+
+def _near_wall(near_wall_results, case_id):
+    if case_id not in near_wall_results:
+        near_wall_results[case_id] = run_case(BY_ID[case_id], NEAR_WALL)
+    return near_wall_results[case_id]
 
 
 def test_the_fixture_is_every_near_bin_rest_with_its_real_verdict():
@@ -193,7 +206,7 @@ def test_the_default_rescues_4_of_8_real_refusals_and_1_of_run_10s_5(
     """Of run 10's 5 refusals (2.3-5.6 cm from a wall) only the 5.3 cm rest is reached,
     the gripper 20 deg off the faces; with the 1 cm margin kept for every link the 5.6
     cm rest (#96) stays refused (its finger drivers would be within 1 cm at the hover),
-    as do 2.3, 2.4 and 3.6 cm.
+    as do 2.3, 2.4 and 3.6 cm, under the oblique extension's 1612 grasps too.
 
     Runs 39-40's 3 hand-placed refusals are reached tilted.
     """
@@ -216,6 +229,47 @@ def test_the_rests_against_a_wall_stay_refused_naming_both_pairs_of_faces(
     assert result["reason"].startswith("cube too close to the bin wall to grasp")
     assert "faces 0 deg" in result["reason"] and "faces 90 deg" in result["reason"]
     assert result["steps"] == []
+
+
+# Run 10's two corner rests (two walls within the open fingers' reach, the nearer
+# under 4.75 cm).
+TIGHT_CORNERS = ["2026-10-21/10-29-48#87", "2026-10-21/10-29-48#101"]
+
+
+@pytest.mark.parametrize("case_id", TIGHT_CORNERS)
+def test_a_tight_corner_is_refused_at_0_steps_naming_the_corner_and_what_binds(
+    default_results, case_id
+):
+    """No grasp of the 1612 keeps the margin: refused before any motion, the reason
+    saying it is a corner, which walls, and for each pair of faces the part that binds
+    most often, never a shove or a partial motion."""
+    result = _default(default_results, case_id)
+    assert result["verdict"] == "refused"
+    assert result["steps"] == []
+    assert result["wall_contacts"] == []
+    assert result["reason"].startswith(
+        "cube too close to the bin wall to grasp (cube in a corner: "
+    ), result["reason"]
+    for faces in ("faces 0 deg: ", "faces 90 deg: "):
+        clause = result["reason"].split(faces)[1].split(" grasps (first: ")[0]
+        assert " binds in " in clause and clause.endswith("/806"), clause
+    assert result["reason"].endswith("; 1612 candidates)")
+
+
+@pytest.mark.parametrize("case_id", [c["id"] for c in CASES])
+def test_everything_the_near_wall_set_picks_keeps_its_exact_grasp(
+    near_wall_results, default_results, case_id
+):
+    """The extension's grasps come after bd85a79's 280: a case bd85a79 held is held with
+    the same grasp, from the same standoff, through the same steps."""
+    old = _near_wall(near_wall_results, case_id)
+    if old["verdict"] != "held":
+        return
+    new = _default(default_results, case_id)
+    keys = ("verdict", "stand", "closing_turn_deg", "tilt_deg", "open_position")
+    assert {k: new[k] for k in keys} == {k: old[k] for k in keys}
+    assert new["yaw_offset_deg"] == old["yaw_offset_deg"]
+    assert new["steps"] == old["steps"]
 
 
 @pytest.mark.parametrize("case_id", PICKED)
