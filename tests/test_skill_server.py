@@ -312,9 +312,9 @@ def test_a_cube_against_the_bin_wall_is_refused_before_moving():
 
 
 def test_a_cube_in_a_tight_corner_is_refused_cleanly_before_any_motion(monkeypatch):
-    """3 cm from two walls none of the 1612 grasps keeps the 1 cm margin: the pick is
-    refused before any arm, gripper or base command, and the reason says it is a corner
-    and, for each pair of faces, what binds."""
+    """3 cm from two walls none of the 1612 grasps keeps the 1 cm margin from any side:
+    the pick is refused before any arm, gripper or base command, and the reason says it
+    is a corner and, for each pair of faces, what binds, then each other side tried."""
     hl, hw = 0.5 * 0.39 - 0.005, 0.5 * 0.29 - 0.005  # the bin's inner half extents
     cube = f"[{CLOSE_BIN[0] - hw + 0.03},{CLOSE_BIN[1] + hl - 0.03},0.025]"
     skills = build_skills(_cfg(**{"env.cube_pose": cube}))
@@ -330,9 +330,11 @@ def test_a_cube_in_a_tight_corner_is_refused_cleanly_before_any_motion(monkeypat
     assert reply["reason"].startswith(
         "cube too close to the bin wall to grasp (cube in a corner: 3.0 cm from the"
     ), reply["reason"]
+    today, _, others = reply["reason"].partition("; other sides tried: ")
     for faces in ("faces 0 deg: ", "faces 90 deg: "):
-        assert " binds in " in reply["reason"].split(faces)[1].split("; faces")[0]
-    assert reply["reason"].endswith("; 1612 candidates)")
+        assert " binds in " in today.split(faces)[1].split("; faces")[0]
+    assert today.endswith("; 1612 candidates)")
+    assert others
     assert not commands
     assert _still(skills) == before
 

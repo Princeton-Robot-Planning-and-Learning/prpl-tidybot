@@ -45,6 +45,7 @@ from prpl_tidybot.top_down_pick import (
     arm_frame_target,
     arm_link_points,
     cube_closing_yaw,
+    face_standoffs,
     forward_kinematics,
     geometry_from_config,
     grasp_search_bounds,
@@ -809,41 +810,15 @@ def _localize(source: Any) -> dict[str, float]:
     return {"x": float(x), "y": float(y), "yaw_deg": math.degrees(source.get_yaw())}
 
 
-def pick_problem(
-    robot: Sequence[float],
-    cube: dict[str, float],
-    geom: TopDownPickGeometry,
-    floor: Sequence[float],
-    workspace: Workspace | None,
-    bin_fit: BinFit | None = None,
-) -> str | None:
-    """Why the top-down pick of ``cube`` cannot even start from ``robot``, or None:
-
-    the cube past or on the barrier (the robot never crosses it), no standoff that keeps
-    the base in the drivable box and on its side, or no straight drive there.
-    """
-    if workspace is not None:
-        yaw = cube.get("yaw")
-        if yaw is None and cube.get("yaw_deg") is not None:
-            yaw = math.radians(cube["yaw_deg"])
-        problem = workspace.cube_problem((cube["x"], cube["y"]), yaw)
-        if problem is not None:
-            return problem
-    try:
-        stand = standoff_pose(
-            robot,
-            (cube["x"], cube["y"]),
-            geom,
-            floor,
-            None if workspace is None else workspace.valid(bin_fit),
-        )
-    except ValueError as e:
-        return str(e)
-    if workspace is not None:
-        problem = workspace.path_problem(robot, stand, bin_fit)
-        if problem is not None:
-            return f"pick standoff unreachable: {problem}"
-    return None
+def _cube_problem(cube: dict[str, Any], workspace: Workspace | None) -> str | None:
+    """Why the cube may not be picked from any side: past or on the barrier (the robot
+    never crosses it), or None."""
+    if workspace is None:
+        return None
+    yaw = cube.get("yaw")
+    if yaw is None and cube.get("yaw_deg") is not None:
+        yaw = math.radians(cube["yaw_deg"])
+    return workspace.cube_problem((cube["x"], cube["y"]), yaw)
 
 
 def _plus_minus(step: float, top: float) -> tuple[float, ...]:
@@ -931,47 +906,132 @@ def plan_pick(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     """Where the base stands to pick ``cube`` (``_find_cube``'s dict) from ``robot``,
     or why the pick cannot start: everything checked before anything moves.
 
-    The cube past or on the barrier, no standoff in the drivable box on the robot's
-    side clear of the bin, no straight drive there (:func:`pick_problem`); for a cube
-    inside the bin, the pick out of it off (``in_bin`` None) or no grasp on either pair
-    of its faces clear of the walls; otherwise no IK for the hover and the grasp, or,
-    with a bin localized, no grasp on either pair of faces whose hover, grasp and
-    carry clear its walls (the bin an obstacle only). Returns (standoff, None) or
-    (None, why)."""
+    Final, whatever the side: the pick out of the bin off for a cube inside it
+    (``in_bin`` None), or the cube past or on the barrier. Then today's stand
+    (:func:`standoff_pose`: the straight line from the robot, swung until it is in the
+    drivable box on the robot's side clear of the bin), the straight drive there, and
+    the grasp there (:func:`_stand_problem`). Only if one of those fails, the stands on
+    the cube's four face normals (:func:`face_standoffs`, nearest the base's yaw first,
+    less one within 10 deg of today's), each checked the same way; the first that
+    clears is used. A pick that clears at today's stand keeps it, and its grasp.
+
+    Returns (standoff, None) or (None, why): today's reason, then each other side
+    tried and why ("; other sides tried: <heading> deg: <why>; ...").
+    """
     if cube.get("in_bin") and in_bin is None:
         return None, IN_BIN_PICK_OFF
-    problem = pick_problem(robot, cube, geom, floor, workspace, bin_fit)
+    problem = _cube_problem(cube, workspace)
     if problem is not None:
         return None, problem
     xy = (cube["x"], cube["y"])
-    stand = standoff_pose(
-        robot, xy, geom, floor, None if workspace is None else workspace.valid(bin_fit)
-    )
+    tried: float | None = None
+    try:
+        stand = standoff_pose(
+            robot,
+            xy,
+            geom,
+            floor,
+            None if workspace is None else workspace.valid(bin_fit),
+        )
+    except ValueError as e:
+        why = str(e)
+    else:
+        tried = stand[2]
+        why_today = _stand_problem(
+            robot, stand, cube, geom, workspace, bin_fit, in_bin, seed
+        )
+        if why_today is None:
+            return stand, None
+        why = why_today
+    others = []
+    for _, side in face_standoffs(
+        robot, xy, math.radians(cube["yaw_deg"]), geom, tried=tried
+    ):
+        problem = _side_problem(
+            robot, side, cube, geom, floor, workspace, bin_fit, in_bin, seed
+        )
+        if problem is None:
+            _logger.info(
+                "Pick from another side: (%+.3f, %+.3f, %+.0f deg); today's: %s.",
+                side[0],
+                side[1],
+                math.degrees(side[2]),
+                why,
+            )
+            return side, None
+        others.append(f"{math.degrees(side[2]):+.0f} deg: {problem}")
+    if others:
+        why += "; other sides tried: " + "; ".join(others)
+    return None, why
+
+
+def _side_problem(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    robot: Sequence[float],
+    stand: tuple[float, float, float],
+    cube: dict[str, Any],
+    geom: TopDownPickGeometry,
+    floor: Sequence[float],
+    workspace: Workspace | None,
+    bin_fit: BinFit | None,
+    in_bin: Any,
+    seed: Sequence[float],
+) -> str | None:
+    """Why a face-normal stand will not do: off the drivable box, the base too near the
+    barrier or on the bin, then :func:`_stand_problem`; or None."""
+    if not (floor[0] <= stand[0] <= floor[1] and floor[2] <= stand[1] <= floor[3]):
+        return (
+            f"base centre ({stand[0]:+.3f}, {stand[1]:+.3f}) outside the drivable box"
+        )
+    if workspace is not None:
+        problem = workspace.pose_problem(stand, bin_fit)
+        if problem is not None:
+            return problem
+    return _stand_problem(robot, stand, cube, geom, workspace, bin_fit, in_bin, seed)
+
+
+def _stand_problem(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    robot: Sequence[float],
+    stand: tuple[float, float, float],
+    cube: dict[str, Any],
+    geom: TopDownPickGeometry,
+    workspace: Workspace | None,
+    bin_fit: BinFit | None,
+    in_bin: Any,
+    seed: Sequence[float],
+) -> str | None:
+    """Why the pick cannot be made from ``stand``, or None: no straight drive there; for
+    a cube inside the bin, no grasp clear of its walls; otherwise no IK for the hover
+    and the grasp, or, with a bin localized, no grasp on either pair of faces whose
+    hover, grasp and carry clear its walls (the bin an obstacle only)."""
+    if workspace is not None:
+        problem = workspace.path_problem(robot, stand, bin_fit)
+        if problem is not None:
+            return f"pick standoff unreachable: {problem}"
     if cube.get("in_bin") and bin_fit is not None:
         chosen, wall = _bin_grasp_geometry(geom, stand, cube, bin_fit, in_bin, seed)
         if chosen is None:
-            return None, f"cube too close to the bin wall to grasp ({wall})"
-        return stand, None
-    ax, ay = arm_frame_target(stand, xy, geom)
+            return f"cube too close to the bin wall to grasp ({wall})"
+        return None
+    ax, ay = arm_frame_target(stand, (cube["x"], cube["y"]), geom)
     try:
         top_down_joint_targets(
             ax, ay, math.radians(cube["yaw_deg"]) - stand[2], geom, seed=seed
         )
     except ValueError as e:
-        return None, f"pick IK: {e}"
+        return f"pick IK: {e}"
     if bin_fit is not None:
         chosen, wall = _floor_grasp_geometry(
             geom, stand, cube, bin_fit, bin_margins(in_bin), seed
         )
         if chosen is None:
-            return None, f"cube too close to the bin wall to grasp ({wall})"
-    return stand, None
+            return f"cube too close to the bin wall to grasp ({wall})"
+    return None
 
 
 def bin_margins(in_bin: Any) -> Any:
-    """The bin wall check's clearances: ``pick.top_down.in_bin`` when the pick out
-    of the bin is on, else the measured defaults (the bin is an obstacle to every
-    pick, whether or not the pick out of it is on)."""
+    """The bin wall check's clearances: ``pick.top_down.in_bin`` when the pick out of
+    the bin is on, else the measured defaults (the bin is an obstacle to every pick,
+    whether or not the pick out of it is on)."""
     return InBinPick() if in_bin is None else in_bin
 
 

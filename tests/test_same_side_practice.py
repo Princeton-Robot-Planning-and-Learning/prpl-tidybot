@@ -355,12 +355,46 @@ def _plan(cube, fit=WALL_BIN, **extra):
     )
 
 
+# 3 cm outside the bin's other long wall (its +v side), where no side's grasp or drive
+# clears.
+BOXED_CUBE = {"x": -0.48, "y": -0.3914, "yaw_deg": 0.0, "in_bin": False}
+
+
 def test_a_floor_cube_against_the_bin_wall_outside_is_refused_before_moving():
-    """The 10:39 scene: the floor pick beside the bin is checked against its walls,
-    and refused (both closing orientations touch the wall) before anything moves."""
-    stand, why = _plan(WALL_CUBE)
+    """A floor pick beside the bin is checked against its walls, and refused (both
+    closing orientations touch the wall, from every side) before anything moves."""
+    stand, why = _plan(BOXED_CUBE)
     assert stand is None
     assert why is not None and why.startswith("cube too close to the bin wall to grasp")
+
+
+def test_the_1039_scene_is_picked_from_a_side_whose_grasp_clears_the_bin():
+    """The 10:39 scene: from today's stand both closing orientations touch the wall;
+    the stand on another of the cube's face normals clears it (four sides)."""
+    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
+        _floor_grasp_geometry,
+    )
+    from prpl_tidybot.third_party.constants import (  # pylint: disable=import-outside-toplevel
+        RETRACT_ARM_CONF,
+    )
+    from prpl_tidybot.top_down_pick import (  # pylint: disable=import-outside-toplevel
+        standoff_pose,
+    )
+
+    cfg = _compose()
+    geom = geometry_from_config(cfg.pick.top_down)
+    floor = tuple(cfg.preview.floor_bounds)
+    ws = Workspace.from_config(cfg.barrier, cfg.preview.floor_bounds)
+    in_bin = cfg.pick.top_down.in_bin
+    xy = (WALL_CUBE["x"], WALL_CUBE["y"])
+    today = standoff_pose(TOSS_POSE, xy, geom, floor, ws.valid(WALL_BIN))
+    seed = list(RETRACT_ARM_CONF)
+    assert (
+        _floor_grasp_geometry(geom, today, WALL_CUBE, WALL_BIN, in_bin, seed)[0] is None
+    )
+    stand, why = _plan(WALL_CUBE)
+    assert why is None and stand is not None and stand != today
+    assert _floor_grasp_geometry(geom, stand, WALL_CUBE, WALL_BIN, in_bin, seed)[0]
 
 
 def test_the_floor_pick_refuses_with_the_in_bin_pick_off_too():
@@ -375,7 +409,7 @@ def test_the_floor_pick_refuses_with_the_in_bin_pick_off_too():
     cfg = _compose()
     stand, why = plan_pick(
         TOSS_POSE,
-        WALL_CUBE,
+        BOXED_CUBE,
         geometry_from_config(cfg.pick.top_down),
         tuple(cfg.preview.floor_bounds),
         Workspace.from_config(cfg.barrier, cfg.preview.floor_bounds),
@@ -395,7 +429,7 @@ def test_the_fake_skills_can_pick_refuses_the_cube_against_the_wall():
 
     skills = FakeTossingRobot(
         robot=TOSS_POSE,
-        cube=(WALL_CUBE["x"], WALL_CUBE["y"], 0.0),
+        cube=(BOXED_CUBE["x"], BOXED_CUBE["y"], 0.0),
         bin_fit=WALL_BIN,
     )
     reply = skills.can_pick()

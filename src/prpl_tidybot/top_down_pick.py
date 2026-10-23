@@ -120,6 +120,40 @@ def standoff_pose(
     )
 
 
+# A face-normal stand this close (rad) to today's stand's heading is that stand again.
+SAME_SIDE_TOLERANCE = math.radians(10.0)
+
+
+def face_standoffs(
+    robot: Sequence[float],
+    cube_xy: Sequence[float],
+    cube_yaw: float,
+    geom: TopDownPickGeometry,
+    tried: float | None = None,
+) -> list[tuple[int, tuple[float, float, float]]]:
+    """The stands on the cube's four face normals, (k, pose): heading cube yaw + k 90
+    deg, `standoff` from the cube and facing it, nearest the robot's base yaw first
+    (ties: lower k), less any within ``SAME_SIDE_TOLERANCE`` of ``tried`` (today's
+    stand's heading, already tried).
+
+    Unchecked: the caller checks the floor, the clearances and the drive.
+    """
+    cx, cy = cube_xy
+    sides = []
+    for k in range(4):
+        h = _wrap_angle(cube_yaw + k * math.pi / 2)
+        if tried is not None and abs(_wrap_angle(h - tried)) < SAME_SIDE_TOLERANCE:
+            continue
+        pose = (cx - geom.standoff * math.cos(h), cy - geom.standoff * math.sin(h), h)
+        sides.append((round(abs(_wrap_angle(h - robot[2])), 9), k, pose))
+    sides.sort(key=lambda s: (s[0], s[1]))
+    return [(k, pose) for _, k, pose in sides]
+
+
+def _wrap_angle(a: float) -> float:
+    return math.atan2(math.sin(a), math.cos(a))
+
+
 def grasp_search_bounds(
     floor_bounds: Sequence[float],
     geom: TopDownPickGeometry,

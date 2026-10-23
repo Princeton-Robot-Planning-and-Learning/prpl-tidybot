@@ -240,9 +240,10 @@ TIGHT_CORNERS = ["2026-10-21/10-29-48#87", "2026-10-21/10-29-48#101"]
 def test_a_tight_corner_is_refused_at_0_steps_naming_the_corner_and_what_binds(
     default_results, case_id
 ):
-    """No grasp of the 1612 keeps the margin: refused before any motion, the reason
-    saying it is a corner, which walls, and for each pair of faces the part that binds
-    most often, never a shove or a partial motion."""
+    """No grasp of the 1612 keeps the margin, from any side: refused before any motion,
+    the reason saying it is a corner, which walls, and for each pair of faces the part
+    that binds most often (then each other side tried), never a shove or a partial
+    motion."""
     result = _default(default_results, case_id)
     assert result["verdict"] == "refused"
     assert result["steps"] == []
@@ -250,10 +251,12 @@ def test_a_tight_corner_is_refused_at_0_steps_naming_the_corner_and_what_binds(
     assert result["reason"].startswith(
         "cube too close to the bin wall to grasp (cube in a corner: "
     ), result["reason"]
+    today, _, others = result["reason"].partition("; other sides tried: ")
     for faces in ("faces 0 deg: ", "faces 90 deg: "):
-        clause = result["reason"].split(faces)[1].split(" grasps (first: ")[0]
+        clause = today.split(faces)[1].split(" grasps (first: ")[0]
         assert " binds in " in clause and clause.endswith("/806"), clause
-    assert result["reason"].endswith("; 1612 candidates)")
+    assert today.endswith("; 1612 candidates)")
+    assert others, "every other side is tried, and named, before refusing"
 
 
 @pytest.mark.parametrize("case_id", [c["id"] for c in CASES])
