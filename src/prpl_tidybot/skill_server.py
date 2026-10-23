@@ -31,8 +31,10 @@ MAP frame, metres and radians; hitl converts frames on its side):
     since (else looks afresh); the cube is re-localized at the standoff.
     ``refused``: the pick could not or may not start and NOTHING MOVED (no cube, no
     bin found while the config has one: ``"bin not localized"``, past the barrier, no
-    standoff, too close to a bin wall, no IK), ``reason`` says why. ``held`` False and
-    ``refused`` False is a real miss: the robot moved. After a miss the robot
+    standoff, too close to a bin wall, no IK, from today's stand and from every other
+    side tried: :func:`prpl_tidybot.robot_skills.plan_pick`), ``reason`` says why;
+    ``stand`` is where the base stands, on any of the cube's four sides. ``held``
+    False and ``refused`` False is a real miss: the robot moved. After a miss the robot
     retracts, drives back to its home stand (where the ceiling cameras see the cube),
     looks again and retries, ``pick.max_attempts`` (2) in all; missing every attempt
     it ends there, not over the cube. ``attempts``: one entry (or one per camera

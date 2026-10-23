@@ -219,6 +219,50 @@ def test_a_cube_with_no_stand_today_is_picked_from_a_face_normal():
     assert stand == pytest.approx((x, y, h))
 
 
+# The in-bin coverage grid's cell u -0.04, v +0.11, yaw 0 (run 10's look-96 scene): 3 cm
+# from the bin's far wall as the robot at the toss pose sees it. From today's stand
+# every one of the 1612 grasps binds; from the face normal at +89 deg (the wall then
+# beside the arm, not across it) a grasp clears.
+SCENE_ROBOT = (1.1046652117768665, -0.7918998775923151, -3.088889183598109)
+SCENE_SEED = [-0.0, -0.3358, -3.1416, -2.5552, -0.0, -0.83, 1.5713]
+SCENE_BIN = BinFit(
+    -0.30697234717704597,
+    -0.7897929905856097,
+    1.5620696805349246,
+    0.39,
+    0.29,
+    0.21,
+    0.005,
+)
+FAR_WALL_CUBE = {
+    "x": -0.41731722013403977,
+    "y": -0.8288315486033554,
+    "yaw_deg": 89.5,
+    "in_bin": True,
+}
+
+
+def test_an_in_bin_cube_refused_at_todays_stand_is_picked_from_another_side():
+    """Today's stand refuses every grasp; another face normal's stand clears one."""
+    xy = (FAR_WALL_CUBE["x"], FAR_WALL_CUBE["y"])
+    today = standoff_pose(SCENE_ROBOT, xy, GEOM, FLOOR, WS.valid(SCENE_BIN))
+    assert (
+        _bin_grasp_geometry(GEOM, today, FAR_WALL_CUBE, SCENE_BIN, IN_BIN, SCENE_SEED)[
+            0
+        ]
+        is None
+    )
+    stand, why = _plan(SCENE_ROBOT, FAR_WALL_CUBE, SCENE_BIN, seed=SCENE_SEED)
+    assert why is None and stand is not None
+    _assert_stand_checks(SCENE_ROBOT, stand, FAR_WALL_CUBE, SCENE_BIN)
+    assert (
+        _bin_grasp_geometry(GEOM, stand, FAR_WALL_CUBE, SCENE_BIN, IN_BIN, SCENE_SEED)[
+            0
+        ]
+        is not None
+    )
+
+
 def test_a_refusal_lists_the_sides_tried():
     """Real run 10 refusal #87 (a cube in a corner): no side clears; the reason keeps
     today's and then names each side tried and why."""
