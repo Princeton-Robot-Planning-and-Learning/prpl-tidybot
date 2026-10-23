@@ -260,23 +260,73 @@ def arm_link_points(
 def _arm_link_points(
     joints: Sequence[float], geom: TopDownPickGeometry
 ) -> dict[str, NDArray[np.float64]]:
+    return {name: part.points() for name, part in _arm_link_parts(joints, geom)}
+
+
+class ArmLinkPart:
+    """One arm link's collision mesh at a joint configuration: its bounding sphere
+    (``centre`` in the arm frame, ``radius``; every vertex lies within it) and, on
+    demand, its vertices in the arm frame (:func:`arm_link_points`' arithmetic)."""
+
+    def __init__(
+        self,
+        centre: NDArray[np.float64],
+        rot: NDArray[np.float64],
+        local: NDArray[np.float64],
+        radius: float,
+    ) -> None:
+        self.centre, self.radius = centre, radius
+        self._rot, self._local = rot, local
+
+    def points(self) -> NDArray[np.float64]:
+        """The mesh vertices in the arm frame."""
+        points: NDArray[np.float64] = self.centre + self._local @ self._rot.T
+        return points
+
+
+def arm_link_parts(
+    joints: Sequence[float], geom: TopDownPickGeometry
+) -> list[tuple[str, ArmLinkPart]]:
+    """Each arm link at ``joints`` (as :func:`arm_link_points`, in its order) with its
+    bounding sphere, the vertices transformed only when asked for."""
+    with _SOLVER_LOCK:
+        return _arm_link_parts(joints, geom)
+
+
+_LINK_MESHES: dict[float, list[tuple[str, int, NDArray[np.float64], float]]] = {}
+
+
+def _arm_link_parts(
+    joints: Sequence[float], geom: TopDownPickGeometry
+) -> list[tuple[str, ArmLinkPart]]:
     solver = _solver(geom)
     model, data = solver.model, solver.data
+    if geom.ee_offset not in _LINK_MESHES:
+        meshes = []
+        for g in range(model.ngeom):
+            mesh = int(model.geom_dataid[g])
+            if mesh < 0 or not model.geom_contype[g]:
+                continue
+            start, count = int(model.mesh_vertadr[mesh]), int(model.mesh_vertnum[mesh])
+            local = np.asarray(model.mesh_vert[start : start + count], np.float64)
+            name = str(
+                mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, model.geom_bodyid[g])
+            )
+            radius = float(np.sqrt((local**2).sum(axis=1)).max())
+            meshes.append((name, g, local, radius))
+        _LINK_MESHES[geom.ee_offset] = meshes
     data.qpos[:] = joints
     mujoco.mj_kinematics(model, data)
-    links: dict[str, NDArray[np.float64]] = {}
-    for g in range(model.ngeom):
-        mesh = int(model.geom_dataid[g])
-        if mesh < 0 or not model.geom_contype[g]:
-            continue
-        start, count = int(model.mesh_vertadr[mesh]), int(model.mesh_vertnum[mesh])
-        local = np.asarray(model.mesh_vert[start : start + count], np.float64)
-        rot = data.geom_xmat[g].reshape(3, 3)
-        name = str(
-            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, model.geom_bodyid[g])
+    # A body with several meshes keeps its last (a dict keyed by the body's name).
+    parts: dict[str, ArmLinkPart] = {}
+    for name, g, local, radius in _LINK_MESHES[geom.ee_offset]:
+        parts[name] = ArmLinkPart(
+            data.geom_xpos[g].copy(),
+            data.geom_xmat[g].reshape(3, 3).copy(),
+            local,
+            radius,
         )
-        links[name] = data.geom_xpos[g] + local @ rot.T
-    return links
+    return list(parts.items())
 
 
 def top_down_joint_targets(

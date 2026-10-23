@@ -43,7 +43,7 @@ from prpl_tidybot.top_down_pick import (
     CARRY_ARM_CONF,
     TopDownPickGeometry,
     arm_frame_target,
-    arm_link_points,
+    arm_link_parts,
     cube_closing_yaw,
     face_standoffs,
     forward_kinematics,
@@ -227,12 +227,30 @@ class _BinFrame:
         return f"{problem} ({depth:.3f} m below the rim)"
 
     def arm_problem(self, joints: Sequence[float]) -> str | None:
-        """The first arm link at ``joints`` that touches a wall, as why."""
-        for name, points in arm_link_points(joints, self.geom).items():
-            problem = self.part_problem(name, points)
+        """The first arm link at ``joints`` that touches a wall, as why.
+
+        A link whose bounding sphere lies wholly above the rim or wholly inside the
+        inner footprint less the margin is passed without transforming its points
+        (as :meth:`gripper_problem`): its points would give the same answer.
+        """
+        for name, part in arm_link_parts(joints, self.geom):
+            if self.sphere_clear(part.centre, part.radius):
+                continue
+            problem = self.part_problem(name, part.points())
             if problem is not None:
                 return problem
         return None
+
+    def sphere_clear(self, centre: NDArray[np.float64], radius: float) -> bool:
+        """Whether a part within the sphere (arm frame) cannot touch a wall: wholly
+        above the rim, or wholly inside the inner footprint less the margin."""
+        if centre[2] - radius >= self.rim + _SHORTCUT_EPS:
+            return True
+        u, v = self.local(centre[None, :])[0]
+        return bool(
+            abs(u) + radius <= self.inner[0] - _SHORTCUT_EPS
+            and abs(v) + radius <= self.inner[1] - _SHORTCUT_EPS
+        )
 
     def gripper_problem(
         self,
@@ -273,14 +291,7 @@ class _BinFrame:
             ):
                 continue
             centre, radius = spheres[name]
-            c = pos + tool @ centre
-            if c[2] - radius >= self.rim + _SHORTCUT_EPS:
-                continue
-            u, v = self.local(c[None, :])[0]
-            if (
-                abs(u) + radius <= self.inner[0] - _SHORTCUT_EPS
-                and abs(v) + radius <= self.inner[1] - _SHORTCUT_EPS
-            ):
+            if self.sphere_clear(pos + tool @ centre, radius):
                 continue
             # einsum, not @: a ~100k-point matmul goes multithreaded in OpenBLAS, which
             # spun forever beside the skill server's other threads (a hung test run).
