@@ -77,27 +77,23 @@ pick:
       gripper_length: 0.124
       fingertip_drop: 0.029
       wall_margin: 0.01
-      # The grasps tried, the usual two first (face-aligned, untilted, 85 mm open, on
-      # each pair of faces), then every combination of: gripper yaw off the faces
-      # (deg), tilt about the fingers' travel axis (deg, so the pads stay square to
-      # their faces; kinder-baselines #178), both pairs of faces, opening (mm: 85
-      # fully open, 70 = the cube's width + 2 cm; an opening narrower than the cube's
-      # span at that yaw + 5 mm is skipped). Then each set of more_grasps the same
-      # way, less the grasps already tried (so a pick the first set clears keeps its
-      # grasp): the oblique extension, yaw to 45 deg, tilt to 30 deg, 80 and 75 mm
-      # (commands interpolated in #178's MuJoCo gap table); 1612 grasps in all. Each
-      # is checked against the real 2F-85's links at its opening (gripper_model:
-      # mesh; box = the box above), every link kept wall_margin off the walls.
+      # The grasps tried: Grid 36 (2026-10-23, the list sim tries too). The usual two
+      # first (face-aligned, untilted, 85 mm open, on each pair of faces), then every
+      # combination of: gripper yaw off the faces (deg), tilt about the fingers'
+      # travel axis (deg, so the pads stay square to their faces; kinder-baselines
+      # #178), both pairs of faces, opening (mm: 85 fully open, 70 = the cube's width
+      # + 2 cm; an opening narrower than the cube's span at that yaw + 5 mm is
+      # skipped). more_grasps (off): further sets the same way, less the grasps
+      # already tried, e.g. the oblique extension (yaw to 45 deg, tilt to 30 deg, 80
+      # and 75 mm; with bd85a79's near-wall set before it, 1612 grasps). Each is
+      # checked against the real 2F-85's links at its opening (gripper_model: mesh;
+      # box = the box above), every link kept wall_margin off the walls.
       # finger_allowance (m, mesh only), off: how far past the inner wall face the
       # finger links alone may reach instead.
-      yaw_offsets_deg: [0, 5, -5, 10, -10, 15, -15, 20, -20, 25, -25]
-      tilts_deg: [0, 10, -10, 15, -15, 20, -20]
+      yaw_offsets_deg: [0, 20, -20]
+      tilts_deg: [0, 20, -20]
       openings_mm: [85, 70]
-      more_grasps:
-        - yaw_offsets_deg: [0, 5, -5, 10, -10, 15, -15, 20, -20, 25, -25, 30, -30,
-                            35, -35, 40, -40, 45, -45]
-          tilts_deg: [0, 5, -5, 10, -10, 15, -15, 20, -20, 25, -25, 30, -30]
-          openings_mm: [85, 80, 75, 70]
+      more_grasps: []
       gripper_model: mesh
       finger_allowance: 0.0
       cube_width: 0.05

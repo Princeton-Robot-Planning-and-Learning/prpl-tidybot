@@ -312,7 +312,7 @@ def test_a_cube_against_the_bin_wall_is_refused_before_moving():
 
 
 def test_a_cube_in_a_tight_corner_is_refused_cleanly_before_any_motion(monkeypatch):
-    """3 cm from two walls none of the 1612 grasps keeps the 1 cm margin from any side:
+    """3 cm from two walls none of Grid 36's grasps keeps the 1 cm margin from any side:
     the pick is refused before any arm, gripper or base command, and the reason says it
     is a corner and, for each pair of faces, what binds, then each other side tried."""
     hl, hw = 0.5 * 0.39 - 0.005, 0.5 * 0.29 - 0.005  # the bin's inner half extents
@@ -333,7 +333,7 @@ def test_a_cube_in_a_tight_corner_is_refused_cleanly_before_any_motion(monkeypat
     today, _, others = reply["reason"].partition("; other sides tried: ")
     for faces in ("faces 0 deg: ", "faces 90 deg: "):
         assert " binds in " in today.split(faces)[1].split("; faces")[0]
-    assert today.endswith("; 1612 candidates)")
+    assert today.endswith("; 36 candidates)")
     assert others
     assert not commands
     assert _still(skills) == before

@@ -843,12 +843,12 @@ def _plus_minus(step: float, top: float) -> tuple[float, ...]:
 
 @dataclasses.dataclass(frozen=True)
 class GraspSet:
-    """One set of grasps the pick out of the bin tries after the first
-    (``pick.top_down.in_bin.more_grasps``): every combination of the three lists
-    (:func:`bin_grasp_candidates`).
+    """One set of grasps the pick out of the bin may try after the first
+    (``pick.top_down.in_bin.more_grasps``, empty by default): every combination of the
+    three lists (:func:`bin_grasp_candidates`).
 
-    The default is the oblique extension: yaws up to 45
-    deg off the faces, tilts up to 30 deg, 85, 80, 75 and 70 mm.
+    A set's lists default to the oblique extension's: yaws up to 45 deg off the faces,
+    tilts up to 30 deg, 85, 80, 75 and 70 mm.
     """
 
     yaw_offsets_deg: tuple[float, ...] = _plus_minus(5.0, 45.0)
@@ -865,10 +865,11 @@ class InBinPick:  # pylint: disable=too-many-instance-attributes
     planned pose within ``wall_margin`` of a wall. The defaults are the measured ones
     (conf/same_side_practice.yaml).
 
-    The grasps tried (:func:`bin_grasp_candidates`): first the near-wall set,
-    ``yaw_offsets_deg`` (the gripper's yaw off the cube's faces, up to 25 deg),
-    ``tilts_deg`` and ``openings_mm`` (kinder-baselines #178's tilted, partly opened
-    grasp); then ``more_grasps``, by default the oblique extension (:class:`GraspSet`).
+    The grasps tried (:func:`bin_grasp_candidates`): Grid 36, sim's list too:
+    ``yaw_offsets_deg`` (the gripper's yaw off the cube's faces: 0, +20, -20),
+    ``tilts_deg`` (0, +20, -20) and ``openings_mm`` (85, 70; kinder-baselines #178's
+    tilted, partly opened grasp); then ``more_grasps`` (:class:`GraspSet`), none by
+    default.
     Each is checked as ``gripper_model`` (``mesh``: the real 2F-85's links at the
     grasp's opening; ``box``: the box above). ``finger_allowance`` (how far past the
     inner wall face the finger links alone may reach; mesh only) is off: every link
@@ -881,12 +882,12 @@ class InBinPick:  # pylint: disable=too-many-instance-attributes
     gripper_length: float = 0.124
     fingertip_drop: float = 0.029
     wall_margin: float = 0.01
-    tilts_deg: tuple[float, ...] = (0.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0)
+    tilts_deg: tuple[float, ...] = (0.0, 20.0, -20.0)
     openings_mm: tuple[float, ...] = (85.0, 70.0)
     gripper_model: str = "mesh"
     finger_allowance: float = 0.0
-    yaw_offsets_deg: tuple[float, ...] = _plus_minus(5.0, 25.0)
-    more_grasps: tuple[GraspSet, ...] = (GraspSet(),)
+    yaw_offsets_deg: tuple[float, ...] = (0.0, 20.0, -20.0)
+    more_grasps: tuple[GraspSet, ...] = ()
     cube_width: float = 0.05
 
 

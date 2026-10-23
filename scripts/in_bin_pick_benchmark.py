@@ -5,9 +5,9 @@
         --controller current --controller legacy --controller B0.5 \
         --controller "margin5=pick.top_down.in_bin.wall_margin=0.005"
 
-Each ``--controller`` is a named candidate (``VARIANTS``: current, the shipped config;
-near-wall, the default before the oblique extension; legacy, the controller run 10
-ran; B0.5, the finger links allowed to 0.5 cm of a wall)
+Each ``--controller`` is a named candidate (``VARIANTS``: current, the shipped config
+(Grid 36); oblique-1612, the default before it; near-wall, bd85a79's; legacy, the
+controller run 10 ran; B0.5, the finger links allowed to 0.5 cm of a wall)
 or ``name=override[;override...]`` (Hydra overrides on conf/skill_server.yaml). Writes
 ``<name>.json`` (every case's sim result and the summary) and ``<name>.md`` (the
 table) per controller, and prints the summary. See

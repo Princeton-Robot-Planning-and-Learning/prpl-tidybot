@@ -219,10 +219,9 @@ def test_a_cube_with_no_stand_today_is_picked_from_a_face_normal():
     assert stand == pytest.approx((x, y, h))
 
 
-# The in-bin coverage grid's cell u -0.04, v +0.11, yaw 0 (run 10's look-96 scene): 3 cm
-# from the bin's far wall as the robot at the toss pose sees it. From today's stand
-# every one of the 1612 grasps binds; from the face normal at +89 deg (the wall then
-# beside the arm, not across it) a grasp clears.
+# The in-bin coverage grid's cell u 0, v -0.10, yaw 0 (run 10's look-96 scene): 3 cm
+# from one long wall, square to it. From today's stand every grasp of Grid 36 binds;
+# from the face normal at -91 deg (the wall then across the arm's reach) one clears.
 SCENE_ROBOT = (1.1046652117768665, -0.7918998775923151, -3.088889183598109)
 SCENE_SEED = [-0.0, -0.3358, -3.1416, -2.5552, -0.0, -0.83, 1.5713]
 SCENE_BIN = BinFit(
@@ -235,8 +234,8 @@ SCENE_BIN = BinFit(
     0.005,
 )
 FAR_WALL_CUBE = {
-    "x": -0.41731722013403977,
-    "y": -0.8288315486033554,
+    "x": -0.20697615487062881,
+    "y": -0.7906656441354472,
     "yaw_deg": 89.5,
     "in_bin": True,
 }

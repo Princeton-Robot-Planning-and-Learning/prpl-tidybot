@@ -10,7 +10,7 @@ import pytest
 from prpl_tidybot.in_bin_pick_benchmark import (
     CURRENT,
     LEGACY,
-    NEAR_WALL,
+    OBLIQUE,
     VARIANTS,
     Controller,
     load_cases,
@@ -53,7 +53,7 @@ def _result(results, case_id):
 
 @pytest.fixture(scope="module", name="default_results")
 def _default_results():
-    """The default (near-wall) controller on every case, once per module."""
+    """The default controller (Grid 36) on every case, once per module."""
     return {}
 
 
@@ -63,16 +63,16 @@ def _default(default_results, case_id):
     return default_results[case_id]
 
 
-@pytest.fixture(scope="module", name="near_wall_results")
-def _near_wall_results():
-    """The default before the oblique extension (bd85a79) on every case."""
+@pytest.fixture(scope="module", name="oblique_results")
+def _oblique_results():
+    """The 1612 (the default before Grid 36) on every case, once per module."""
     return {}
 
 
-def _near_wall(near_wall_results, case_id):
-    if case_id not in near_wall_results:
-        near_wall_results[case_id] = run_case(BY_ID[case_id], NEAR_WALL)
-    return near_wall_results[case_id]
+def _oblique(oblique_results, case_id):
+    if case_id not in oblique_results:
+        oblique_results[case_id] = run_case(BY_ID[case_id], OBLIQUE)
+    return oblique_results[case_id]
 
 
 def test_the_fixture_is_every_near_bin_rest_with_its_real_verdict():
@@ -182,7 +182,7 @@ def test_the_summary_counts_agreement_as_x_of_y(results):
     assert summary["real_picked_held_in_sim"] == [len(PICKED), len(PICKED)]
 
 
-# The default (near-wall) controller on the real rests (sim mode; a "held" is the
+# The default controller (Grid 36) on the real rests (sim mode; a "held" is the
 # kinematic sim's geometric hold check, with walls that stop nothing).
 RUN_10_REFUSALS = [
     c["id"]
@@ -193,8 +193,8 @@ RUN_10_REFUSALS = [
 REAL_REFUSALS = [c["id"] for c in CASES if c["real"]["verdict"] == "refused"]
 RESCUED = {
     "2026-10-21/10-29-48#115",  # run 10, 5.3 cm, 20 deg off the faces at 70 mm
-    "2026-10-20/11-56-48#c1-1",  # run 39, 6.4 cm, tilt +15 at 70 mm
-    "2026-10-20/12-34-53#c1-1",  # run 40, 4.4 cm, square to the wall, tilt +10
+    "2026-10-20/11-56-48#c1-1",  # run 39, 6.4 cm, tilt +20 at 70 mm
+    "2026-10-20/12-34-53#c1-1",  # run 40, 4.4 cm, square to the wall, tilt +20
     "2026-10-20/12-34-53#c1-2",  # run 40, 4.2 cm, square to the wall, tilt -20
 }
 
@@ -206,7 +206,7 @@ def test_the_default_rescues_4_of_8_real_refusals_and_1_of_run_10s_5(
     """Of run 10's 5 refusals (2.3-5.6 cm from a wall) only the 5.3 cm rest is reached,
     the gripper 20 deg off the faces; with the 1 cm margin kept for every link the 5.6
     cm rest (#96) stays refused (its finger drivers would be within 1 cm at the hover),
-    as do 2.3, 2.4 and 3.6 cm, under the oblique extension's 1612 grasps too.
+    as do 2.3, 2.4 and 3.6 cm, under Grid 36 and under the 1612 alike.
 
     Runs 39-40's 3 hand-placed refusals are reached tilted.
     """
@@ -240,7 +240,7 @@ TIGHT_CORNERS = ["2026-10-21/10-29-48#87", "2026-10-21/10-29-48#101"]
 def test_a_tight_corner_is_refused_at_0_steps_naming_the_corner_and_what_binds(
     default_results, case_id
 ):
-    """No grasp of the 1612 keeps the margin, from any side: refused before any motion,
+    """No grasp of Grid 36 keeps the margin, from any side: refused before any motion,
     the reason saying it is a corner, which walls, and for each pair of faces the part
     that binds most often (then each other side tried), never a shove or a partial
     motion."""
@@ -254,25 +254,20 @@ def test_a_tight_corner_is_refused_at_0_steps_naming_the_corner_and_what_binds(
     today, _, others = result["reason"].partition("; other sides tried: ")
     for faces in ("faces 0 deg: ", "faces 90 deg: "):
         clause = today.split(faces)[1].split(" grasps (first: ")[0]
-        assert " binds in " in clause and clause.endswith("/806"), clause
-    assert today.endswith("; 1612 candidates)")
+        assert " binds in " in clause and clause.endswith("/18"), clause
+    assert today.endswith("; 36 candidates)")
     assert others, "every other side is tried, and named, before refusing"
 
 
 @pytest.mark.parametrize("case_id", [c["id"] for c in CASES])
-def test_everything_the_near_wall_set_picks_keeps_its_exact_grasp(
-    near_wall_results, default_results, case_id
+def test_grid_36_holds_every_real_rest_the_1612_held(
+    oblique_results, default_results, case_id
 ):
-    """The extension's grasps come after bd85a79's 280: a case bd85a79 held is held with
-    the same grasp, from the same standoff, through the same steps."""
-    old = _near_wall(near_wall_results, case_id)
-    if old["verdict"] != "held":
-        return
+    """Grid 36 (the default since 2026-10-23) replaced the 1612 (near-wall set, then
+    the oblique extension): on every real rest it holds what the 1612 held."""
+    old = _oblique(oblique_results, case_id)
     new = _default(default_results, case_id)
-    keys = ("verdict", "stand", "closing_turn_deg", "tilt_deg", "open_position")
-    assert {k: new[k] for k in keys} == {k: old[k] for k in keys}
-    assert new["yaw_offset_deg"] == old["yaw_offset_deg"]
-    assert new["steps"] == old["steps"]
+    assert (new["verdict"] == "held") == (old["verdict"] == "held"), new["reason"]
 
 
 @pytest.mark.parametrize("case_id", PICKED)
