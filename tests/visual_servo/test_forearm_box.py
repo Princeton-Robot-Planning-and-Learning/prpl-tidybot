@@ -1,18 +1,23 @@
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
 """Local forearm-box fit, map short axis and model-derived pinch geometry."""
 
 import math
 from pathlib import Path
 
 import cv2
+import kinder
 import numpy as np
 import pytest
 
 from prpl_tidybot.sprout.pad_geometry import box_grasp_geometry
+from prpl_tidybot.sprout.rehearsal import Rehearsal
 from prpl_tidybot.visual_servo.forearm_box import box_in_map, fit_box
 
 
 @pytest.mark.parametrize("angle", [0, 25, 75, 140])
 def test_local_rectangle_fit_recovers_short_axis(angle):
+    """Verify local rectangle fit recovers short axis."""
     image = np.full((128, 128, 3), 90, np.uint8)
     corners = cv2.boxPoints(((64, 64), (20, 32), angle)).astype(int)
     cv2.fillConvexPoly(image, corners, (180, 180, 180))
@@ -26,6 +31,7 @@ def test_local_rectangle_fit_recovers_short_axis(angle):
 
 @pytest.mark.parametrize("square", [False, True])
 def test_weak_or_ambiguous_axis_is_rejected(square):
+    """Verify weak or ambiguous axis is rejected."""
     image = np.full((128, 128, 3), 90, np.uint8)
     if square:
         cv2.rectangle(image, (52, 52), (76, 76), (190, 190, 190), -1)
@@ -34,6 +40,7 @@ def test_weak_or_ambiguous_axis_is_rejected(square):
 
 
 def test_projected_short_axis_not_image_yaw():
+    """Verify projected short axis not image yaw."""
     image = np.full((128, 128, 3), 90, np.uint8)
     cv2.fillConvexPoly(
         image, cv2.boxPoints(((64, 64), (20, 32), 25)).astype(int), (180, 180, 180)
@@ -54,7 +61,7 @@ def test_projected_short_axis_not_image_yaw():
 
 
 def model_path():
-    import kinder
+    """Provide the model path test fixture or callback."""
 
     return (
         Path(kinder.__file__).parent
@@ -63,6 +70,7 @@ def model_path():
 
 
 def test_eight_cm_top_height_derives_pad_center_and_clearance():
+    """Verify eight cm top height derives pad center and clearance."""
     geometry = box_grasp_geometry(model_path(), 0.08)
     assert geometry["grasp_height_m"] == pytest.approx(0.05063539, abs=1e-6)
     assert geometry["predicted_pad_floor_clearance_m"] == pytest.approx(
@@ -72,7 +80,7 @@ def test_eight_cm_top_height_derives_pad_center_and_clearance():
 
 
 def test_box_preview_does_not_access_sprout_file_or_pose():
-    from prpl_tidybot.sprout.rehearsal import Rehearsal
+    """Verify box preview does not access sprout file or pose."""
 
     scene = {
         "representation": "forearm_box",
@@ -94,7 +102,7 @@ def test_box_preview_does_not_access_sprout_file_or_pose():
 
 
 def test_measured_joint_outside_model_is_not_silently_clamped():
-    from prpl_tidybot.sprout.rehearsal import Rehearsal
+    """Verify measured joint outside model is not silently clamped."""
 
     scene = {
         "representation": "forearm_box",

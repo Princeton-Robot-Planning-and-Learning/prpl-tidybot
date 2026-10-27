@@ -1,3 +1,5 @@
+# Hardware and optional model imports stay lazy for offline use.
+# pylint: disable=import-outside-toplevel
 """Approved NUC-local base transit; existing Vehicle velocity/watchdog controller.
 
 Holds the arm in its existing onboard position mode during transit, checks
@@ -14,12 +16,15 @@ import time
 import numpy as np
 
 from prpl_tidybot.sprout.base_planning import segment_free, validate_base_plan
+from prpl_tidybot.sprout.live_perception import fresh_time
 
 
-def validate_navigation(config):
+def validate_navigation(config: dict) -> None:
+    """Validate commissioned navigation bounds before starting base control."""
     if config.get("verified") is not True:
         raise ValueError(
-            "Base route/operating area, transit posture and physical stop need lab verification"
+            "Base route/operating area, transit posture "
+            "and physical stop need lab verification"
         )
     for key in (
         "speed_m_s",
@@ -48,9 +53,11 @@ def validate_navigation(config):
 
 
 class BaseMotion:
+    """Execute an approved base route with live scene and arm guards."""
+
     def __init__(
         self, config, perception, arm_reader, stop_event, *, vehicle_factory=None
-    ):
+    ) -> None:
         self.config, self.perception, self.arm_reader, self.stop_event = (
             config,
             perception,
@@ -62,6 +69,7 @@ class BaseMotion:
         self.lock = threading.Lock()
 
     def stop(self):
+        """Latch the stop event and stop the active base controller."""
         self.stop_event.set()
         # Don't join from a signal handler; caller is the stop-watchdog thread.
         with self.lock:
@@ -69,6 +77,7 @@ class BaseMotion:
                 self.vehicle.stop_control()
 
     def execute(self, plan, start_joints):
+        """Follow the approved route while checking measured arm and scene state."""
         validate_navigation(self.config)
         validate_base_plan(plan)
         p = self.config
@@ -101,7 +110,6 @@ class BaseMotion:
                         raise RuntimeError("Base motion stopped")
                     if time.monotonic() > deadline:
                         raise TimeoutError("Base route timed out")
-                    from prpl_tidybot.sprout.live_perception import fresh_time
 
                     pose, stamp = self.perception.base()
                     fresh_time(stamp, p["camera_max_age_s"])
@@ -135,7 +143,8 @@ class BaseMotion:
                         > p["path_tolerance_m"]
                     ):
                         raise RuntimeError("Base left reviewed route corridor")
-                    # Includes a stopping-distance reserve, tracking tolerance and latency.
+                    # Includes stopping-distance reserve, tracking tolerance,
+                    # and latency.
                     reserve = (
                         p["path_tolerance_m"]
                         + p["speed_m_s"] ** 2 / (2 * p["acceleration_m_s2"])

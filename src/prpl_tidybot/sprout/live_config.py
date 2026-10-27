@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import xml.etree.ElementTree as ET
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +85,7 @@ def model_digest(path: Path) -> str:
 
 
 def calibration_digest(projection: dict[str, Any]) -> str:
+    """Hash the camera intrinsics and extrinsics used for projection."""
     data = {key: projection[key] for key in ("camera_matrix", "rvec", "tvec")}
     return hashlib.sha256(
         json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
@@ -98,9 +100,9 @@ def validate_config(config: dict[str, Any], *, commissioned: bool = True) -> Non
         raise ValueError("Existing Kinova driver is configured for 192.168.1.10")
     missing = []
     for section, keys in (
-        ("geometry", TopDownGeometry.__dataclass_fields__),
-        ("hardware", HardwareLimits.__dataclass_fields__),
-        ("motion", MotionLimits.__dataclass_fields__),
+        ("geometry", [field.name for field in fields(TopDownGeometry)]),
+        ("hardware", [field.name for field in fields(HardwareLimits)]),
+        ("motion", [field.name for field in fields(MotionLimits)]),
         ("servo", SERVO_KEYS),
     ):
         missing += [
@@ -119,7 +121,11 @@ def validate_config(config: dict[str, Any], *, commissioned: bool = True) -> Non
         if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"Invalid servo.{key}")
     for key in ("stable_frames", "max_updates", "gripper_stall_samples"):
-        if type(servo[key]) is not int or servo[key] < 2:
+        if (
+            not isinstance(servo[key], int)
+            or isinstance(servo[key], bool)
+            or servo[key] < 2
+        ):
             raise ValueError(f"servo.{key} must be an integer >= 2")
     if (
         not 0
@@ -138,7 +144,8 @@ def validate_config(config: dict[str, Any], *, commissioned: bool = True) -> Non
         raise ValueError("Command watchdog must allow at least two control periods")
     if not config.get("obstacles"):
         raise ValueError(
-            "Provide conservative keep-out boxes for Sprout's torso/other limbs and surroundings"
+            "Provide conservative keep-out boxes for Sprout's torso/other limbs "
+            "and surroundings"
         )
     for box in [*config["obstacles"], config.get("held_forearm", {})]:
         for key in ("center", "half_size"):
@@ -153,7 +160,8 @@ def validate_config(config: dict[str, Any], *, commissioned: bool = True) -> Non
             raise ValueError("Collision half-sizes must be positive")
     if config.get("confirmation_mode") != "operator":
         raise ValueError(
-            "This first-trial runtime requires explicit operator grasp/support confirmations"
+            "This first-trial runtime requires explicit "
+            "operator grasp/support confirmations"
         )
     for key in ("grasp_xyz", "base_xyyaw", "arm_joints_rad"):
         value = config.get("revalidation_tolerances", {}).get(key)

@@ -19,6 +19,7 @@ from prpl_tidybot.sprout.sequence import GraspPose
 
 
 def top_down(yaw: float) -> np.ndarray:
+    """Construct the downward pinch orientation for a map-frame jaw yaw."""
     return np.array(
         [
             [math.cos(yaw), math.sin(yaw), 0],
@@ -29,6 +30,7 @@ def top_down(yaw: float) -> np.ndarray:
 
 
 def rotation_error(target: np.ndarray, actual: np.ndarray) -> np.ndarray:
+    """Return the axis-angle correction from actual to target orientation."""
     quat = np.zeros(4)
     mujoco.mju_mat2Quat(quat, (target @ actual.T).ravel())
     if quat[0] < 0:
@@ -39,6 +41,8 @@ def rotation_error(target: np.ndarray, actual: np.ndarray) -> np.ndarray:
 
 
 class LiveKinematics:
+    """Model-based pinch kinematics and conservative collision guards."""
+
     def __init__(self, model_path: Path, base_xyyaw: list[float], config: dict) -> None:
         if model_digest(model_path) != config["model_sha256"]:
             raise ValueError("NUC TidyBot model/assets differ from the reviewed model")
@@ -71,6 +75,7 @@ class LiveKinematics:
                 )
 
     def set(self, q, gripper: float = 0.0) -> None:
+        """Set model joints and gripper linkage before forward kinematics."""
         q = np.asarray(q, dtype=float)
         if q.shape != (7,) or not np.all(np.isfinite(q)):
             raise ValueError("Invalid arm joints")
@@ -90,16 +95,25 @@ class LiveKinematics:
         mujoco.mj_forward(self.model, self.data)
 
     def full_pose(self, q) -> tuple[np.ndarray, np.ndarray]:
+        """Return pinch translation and orientation for the supplied joints."""
         self.set(q)
-        return self.data.site_xpos[self.site].copy(), self.data.site_xmat[
-            self.site
-        ].reshape(3, 3).copy()
+        return (
+            self.data.site_xpos[self.site].copy(),
+            self.data.site_xmat[self.site].reshape(3, 3).copy(),
+        )
 
     def pose(self, q) -> GraspPose:
+        """Return the measured pinch pose in the calibrated map frame."""
         xyz, rotation = self.full_pose(q)
-        return GraspPose(*map(float, xyz), math.atan2(rotation[1, 0], rotation[0, 0]))
+        return GraspPose(
+            float(xyz[0]),
+            float(xyz[1]),
+            float(xyz[2]),
+            math.atan2(rotation[1, 0], rotation[0, 0]),
+        )
 
     def solve(self, xyz: np.ndarray, rotation: np.ndarray, seed) -> tuple[float, ...]:
+        """Solve the target pinch pose from a measured joint seed."""
         self.set(seed)
         p = self.config["servo"]
         jp, jr = np.zeros((3, self.model.nv)), np.zeros((3, self.model.nv))
@@ -116,8 +130,9 @@ class LiveKinematics:
                 return tuple(float(v) for v in q)
             mujoco.mj_jacSite(self.model, self.data, jp, jr, self.site)
             jac = np.vstack([jp[:, self.dofs], jr[:, self.dofs]])
-            delta = jac.T @ np.linalg.solve(
-                jac @ jac.T + np.eye(6) * 0.001, np.r_[dp, dr]
+            delta = np.asarray(
+                jac.T @ np.linalg.solve(jac @ jac.T + np.eye(6) * 0.001, np.r_[dp, dr]),
+                dtype=float,
             )
             delta *= min(1.0, 0.05 / max(float(np.max(np.abs(delta))), 1e-9))
             self.data.qpos[self.addresses] += delta
@@ -129,6 +144,7 @@ class LiveKinematics:
         raise RuntimeError("Live IK did not converge; no command issued")
 
     def bounds(self, geom: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return a world-axis-aligned bound for a collision geometry."""
         size = self.model.geom_size[geom].copy()
         center = np.zeros(3)
         kind = self.model.geom_type[geom]
@@ -150,6 +166,9 @@ class LiveKinematics:
         return self.data.geom_xpos[geom] + rotation @ center, np.abs(rotation) @ size
 
     def check_state(self, q, *, held: bool = False, on_support: bool = False) -> None:
+        """Check joint limits, link collisions, and floor clearance."""
+        # Support does not relax the conservative floor clearance in this model.
+        del on_support
         p = self.config["servo"]
         h = self.config["hardware"]
         q = (np.asarray(q) + np.pi) % (2 * np.pi) - np.pi
@@ -212,7 +231,8 @@ class LiveKinematics:
                         + p["collision_margin_m"]
                     ):
                         raise RuntimeError(
-                            f"Robot collision envelope intersects {obstacle.get('name', 'obstacle')}: {body}"
+                            "Robot collision envelope intersects "
+                            f"{obstacle.get('name', 'obstacle')}: {body}"
                         )
             if held:
                 box = self.config["held_forearm"]
@@ -233,6 +253,7 @@ class LiveKinematics:
     def check_path(
         self, start, goal, *, held: bool = False, on_support: bool = False
     ) -> None:
+        """Sample the joint segment and check every intermediate state."""
         difference = (np.asarray(goal) - start + np.pi) % (2 * np.pi) - np.pi
         if max(abs(difference)) > self.config["servo"]["max_joint_step_rad"]:
             raise RuntimeError("IK branch jump / excessive joint step")

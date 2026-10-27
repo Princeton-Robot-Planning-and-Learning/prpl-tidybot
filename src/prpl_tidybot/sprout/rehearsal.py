@@ -1,3 +1,5 @@
+# Hardware and optional model imports stay lazy for offline use.
+# pylint: disable=import-outside-toplevel
 """Local MuJoCo command preview using full TidyBot and private Sprout models.
 
 This is a kinematic rehearsal (like the repo's shadow-sim preview), not a
@@ -17,11 +19,14 @@ import cv2
 import mujoco  # type: ignore[import-untyped]
 import numpy as np
 
+from prpl_tidybot.sprout.live_kinematics import top_down
 from prpl_tidybot.sprout.sequence import GraspPose, Recipe, make_plan
 from prpl_tidybot.video import write_mp4
 
 
 class Rehearsal:
+    """Preview the planned sequence with the TidyBot MuJoCo model."""
+
     def __init__(
         self, tidybot_model: Path, sprout_model: Path | None, scene: dict[str, Any]
     ) -> None:
@@ -198,25 +203,28 @@ class Rehearsal:
             f"IK failed: position error {error:.4f} m; scene/goal must be corrected"
         )
 
-    def joint_delta(self, start, goal):
+    def joint_delta(self, start, goal) -> np.ndarray:
+        """Compute joint displacements respecting limited and continuous joints."""
         delta = (goal - start + np.pi) % (2 * np.pi) - np.pi
         for i, joint in enumerate(self.arm_joints):
             if self.model.jnt_limited[joint]:
                 delta[i] = goal[i] - start[i]
         return delta
 
-    def validate_initial_joints(self):
+    def validate_initial_joints(self) -> None:
+        """Reject a snapshot outside the model joint limits."""
         for joint, value in zip(self.arm_joints, self.scene["tidybot_arm_joints_rad"]):
             low, high = self.model.jnt_range[joint]
             if self.model.jnt_limited[joint] and not low <= value <= high:
                 name = self.model.joint(joint).name
                 raise ValueError(
-                    f"Measured {name}={value:.4f} rad outside model [{low:.4f}, {high:.4f}]; reconcile feedback/model before motion"
+                    f"Measured {name}={value:.4f} rad outside model "
+                    f"[{low:.4f}, {high:.4f}]; "
+                    "reconcile feedback/model before motion"
                 )
 
-    def pregrasp_joints(self, pose):
+    def pregrasp_joints(self, pose: GraspPose) -> np.ndarray:
         """Solve a top-down endpoint; render its continuous joint-space approach."""
-        from prpl_tidybot.sprout.live_kinematics import top_down
 
         self.validate_initial_joints()
         original = self.data.qpos.copy()
@@ -263,6 +271,7 @@ class Rehearsal:
             mujoco.mj_forward(self.model, self.data)
 
     def grip(self, closed: bool) -> None:
+        """Set the preview gripper linkage configuration."""
         # Model-only linkage configuration. Not a hardware gripper calibration.
         angle = 0.45 if closed else 0.0
         for side in ("left", "right"):
@@ -285,6 +294,7 @@ class Rehearsal:
         fps: int = 12,
         steps: int = 20,
     ) -> dict[str, Any]:
+        """Render the proposed sequence and return its feasibility report."""
         if fps < 1 or steps < 2:
             raise ValueError(
                 "Positive fps and at least two interpolation steps required"
@@ -318,7 +328,8 @@ class Rehearsal:
         box_start = self.data.mocap_pos[box_mocap].copy() if self.box_mode else None
         if np.linalg.norm(marker_start - goal) > 0.025:
             raise ValueError(
-                "Model forearm point disagrees with detected grasp by >2.5 cm; align the body model first"
+                "Model forearm point disagrees with detected grasp by >2.5 cm; "
+                "align the body model first"
             )
         frames, trajectory, contacts = [], [], set()
         camera = mujoco.MjvCamera()
@@ -445,10 +456,12 @@ class Rehearsal:
                         markers.append(
                             (
                                 np.asarray(self.scene["white_tape_xyz"]),
-                                "WHITE TAPE (demo)"
-                                if "synthetic"
-                                in self.scene.get("white_tape_source", "")
-                                else "WHITE TAPE (captured)",
+                                (
+                                    "WHITE TAPE (demo)"
+                                    if "synthetic"
+                                    in self.scene.get("white_tape_source", "")
+                                    else "WHITE TAPE (captured)"
+                                ),
                                 (255, 255, 255),
                                 -24,
                             )
@@ -484,7 +497,8 @@ class Rehearsal:
                     cv2.rectangle(frame, (0, 0), (960, 76), (20, 25, 35), -1)
                     cv2.putText(
                         frame,
-                        f"{phase.upper()}  |  goal [{pose.x:.3f}, {pose.y:.3f}, {pose.z:.3f}] m",
+                        f"{phase.upper()}  |  "
+                        f"goal [{pose.x:.3f}, {pose.y:.3f}, {pose.z:.3f}] m",
                         (16, 28),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.65,
@@ -494,9 +508,12 @@ class Rehearsal:
                     )
                     cv2.putText(
                         frame,
-                        "SYNTHETIC INITIAL STATE - not hardware authorization"
-                        if "synthetic" in self.scene.get("body_pose_source", "").lower()
-                        else "KINEMATIC PREVIEW - no contact-force validation",
+                        (
+                            "SYNTHETIC INITIAL STATE - not hardware authorization"
+                            if "synthetic"
+                            in self.scene.get("body_pose_source", "").lower()
+                            else "KINEMATIC PREVIEW - no contact-force validation"
+                        ),
                         (16, 58),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.6,
@@ -570,11 +587,17 @@ class Rehearsal:
             "white_tape_xyz": self.scene.get("white_tape_xyz"),
             "white_tape_source": self.scene.get("white_tape_source"),
             "simulation_gaps": [
-                "Wrist visual servo is represented by a hover, not simulated camera feedback",
-                "Forearm box follows tool kinematically; Sprout joints and other body parts are not simulated"
-                if self.box_mode
-                else "Forearm follows through articulated IK, not simulated grasp contact",
-                "Gripper linkage is visualized; closure force and compliant dynamics are not validated",
+                "Wrist visual servo is represented by a hover, "
+                "not simulated camera feedback",
+                (
+                    "Forearm box follows tool kinematically; "
+                    "Sprout joints and other body parts are not simulated"
+                    if self.box_mode
+                    else "Forearm follows through articulated IK, "
+                    "not simulated grasp contact"
+                ),
+                "Gripper linkage is visualized; "
+                "closure force and compliant dynamics are not validated",
             ],
             "body_pose_source": self.scene["body_pose_source"],
             "video": "preview.mp4",

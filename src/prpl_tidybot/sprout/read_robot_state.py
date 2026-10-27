@@ -1,3 +1,5 @@
+# Hardware and optional model imports stay lazy for offline use.
+# pylint: disable=import-outside-toplevel
 """Read-only NUC telemetry snapshot; also runnable as a standalone copied file.
 
 Uses Kortex RefreshFeedback and the existing ceiling-marker publisher protocol.
@@ -49,7 +51,9 @@ def read_arm(host: str) -> dict[str, Any]:
         options = RouterClientSendOptions()
         options.timeout_ms = 2000
         feedback = BaseCyclicClient(router).RefreshFeedback(options=options)
-        degrees = vector([a.position for a in feedback.actuators], 7)
+        # Kortex populates this repeated protobuf field dynamically.
+        actuators = feedback.actuators  # pylint: disable=no-member
+        degrees = vector([a.position for a in actuators], 7)
         joints = [
             (math.radians(v) + math.pi) % (2 * math.pi) - math.pi for v in degrees
         ]
@@ -113,6 +117,7 @@ def validate_snapshot(state: dict[str, Any], max_age_s: float = 120) -> None:
 
 
 def main() -> None:
+    """Run the read robot state command-line entry point."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arm-host", default="192.168.1.10")
     parser.add_argument("--marker-host", default="192.168.0.131")
@@ -132,7 +137,9 @@ def main() -> None:
     args.output.write_text(json.dumps(state, indent=2, allow_nan=False) + "\n")
     print(json.dumps(state, indent=2), flush=True)
     print(
-        f"Saved {args.output}. Read-only feedback; base acquisition time is included when published. Not an execution clearance."
+        f"Saved {args.output}. Read-only feedback; "
+        "base acquisition time is included when published. "
+        "Not an execution clearance."
     )
 
 

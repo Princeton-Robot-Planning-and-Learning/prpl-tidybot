@@ -11,8 +11,10 @@ from typing import Any
 import cv2
 import numpy as np
 
+from prpl_tidybot.sprout.body_obstacle import check_contained, detect_body
 from prpl_tidybot.sprout.live_config import calibration_digest
 from prpl_tidybot.sprout.sequence import GraspPose
+from prpl_tidybot.visual_servo.forearm_box import box_in_map, fit_box
 from prpl_tidybot.visual_servo.forearm_template import ForearmPatchTracker, ceiling_view
 
 
@@ -45,25 +47,29 @@ class LatestPublisher:
             self.error = str(error)
 
     def get(self) -> dict[str, Any]:
+        """Read the latest published payload within the configured timeout."""
         with self._lock:
             if self.error or self._payload is None:
                 raise RuntimeError(self.error or "Waiting for live publisher")
             return self._payload
 
     def close(self) -> None:
+        """Close the connection and stop its receiver."""
         self._closed.set()
         if self._connection is not None:
             self._connection.close()
 
 
 def fresh_time(timestamp: Any, maximum_age: float) -> float:
+    """Reject missing, future, or expired acquisition timestamps."""
     if (
         timestamp is None
         or not np.isfinite(timestamp)
         or not 0 <= time.time() - timestamp <= maximum_age
     ):
         raise RuntimeError(
-            "Missing/stale camera acquisition timestamp; update perception servers and synchronize clocks"
+            "Missing/stale camera acquisition timestamp; "
+            "update perception servers and synchronize clocks"
         )
     return float(timestamp)
 
@@ -94,6 +100,7 @@ class LivePerception:
         self.last_capture = -float("inf")
 
     def image(self) -> tuple[np.ndarray, float]:
+        """Read a fresh image paired with its acquisition metadata."""
         data = self.images.get()
         index = self.config["detection"]["camera_index"]
         cameras = data.get("cameras", [])
@@ -131,10 +138,10 @@ class LivePerception:
         return ceiling_view(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), index), timestamp
 
     def body(self) -> dict | None:
+        """Validate the current body envelope against the reviewed envelope."""
         config = self.config["detection"].get("body_obstacle", {})
         if not config.get("enabled"):
             return None
-        from prpl_tidybot.sprout.body_obstacle import check_contained, detect_body
 
         payload = self.images.get()
         cameras = payload.get("cameras", [])
@@ -160,6 +167,7 @@ class LivePerception:
         return body
 
     def base(self) -> tuple[np.ndarray, float]:
+        """Read the calibrated chassis map pose and acquisition time."""
         data = self.markers.get()
         robot = self.config.get("robot_id", 0)
         if robot not in data.get("poses", {}):
@@ -174,6 +182,7 @@ class LivePerception:
         return pose, timestamp
 
     def target(self, *, new_frame: bool = False) -> tuple[GraspPose, float]:
+        """Localize the tape-anchored forearm target from a fresh frame."""
         view, timestamp = self.image()
         if new_frame and timestamp <= self.last_capture:
             raise RuntimeError("Waiting for a new camera frame")
@@ -195,7 +204,6 @@ class LivePerception:
         xyz = origin + distance * ray
         xyz[:2] += p["patch_to_grasp_xy_m"]
         if d.get("auto_box", {}).get("enabled"):
-            from prpl_tidybot.visual_servo.forearm_box import box_in_map, fit_box
 
             box = box_in_map(
                 fit_box(view, match.center_uv, d["patch_xywh"][2:], d["search_xywh"]), p
@@ -222,5 +230,6 @@ class LivePerception:
         return pose, timestamp
 
     def close(self) -> None:
+        """Close image and marker publisher connections."""
         self.images.close()
         self.markers.close()

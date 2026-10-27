@@ -37,11 +37,15 @@ class JointSample:
 
 
 class CompliantArm(Protocol):
+    """Measured arm feedback and bounded commands used by the skill backend."""
+
     controller_name: str
 
-    def read(self) -> JointSample: ...
+    def read(self) -> JointSample:
+        """Read measured joints, gripper position, and acquisition time."""
 
-    def command(self, q: tuple[float, ...], gripper: float) -> None: ...
+    def command(self, q: tuple[float, ...], gripper: float) -> None:
+        """Send a joint target and normalized gripper position."""
 
     def stop(self) -> None:
         """Latch stop; no open, retract, or subsequent accepted command."""
@@ -59,25 +63,35 @@ class CalibratedScene(Protocol):
     commanded gripper position. No supplied implementation invents evidence.
     """
 
-    def localize(self) -> GraspPose: ...
+    def localize(self) -> GraspPose:
+        """Return the validated forearm grasp pose in the calibrated map frame."""
 
-    def preflight(self, plan: Plan, sample: JointSample) -> None: ...
+    def preflight(self, plan: Plan, sample: JointSample) -> None:
+        """Validate the planned cycle against measured state before motion."""
 
-    def pose(self, sample: JointSample) -> GraspPose: ...
+    def pose(self, sample: JointSample) -> GraspPose:
+        """Return the measured pinch pose in the calibrated map frame."""
 
-    def solve(self, pose: GraspPose, seed: JointSample) -> tuple[float, ...]: ...
+    def solve(self, pose: GraspPose, seed: JointSample) -> tuple[float, ...]:
+        """Solve the target pinch pose from a measured joint seed."""
 
-    def validate_path(self, sample: JointSample, q: tuple[float, ...]) -> None: ...
+    def validate_path(self, sample: JointSample, q: tuple[float, ...]) -> None:
+        """Reject a commanded joint segment that violates geometry guards."""
 
-    def guard(self, sample: JointSample) -> None: ...
+    def guard(self, sample: JointSample) -> None:
+        """Validate fresh observations and commissioned operating limits."""
 
-    def wrist(self) -> WristObservation | None: ...
+    def wrist(self) -> WristObservation | None:
+        """Return a wrist observation when a calibrated wrist camera is available."""
 
-    def grasp_confirmed(self, sample: JointSample) -> bool: ...
+    def grasp_confirmed(self, sample: JointSample) -> bool:
+        """Return whether independent evidence confirms the forearm grasp."""
 
-    def support_confirmed(self, sample: JointSample) -> bool: ...
+    def support_confirmed(self, sample: JointSample) -> bool:
+        """Return whether evidence confirms the forearm is supported."""
 
-    def released(self, sample: JointSample) -> bool: ...
+    def released(self, sample: JointSample) -> bool:
+        """Return whether measured gripper state confirms release."""
 
 
 @dataclass(frozen=True)
@@ -179,12 +193,14 @@ class CompliantBackend:
             self._check()
 
     def localize(self) -> GraspPose:
+        """Return the validated forearm grasp pose in the calibrated map frame."""
         self._check()
         self._grasp = self.scene.localize()
         self.geometry.validate_pose(self._grasp)
         return self._grasp
 
     def preflight(self, plan: Plan) -> None:
+        """Validate the planned cycle against measured state before motion."""
         sample = self._sample()
         for pose in (
             plan.pregrasp,
@@ -204,6 +220,7 @@ class CompliantBackend:
             self._gripper = sample.gripper
 
     def move(self, phase: str, pose: GraspPose) -> None:
+        """Stream a bounded motion and wait for measured arrival."""
         self.geometry.validate_pose(pose)
         p = self.limits
         sample = self._sample()
@@ -265,6 +282,7 @@ class CompliantBackend:
         raise TimeoutError(f"{phase}: measured arrival timed out")
 
     def align(self, pregrasp: GraspPose) -> GraspPose:
+        """Refine the grasp alignment using fresh visual observations."""
         if self._grasp is None:
             raise RuntimeError("Localize before alignment")
         aligner = WristAligner(self.wrist_calibration, pregrasp, time.monotonic())
@@ -312,20 +330,25 @@ class CompliantBackend:
         raise TimeoutError("Gripper confirmation timed out")
 
     def close_gripper(self) -> None:
+        """Close gradually and require grasp evidence before lifting."""
         self._grip(self.limits.close_position, closing=True)
 
     def grasp_confirmed(self) -> bool:
+        """Return whether independent evidence confirms the forearm grasp."""
         return self.scene.grasp_confirmed(self._sample())
 
     def support_confirmed(self) -> bool:
+        """Return whether evidence confirms the forearm is supported."""
         return self.scene.support_confirmed(self._sample())
 
     def open_gripper(self) -> None:
+        """Open the gripper only after confirming forearm support."""
         if not self.support_confirmed():
             raise RuntimeError("Support lost; refusing release")
         self._grip(self.limits.open_position, closing=False)
 
     def stop(self) -> None:
+        """Latch the stop request and prevent subsequent motion commands."""
         with self._command_lock:
             self._stopped.set()
             self.arm.stop()

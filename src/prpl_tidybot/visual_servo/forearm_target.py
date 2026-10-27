@@ -15,6 +15,8 @@ import numpy as np
 
 @dataclass(frozen=True)
 class BandDetection:
+    """Image-space center, major axis, and area of a detected colored band."""
+
     center_uv: tuple[float, float]
     long_axis_uv: tuple[float, float]
     area_px: float
@@ -57,7 +59,7 @@ def detect_band(
     moments = cv.moments(contour)
     if moments["m00"] <= 0:
         return None
-    box = cv.boxPoints(cv.minAreaRect(contour))
+    box = cv.boxPoints(cv.minAreaRect(contour)).astype(float)
     edges = np.roll(box, -1, axis=0) - box
     axis = edges[np.argmax(np.linalg.norm(edges, axis=1))].astype(float)
     axis /= np.linalg.norm(axis)

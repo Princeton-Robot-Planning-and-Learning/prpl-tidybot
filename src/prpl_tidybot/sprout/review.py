@@ -13,6 +13,7 @@ from typing import Any
 
 
 def digest(path: Path) -> str:
+    """Return a stable SHA-256 digest of the serialized review data."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -35,7 +36,8 @@ def approve_and_execute(
     review = json.loads(review_path.read_text())
     if review.get("execution_ready") is not True:
         raise RuntimeError(
-            "Preview only: live scene adapter, limits and stop checks are not commissioned"
+            "Preview only: live scene adapter, limits and stop checks "
+            "are not commissioned"
         )
     if review.get("completed") is not True:
         raise RuntimeError("Simulation did not complete; execution refused")
@@ -48,6 +50,7 @@ def approve_and_execute(
         raise ValueError("Missing reviewed video/trajectory/scene hashes")
 
     def check_artifacts() -> None:
+        """Reject review artifacts changed since approval."""
         if digest(review_path) != review_hash:
             raise RuntimeError("Review changed; generate a new preview")
         for name, expected in artifacts.items():
@@ -65,7 +68,8 @@ def approve_and_execute(
     )
     try:
         answer = prompt(
-            "After watching the preview: Enter or yes executes ONE real cycle; anything else cancels: "
+            "After watching the preview: Enter or yes executes ONE real cycle; "
+            "anything else cancels: "
         )
     except (EOFError, KeyboardInterrupt):
         raise RuntimeError("Approval cancelled") from None

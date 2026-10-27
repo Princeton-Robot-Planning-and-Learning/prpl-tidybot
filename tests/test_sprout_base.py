@@ -1,12 +1,16 @@
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
 """Base path, body-envelope and shutdown failure checks without hardware."""
 
 import copy
 import itertools
+import threading
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from prpl_tidybot.sprout import base_motion
 from prpl_tidybot.sprout.base_motion import validate_navigation
 from prpl_tidybot.sprout.base_planning import (
     free,
@@ -22,6 +26,7 @@ BOUNDS = [[-2, -2], [2, 2]]
 
 
 def test_route_avoids_box_along_entire_transit():
+    """Verify route avoids box along entire transit."""
     path = route([-1, 0], [1, 0], [BOX], 0.2, BOUNDS)
     assert len(path) > 2
     for a, b in itertools.pairwise(path):
@@ -30,6 +35,7 @@ def test_route_avoids_box_along_entire_transit():
 
 
 def test_unreachable_and_boundary_paths_rejected():
+    """Verify unreachable and boundary paths rejected."""
     assert not free([1.9, 0], [BOX], 0.2, BOUNDS)
     with pytest.raises(ValueError):
         route([0, 0], [1, 1], [BOX], 0.2, BOUNDS)
@@ -39,11 +45,13 @@ def test_unreachable_and_boundary_paths_rejected():
 
 
 def test_swept_check_catches_thin_obstacle_between_samples():
+    """Verify swept check catches thin obstacle between samples."""
     tiny = {"center": [0.005, 0, 0.1], "half_size": [0.001, 0.001, 0.1]}
     assert not segment_free([0, 0], [0.02, 0], [tiny], 0.001, BOUNDS)
 
 
 def test_validation_rejects_corrupt_or_incomplete_plans():
+    """Verify validation rejects corrupt or incomplete plans."""
     plan = {
         "required": True,
         "path_xyyaw": [[-1, 1, 0], [1, 1, 0]],
@@ -65,6 +73,7 @@ def test_validation_rejects_corrupt_or_incomplete_plans():
 
 
 def test_body_cannot_shrink_to_hide_a_moved_limb():
+    """Verify body cannot shrink to hide a moved limb."""
     check_contained(BOX, BOX)
     moved = copy.deepcopy(BOX)
     moved["center"][0] += 0.1
@@ -73,6 +82,7 @@ def test_body_cannot_shrink_to_hide_a_moved_limb():
 
 
 def test_body_requires_two_camera_views():
+    """Verify body requires two camera views."""
     with pytest.raises(ValueError, match="both calibrated"):
         detect_body(
             np.zeros((100, 100, 3), np.uint8),
@@ -82,6 +92,7 @@ def test_body_requires_two_camera_views():
 
 
 def test_navigation_requires_explicit_physical_verification():
+    """Verify navigation requires explicit physical verification."""
     with pytest.raises(ValueError, match="verification"):
         validate_navigation({})
     with pytest.raises(ValueError, match="speed_m_s"):
@@ -89,34 +100,44 @@ def test_navigation_requires_explicit_physical_verification():
 
 
 class FakeBase:
+    """Test double for FakeBase."""
+
     def __init__(self, event):
         self.event = event
         self.calls = []
+        self.callback = None
 
     def SetServoingMode(self, mode):
+        """Provide the SetServoingMode test fixture or callback."""
         self.calls.append("mode")
 
     def ReadAllActions(self, query):
+        """Provide the ReadAllActions test fixture or callback."""
         return SimpleNamespace(action_list=[SimpleNamespace(name="Retract", handle=3)])
 
     def OnNotificationActionTopic(self, callback, options):
+        """Provide the OnNotificationActionTopic test fixture or callback."""
         self.callback = callback
         return 1
 
     def ExecuteActionFromReference(self, handle):
+        """Provide the ExecuteActionFromReference test fixture or callback."""
         self.calls.append("retract")
         if self.event is not None:
             self.callback(SimpleNamespace(action_event=self.event))
 
     def Stop(self):
+        """Provide the Stop test fixture or callback."""
         self.calls.append("stop")
 
     def Unsubscribe(self, handle):
+        """Provide the Unsubscribe test fixture or callback."""
         self.calls.append("unsubscribe")
 
 
 @pytest.mark.parametrize("event,success", [(1, True), (2, False), (None, False)])
 def test_shutdown_requires_action_end(event, success):
+    """Verify shutdown requires action end."""
     base = FakeBase(event)
     messages = SimpleNamespace(
         ServoingModeInformation=SimpleNamespace,
@@ -138,14 +159,14 @@ def test_shutdown_requires_action_end(event, success):
 
 @pytest.mark.parametrize("fault", [None, "body_lost", "arm_moved", "stop"])
 def test_base_driver_stops_on_arrival_and_faults(monkeypatch, fault):
-    import threading
-
-    from prpl_tidybot.sprout import base_motion
+    """Verify base driver stops on arrival and faults."""
 
     clock = SimpleNamespace(now=100.0)
     latch = threading.Event()
 
     class Vehicle:
+        """Test double for Vehicle."""
+
         def __init__(self, **kwargs):
             self.control_loop_running = False
             self.dx = np.zeros(3)
@@ -153,22 +174,29 @@ def test_base_driver_stops_on_arrival_and_faults(monkeypatch, fault):
             self.stopped = False
 
         def start_control(self):
+            """Provide the start control test fixture or callback."""
             self.control_loop_running = True
 
         def stop_control(self):
+            """Provide the stop control test fixture or callback."""
             self.control_loop_running = False
             self.stopped = True
 
         def set_target_velocity(self, v, frame):
+            """Provide the set target velocity test fixture or callback."""
             self.dx = np.asarray(v)
 
     vehicle = Vehicle()
 
     class Perception:
+        """Test double for Perception."""
+
         def base(self):
+            """Provide the base test fixture or callback."""
             return vehicle.pose.copy(), base_motion.time.time()
 
         def body(self):
+            """Provide the body test fixture or callback."""
             if fault == "body_lost":
                 raise RuntimeError("body lost")
             if fault == "stop":
@@ -176,6 +204,7 @@ def test_base_driver_stops_on_arrival_and_faults(monkeypatch, fault):
             return {"captured_at_unix": base_motion.time.time()}
 
     def reader():
+        """Provide the reader test fixture or callback."""
         return {"joints_rad": [0.1 if fault == "arm_moved" else 0.0] * 7}
 
     config = {
@@ -194,6 +223,7 @@ def test_base_driver_stops_on_arrival_and_faults(monkeypatch, fault):
     }
 
     def sleep(dt):
+        """Provide the sleep test fixture or callback."""
         clock.now += dt
         vehicle.pose += vehicle.dx * dt
 

@@ -1,9 +1,12 @@
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
 """Offline failure-ordering tests; never import a robot interface."""
 
 import threading
 from dataclasses import replace
 
 import pytest
+
 from prpl_tidybot.sprout.offline_server import SYNTHETIC_GEOMETRY, FakeBackend
 from prpl_tidybot.sprout.sequence import (
     ForearmSkill,
@@ -15,6 +18,7 @@ from prpl_tidybot.sprout.sequence import (
 
 
 def test_cycle_and_map_vertical_geometry():
+    """Verify cycle and map vertical geometry."""
     backend = FakeBackend(0)
     result = ForearmSkill(backend, Recipe(0.12, 0.08), SYNTHETIC_GEOMETRY).cycle()
     assert result["completed"] == [
@@ -38,6 +42,7 @@ def test_cycle_and_map_vertical_geometry():
 
 @pytest.mark.parametrize("confirmed", ["grasp_confirmed", "support_confirmed"])
 def test_failed_confirmation_never_releases_or_retracts(confirmed):
+    """Verify failed confirmation never releases or retracts."""
     backend = FakeBackend(0)
     setattr(backend, confirmed, lambda: False)
     with pytest.raises(RuntimeError):
@@ -50,6 +55,7 @@ def test_failed_confirmation_never_releases_or_retracts(confirmed):
 
 
 def test_stop_latched_before_cycle():
+    """Verify stop latched before cycle."""
     backend = FakeBackend(0)
     skill = ForearmSkill(backend, Recipe(0.1, 0.1), SYNTHETIC_GEOMETRY)
     skill.stop()
@@ -59,11 +65,13 @@ def test_stop_latched_before_cycle():
 
 
 def test_stop_interrupts_inflight_backend():
+    """Verify stop interrupts inflight backend."""
     backend = FakeBackend(10)
     skill = ForearmSkill(backend, Recipe(0.1, 0.1), SYNTHETIC_GEOMETRY)
     failed = []
 
     def run():
+        """Provide the run test fixture or callback."""
         try:
             skill.cycle()
         except Stopped:
@@ -78,6 +86,7 @@ def test_stop_interrupts_inflight_backend():
 
 
 def test_alignment_cannot_change_support_height():
+    """Verify alignment cannot change support height."""
     backend = FakeBackend(0)
     backend.align = lambda pose: replace(backend.grasp, z=0.2)
     with pytest.raises(ValueError, match="support height"):
@@ -87,6 +96,7 @@ def test_alignment_cannot_change_support_height():
 
 @pytest.mark.parametrize("height", [0, -0.1, float("nan"), float("inf"), 0.16])
 def test_invalid_lift(height):
+    """Verify invalid lift."""
     with pytest.raises(ValueError):
         make_plan(GraspPose(0.5, 0, 0.1, 0), Recipe(0.1, 0.1, height))
 
@@ -95,10 +105,12 @@ def test_invalid_lift(height):
     "changes", [{"frame": "tool"}, {"target": "right_arm"}, {"z": 0}]
 )
 def test_invalid_target(changes):
+    """Verify invalid target."""
     with pytest.raises(ValueError):
         make_plan(replace(GraspPose(0.5, 0, 0.1, 0), **changes), Recipe(0.1, 0.1))
 
 
 def test_active_assistance_refused():
+    """Verify active assistance refused."""
     with pytest.raises(ValueError, match="Active"):
         Recipe(0.1, 0.1, sprout_mode="active").validate()

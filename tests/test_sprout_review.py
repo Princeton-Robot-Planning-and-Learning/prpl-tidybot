@@ -1,3 +1,5 @@
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
 """Terminal approval must not bypass scene, preview or readiness checks."""
 
 import json
@@ -10,6 +12,7 @@ from prpl_tidybot.sprout.review import approve_and_execute, digest
 
 @pytest.fixture
 def review(tmp_path):
+    """Provide the review test fixture or callback."""
     for name in ("preview.mp4", "trajectory.json", "scene.json"):
         (tmp_path / name).write_bytes(b"synthetic test artifact")
     observed = {
@@ -38,10 +41,12 @@ def review(tmp_path):
     events = []
 
     def observe():
+        """Provide the observe test fixture or callback."""
         events.append("observe")
         return {**observed, "captured_at_unix": time.time(), "ready": True}
 
     def execute(report):
+        """Provide the execute test fixture or callback."""
         events.append("execute")
         return "done"
 
@@ -50,9 +55,11 @@ def review(tmp_path):
 
 @pytest.mark.parametrize("answer", ["", "yes", "YES"])
 def test_only_after_terminal_approval_and_fresh_read(review, answer):
+    """Verify only after terminal approval and fresh read."""
     path, _, observe, execute, events = review
 
     def prompt(_):
+        """Provide the prompt test fixture or callback."""
         assert events == []
         events.append("approved")
         return answer
@@ -69,6 +76,7 @@ def test_only_after_terminal_approval_and_fresh_read(review, answer):
     [("execution_ready", False), ("completed", False), ("source", "synthetic_demo")],
 )
 def test_unready_preview_never_prompts_or_executes(review, field, value):
+    """Verify unready preview never prompts or executes."""
     path, payload, observe, execute, events = review
     payload[field] = value
     path.write_text(json.dumps(payload))
@@ -84,6 +92,7 @@ def test_unready_preview_never_prompts_or_executes(review, field, value):
 
 
 def test_piped_enter_cannot_authorize(review):
+    """Verify piped enter cannot authorize."""
     path, _, observe, execute, events = review
     with pytest.raises(RuntimeError, match="interactive"):
         approve_and_execute(
@@ -93,9 +102,11 @@ def test_piped_enter_cannot_authorize(review):
 
 
 def test_video_changed_while_waiting_requires_new_preview(review):
+    """Verify video changed while waiting requires new preview."""
     path, _, observe, execute, events = review
 
     def prompt(_):
+        """Provide the prompt test fixture or callback."""
         (path.parent / "preview.mp4").write_bytes(b"changed")
         return "yes"
 
@@ -108,9 +119,11 @@ def test_video_changed_while_waiting_requires_new_preview(review):
     "key", ["grasp_xyz", "base_xyyaw", "arm_joints_rad", "captured_at_unix"]
 )
 def test_scene_change_or_staleness_blocks_motion(review, key):
+    """Verify scene change or staleness blocks motion."""
     path, _, observe, execute, events = review
 
     def changed():
+        """Provide the changed test fixture or callback."""
         fresh = observe()
         if key == "captured_at_unix":
             fresh[key] -= 2
@@ -127,6 +140,7 @@ def test_scene_change_or_staleness_blocks_motion(review, key):
 
 @pytest.mark.parametrize("answer", ["no", "y", "execute"])
 def test_other_answers_cancel(review, answer):
+    """Verify other answers cancel."""
     path, _, observe, execute, events = review
     with pytest.raises(RuntimeError, match="declined"):
         approve_and_execute(
@@ -136,9 +150,11 @@ def test_other_answers_cancel(review, answer):
 
 
 def test_eof_cancels(review):
+    """Verify eof cancels."""
     path, _, observe, execute, events = review
 
     def eof(_):
+        """Provide the eof test fixture or callback."""
         raise EOFError
 
     with pytest.raises(RuntimeError, match="cancelled"):

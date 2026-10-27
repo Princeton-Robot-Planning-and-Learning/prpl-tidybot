@@ -1,3 +1,5 @@
+# Hardware and optional model imports stay lazy for offline use.
+# pylint: disable=import-outside-toplevel
 """Concrete supervised Sprout runtime: ceiling servo + local compliant arm.
 
 All configuration comes from the hashed preview bundle. Construction/observe
@@ -8,6 +10,7 @@ sensor evidence. Confirmations hold the last commanded pose with bounded waits.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -20,7 +23,16 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from prpl_tidybot.sprout.approach import TopDownGeometry, WristCalibration
+from prpl_tidybot.sprout.approach import (
+    TopDownGeometry,
+    WristCalibration,
+    WristObservation,
+)
+from prpl_tidybot.sprout.base_motion import BaseMotion, validate_navigation
+from prpl_tidybot.sprout.base_planning import (
+    transit_radius,
+    validate_base_plan,
+)
 from prpl_tidybot.sprout.compliant_arm import HardwareLimits, LocalCompliantArm
 from prpl_tidybot.sprout.compliant_backend import (
     CompliantBackend,
@@ -30,6 +42,7 @@ from prpl_tidybot.sprout.compliant_backend import (
 from prpl_tidybot.sprout.live_config import validate_config
 from prpl_tidybot.sprout.live_kinematics import LiveKinematics, rotation_error, top_down
 from prpl_tidybot.sprout.live_perception import LivePerception
+from prpl_tidybot.sprout.process_guard import require_exclusive_motion
 from prpl_tidybot.sprout.read_robot_state import read_arm
 from prpl_tidybot.sprout.sequence import ForearmSkill, GraspPose, Recipe, Stopped
 
@@ -43,6 +56,7 @@ class Confirmations:
         self.accepted = threading.Event()
 
     def request(self, phase: str) -> None:
+        """Publish a new phase-specific confirmation token."""
         with self._lock:
             self.accepted.clear()
             self.pending = (phase, uuid.uuid4().hex)
@@ -58,6 +72,7 @@ class Confirmations:
             )
 
     def confirm(self, phase: str, token: str) -> None:
+        """Accept only the currently pending phase and token."""
         with self._lock:
             if self.pending != (phase, token):
                 raise RuntimeError("Unexpected/stale operator confirmation")
@@ -89,6 +104,7 @@ class LiveScene:
         self.original_grasp = GraspPose(**review["plan"]["grasp"])
 
     def localize(self) -> GraspPose:
+        """Return the validated forearm grasp pose in the calibrated map frame."""
         grasp, _ = self.perception.target()
         old = self.review["observed"]["grasp_xyz"]
         tolerance = self.review["revalidation_tolerances"]["grasp_xyz"]
@@ -96,15 +112,22 @@ class LiveScene:
             raise RuntimeError("Forearm moved beyond reviewed target; preview again")
         return grasp
 
+    def wrist(self) -> WristObservation | None:
+        """No wrist-camera observation is available in the ceiling-servo stack."""
+        return None
+
     def pose(self, sample: JointSample) -> GraspPose:
+        """Return the measured pinch pose in the calibrated map frame."""
         return self.kinematics.pose(sample.q)
 
     def solve(self, pose: GraspPose, seed: JointSample) -> tuple[float, ...]:
+        """Solve the target pinch pose from a measured joint seed."""
         return self.kinematics.solve(
             np.array([pose.x, pose.y, pose.z]), top_down(pose.yaw), seed.q
         )
 
     def guard(self, sample: JointSample) -> None:
+        """Validate fresh observations and commissioned operating limits."""
         base, _ = self.perception.base()
         self.perception.image()  # fail on stale camera, even during target occlusion
         old = self.review["observed"]["base_xyyaw"]
@@ -125,6 +148,7 @@ class LiveScene:
             raise RuntimeError("Gripper changed after grasp confirmation")
 
     def validate_path(self, sample: JointSample, q: tuple[float, ...]) -> None:
+        """Reject a commanded joint segment that violates geometry guards."""
         self.kinematics.check_path(
             sample.q,
             q,
@@ -133,6 +157,7 @@ class LiveScene:
         )
 
     def preflight(self, plan, sample: JointSample) -> None:
+        """Validate the planned cycle against measured state before motion."""
         self.guard(sample)
         if self.phase == "preflight":
             delta = (
@@ -153,6 +178,7 @@ class LiveScene:
             raise RuntimeError("Support height changed")
 
     def grasp_confirmed(self, sample: JointSample) -> bool:
+        """Return whether independent evidence confirms the forearm grasp."""
         p = self.config["servo"]
         return (
             self.held
@@ -160,6 +186,7 @@ class LiveScene:
         )
 
     def support_confirmed(self, sample: JointSample) -> bool:
+        """Return whether evidence confirms the forearm is supported."""
         if not self.supported:
             return False
         current = self.pose(sample)
@@ -174,6 +201,7 @@ class LiveScene:
         )
 
     def released(self, sample: JointSample) -> bool:
+        """Return whether measured gripper state confirms release."""
         return (
             abs(sample.gripper - self.config["motion"]["open_position"])
             <= self.config["motion"]["gripper_tolerance"]
@@ -187,6 +215,8 @@ class LiveBackend(CompliantBackend):
 
     def _joint_pregrasp(self, pose: GraspPose) -> None:
         """Execute the reviewed joint-space approach with compliant tracking."""
+        if self._gripper is None:
+            raise RuntimeError("Preflight required")
         p, settings = self.limits, self.scene.config["servo"]
         sample = self._sample()
         origin = np.asarray(sample.q)
@@ -242,6 +272,9 @@ class LiveBackend(CompliantBackend):
         raise TimeoutError("Joint-space pregrasp timed out")
 
     def move(self, phase: str, pose: GraspPose) -> None:
+        """Stream a bounded motion and wait for measured arrival."""
+        if self._gripper is None:
+            raise RuntimeError("Preflight required")
         self.scene.phase = phase
         self.geometry.validate_pose(pose)
         if (
@@ -298,6 +331,9 @@ class LiveBackend(CompliantBackend):
         raise TimeoutError(f"{phase} arrival timed out")
 
     def align(self, pregrasp: GraspPose) -> GraspPose:
+        """Refine the grasp alignment using fresh visual observations."""
+        if self._hold_q is None or self._gripper is None or self._grasp is None:
+            raise RuntimeError("Localization and pregrasp motion required")
         p = self.scene.config["servo"]
         deadline = time.monotonic() + p["timeout_s"]
         stable, travel, updates = 0, 0.0, 0
@@ -333,7 +369,7 @@ class LiveBackend(CompliantBackend):
             else:
                 stable = 0
                 step = error * min(1.0, p["max_step_m"] / np.linalg.norm(error))
-                travel += np.linalg.norm(step)
+                travel += float(np.linalg.norm(step))
                 if travel > p["max_travel_m"]:
                     raise RuntimeError("Visual correction travel budget exceeded")
                 self.move(
@@ -350,6 +386,8 @@ class LiveBackend(CompliantBackend):
         raise TimeoutError("Visual alignment timed out")
 
     def _confirmation(self, phase: str) -> None:
+        if self._hold_q is None or self._gripper is None:
+            raise RuntimeError("Pregrasp motion required")
         self.scene.confirmations.request(phase)
         deadline = (
             time.monotonic() + self.scene.config["servo"]["confirmation_timeout_s"]
@@ -363,6 +401,9 @@ class LiveBackend(CompliantBackend):
         raise TimeoutError(f"Operator {phase} confirmation timed out")
 
     def close_gripper(self) -> None:
+        """Close gradually and require grasp evidence before lifting."""
+        if self._hold_q is None or self._gripper is None:
+            raise RuntimeError("Pregrasp motion required")
         self.scene.phase = "close"
         p, s = self.limits, self.scene.config["servo"]
         deadline, stable, last, last_time = (
@@ -409,6 +450,7 @@ class LiveBackend(CompliantBackend):
         raise TimeoutError("No stable gripper contact candidate; lift refused")
 
     def support_confirmed(self) -> bool:
+        """Return whether evidence confirms the forearm is supported."""
         if not self.scene.supported:
             if self.scene.phase != "lower":
                 return False
@@ -417,12 +459,15 @@ class LiveBackend(CompliantBackend):
         return self.scene.support_confirmed(self._sample())
 
     def open_gripper(self) -> None:
+        """Open the gripper only after confirming forearm support."""
         self.scene.phase = "open"
         super().open_gripper()
         self.scene.held = False
 
 
 class LiveRuntime:
+    """Bind a reviewed recipe to fresh perception and guarded hardware sessions."""
+
     def __init__(
         self,
         review_path: Path,
@@ -457,10 +502,6 @@ class LiveRuntime:
         if self.base_plan != self.review.get("base_plan"):
             raise ValueError("Review/config base paths differ")
         if self.base_plan:
-            from prpl_tidybot.sprout.base_planning import (
-                transit_radius,
-                validate_base_plan,
-            )
 
             validate_base_plan(self.base_plan)
             if not np.allclose(
@@ -478,8 +519,6 @@ class LiveRuntime:
                 )
         base_pose = self.review["observed"]["base_xyyaw"]
         if self.base_plan and self.base_plan["required"]:
-            from prpl_tidybot.sprout.base_motion import validate_navigation
-            from prpl_tidybot.sprout.base_planning import validate_base_plan
 
             validate_base_plan(self.base_plan)
             validate_navigation(self.config.get("navigation", {}))
@@ -501,8 +540,11 @@ class LiveRuntime:
         self._arm_lock = threading.Lock()
         self._arm: Any = None
         self._base_motion: Any = None
+        self._observed = False
+        self._used = False
 
     def observe(self) -> dict:
+        """Capture read-only observations for review revalidation."""
         deadline = time.monotonic() + self.config["servo"]["startup_timeout_s"]
         while True:
             if self._stop.is_set():
@@ -545,9 +587,11 @@ class LiveRuntime:
         }
 
     def confirm(self, phase: str, token: str) -> None:
+        """Forward an operator confirmation to the active phase."""
         self.confirmations.confirm(phase, token)
 
     def stop(self) -> None:
+        """Latch the stop request and prevent subsequent motion commands."""
         self._stop.set()
         if self._base_motion is not None:
             self._base_motion.stop()
@@ -556,6 +600,7 @@ class LiveRuntime:
                 self._arm.stop()
 
     def execute(self, review: dict) -> dict:
+        """Revalidate approval and execute the guarded base and arm sequence."""
         if (
             self._stop.is_set()
             or review != self.review
@@ -569,12 +614,10 @@ class LiveRuntime:
             raise RuntimeError("One cycle per approved runtime session")
         # Refuse a second controller owner. Merely launching legacy servers may
         # leave an initialized hardware controller from a prior client.
-        from prpl_tidybot.sprout.process_guard import require_exclusive_motion
 
         require_exclusive_motion()
         self._used = True
         if self.base_plan and self.base_plan["required"]:
-            from prpl_tidybot.sprout.base_motion import BaseMotion
 
             self._base_motion = BaseMotion(
                 self.config["navigation"],
@@ -610,7 +653,6 @@ class LiveRuntime:
                     held=frame["phase"] in ("lift", "lower"),
                 )
                 previous = frame["arm_joints_rad"]
-            import copy
 
             self.scene.review = copy.deepcopy(self.review)
             self.scene.review["observed"]["base_xyyaw"] = list(base)
@@ -650,9 +692,11 @@ class LiveRuntime:
                 arm.close()
 
     def close(self) -> None:
+        """Stop active sessions and close perception connections."""
         self.stop()
         self.perception.close()
 
 
 def create_runtime(review_path: Path) -> LiveRuntime:
+    """Construct the runtime from its reviewed bundle."""
     return LiveRuntime(review_path)

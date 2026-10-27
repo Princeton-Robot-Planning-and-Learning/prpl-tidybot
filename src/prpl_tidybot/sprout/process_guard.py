@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 
 
-def require_exclusive_motion():
+def require_exclusive_motion() -> None:
+    """Reject known competing motion processes without terminating them."""
     for process in Path("/proc").iterdir():
         if not process.name.isdigit() or int(process.name) == os.getpid():
             continue

@@ -45,9 +45,11 @@ class TopDownGeometry:
 
     @property
     def minimum_pinch_height_m(self) -> float:
+        """Return the pinch height needed for the configured floor clearance."""
         return self.pad_drop_m + self.minimum_clearance_m + self.downward_error_budget_m
 
     def validate_pose(self, pose: GraspPose) -> None:
+        """Reject a grasp that violates the calibrated frame or floor clearance."""
         pose.validate()
         if pose.z < self.minimum_pinch_height_m - 1e-9:
             raise ValueError(
@@ -55,13 +57,15 @@ class TopDownGeometry:
             )
 
     def arm_z(self, pose: GraspPose) -> float:
+        """Convert map pinch height to the calibrated arm frame."""
         self.validate_pose(pose)
         return self.floor_z_arm_m + pose.z
 
 
 @dataclass(frozen=True)
 class CameraEstimate:
-    """One independent, identity-checked estimate; timestamps use local monotonic time."""
+    """One independent, identity-checked estimate; timestamps use local monotonic
+    time."""
 
     camera: int
     grasp: GraspPose
@@ -74,6 +78,8 @@ class CameraEstimate:
 
 @dataclass(frozen=True)
 class CameraChoice:
+    """Selected camera observation and its cross-view disagreement."""
+
     estimate: CameraEstimate
     disagreement_m: float
     needs_calibration_check: bool
@@ -245,6 +251,7 @@ class WristAligner:
     def update(
         self, observation: WristObservation | None, measured: GraspPose, *, now: float
     ) -> tuple[GraspPose, bool]:
+        """Compute a bounded correction from a fresh wrist observation."""
         p = self.calibration
         measured.validate()
         if (

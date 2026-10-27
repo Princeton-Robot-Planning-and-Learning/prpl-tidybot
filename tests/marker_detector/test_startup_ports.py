@@ -1,3 +1,5 @@
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
 """Duplicate perception startup must fail before opening camera devices."""
 
 import socket
@@ -8,6 +10,7 @@ from prpl_tidybot.marker_detector import server
 
 
 def test_busy_port_blocks_startup_before_children(monkeypatch):
+    """Verify busy port blocks startup before children."""
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen()
@@ -26,6 +29,7 @@ def test_busy_port_blocks_startup_before_children(monkeypatch):
 
 
 def test_available_ports_leave_no_listeners(monkeypatch):
+    """Verify available ports leave no listeners."""
     monkeypatch.setattr(server, "CAMERA_SERVER_PORTS", (0, 0))
     monkeypatch.setattr(server, "MARKER_DETECTOR_PORT", 0)
     monkeypatch.setattr(server, "CEILING_IMAGE_PORT", 0)

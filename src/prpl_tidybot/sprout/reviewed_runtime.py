@@ -33,6 +33,7 @@ class _ReviewedScene:
         return getattr(self.scene, name)
 
     def localize(self) -> GraspPose:
+        """Return the validated forearm grasp pose in the calibrated map frame."""
         actual = self.scene.localize()
         expected = self.review["observed"]["grasp_xyz"]
         tolerance = self.review["revalidation_tolerances"]["grasp_xyz"]
@@ -44,6 +45,7 @@ class _ReviewedScene:
         return actual
 
     def preflight(self, plan: Plan, sample: Any) -> None:
+        """Validate the planned cycle against measured state before motion."""
         approved = self.review["plan"]["grasp"]
         actual = plan.grasp
         if (
@@ -97,6 +99,7 @@ class ReviewedCompliantRuntime:
                 self._active_arm.stop()
 
     def observe(self) -> dict[str, Any]:
+        """Read the target and robot state for approval revalidation."""
         sample = self.snapshot()
         return {
             **sample,
@@ -104,6 +107,7 @@ class ReviewedCompliantRuntime:
         }
 
     def execute(self, review: dict[str, Any]) -> dict[str, Any]:
+        """Run the approved cycle through the compliant backend."""
         if (
             self._stop_requested.is_set()
             or not self.commissioning_verified

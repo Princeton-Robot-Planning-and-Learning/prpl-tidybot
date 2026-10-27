@@ -1,3 +1,5 @@
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
 """SSH approval transport: EOF, wrong artifact and heartbeat loss latch stop."""
 
 import io
@@ -10,11 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from prpl_tidybot.sprout.live_runtime import Confirmations
 from prpl_tidybot.sprout.remote_execute import Session
 from prpl_tidybot.sprout.review import digest
 
 
 def test_exact_review_approval_only():
+    """Verify exact review approval only."""
     session = Session("expected")
     session.receive({"kind": "approve", "review_sha256": "wrong"})
     assert session.stopped.is_set()
@@ -23,6 +27,7 @@ def test_exact_review_approval_only():
 
 
 def test_approved_then_stop_cannot_resume():
+    """Verify approved then stop cannot resume."""
     session = Session("expected")
     session.receive({"kind": "approve", "review_sha256": "expected"})
     assert session.prompt("unused") == "yes"
@@ -34,6 +39,7 @@ def test_approved_then_stop_cannot_resume():
 
 @pytest.mark.parametrize("stream", ["", "not-json\n", "[]\n"])
 def test_connection_eof_or_malformed_data_stops_runtime(stream):
+    """Verify connection eof or malformed data stops runtime."""
     events = []
     session = Session("expected")
     session.bind(SimpleNamespace(stop=lambda: events.append("stop")))
@@ -43,6 +49,7 @@ def test_connection_eof_or_malformed_data_stops_runtime(stream):
 
 
 def test_stop_before_runtime_is_bound_latches():
+    """Verify stop before runtime is bound latches."""
     events = []
     session = Session("expected")
     session.stop()
@@ -51,6 +58,7 @@ def test_stop_before_runtime_is_bound_latches():
 
 
 def test_heartbeat_loss_calls_stop():
+    """Verify heartbeat loss calls stop."""
     stopped = threading.Event()
     session = Session("expected", timeout_s=0.01)
     session.bind(SimpleNamespace(stop=stopped.set))
@@ -65,7 +73,7 @@ def test_heartbeat_loss_calls_stop():
 
 
 def test_operator_confirmation_is_bound_to_live_phase_and_nonce():
-    from prpl_tidybot.sprout.live_runtime import Confirmations
+    """Verify operator confirmation is bound to live phase and nonce."""
 
     confirmations = Confirmations()
     session = Session("expected")
@@ -104,7 +112,8 @@ def test_real_process_approval_transport_with_fake_runtime(tmp_path):
     (tmp_path / "fixture_runtime.py").write_text(
         "import time\n"
         "class Runtime:\n"
-        f"    def observe(self): return {{**{observed!r}, 'ready': True, 'captured_at_unix': time.time()}}\n"
+        f"    def observe(self): return {{**{observed!r}, "
+        "'ready': True, 'captured_at_unix': time.time()}\n"
         "    def execute(self, review): return {'fake_cycle_completed': True}\n"
         "    def stop(self): pass\n"
         "def factory(review_path): return Runtime()\n"

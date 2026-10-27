@@ -1,3 +1,7 @@
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
+"""Tests for isolated colored-band localization."""
+
 import numpy as np
 import pytest
 
@@ -6,10 +10,12 @@ from prpl_tidybot.visual_servo.forearm_target import detect_band
 
 def detect(image):
     # Synthetic blue only; these are not calibrated robot-camera thresholds.
+    """Provide the detect test fixture or callback."""
     return detect_band(image, (110, 100, 100), (130, 255, 255), 100)
 
 
 def test_band_center():
+    """Verify band center."""
     frame = np.zeros((100, 140, 3), dtype=np.uint8)
     frame[35:65, 40:100] = (0, 0, 255)
     result = detect(frame)
@@ -20,6 +26,7 @@ def test_band_center():
 
 @pytest.mark.parametrize("kind", ["empty", "clipped", "ambiguous"])
 def test_reject_unusable_band(kind):
+    """Verify reject unusable band."""
     frame = np.zeros((100, 140, 3), dtype=np.uint8)
     if kind == "clipped":
         frame[0:30, 40:100] = (0, 0, 255)

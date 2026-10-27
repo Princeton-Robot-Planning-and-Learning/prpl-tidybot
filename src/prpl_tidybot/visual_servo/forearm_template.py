@@ -16,6 +16,8 @@ import numpy as np
 
 @dataclass(frozen=True)
 class PatchMatch:
+    """Matched template center, confidence, and ambiguity margin."""
+
     center_uv: tuple[float, float]
     quality: float
     runner_up_quality: float
@@ -72,6 +74,7 @@ class ForearmPatchTracker:
     def detect(
         self, image_rgb: np.ndarray, search_xywh: tuple[int, int, int, int]
     ) -> PatchMatch | None:
+        """Find a distinctive reference patch within the allowed search region."""
         gray = _gray(image_rgb)
         _rectangle(search_xywh, gray.shape[1], gray.shape[0])
         x, y, w, h = search_xywh

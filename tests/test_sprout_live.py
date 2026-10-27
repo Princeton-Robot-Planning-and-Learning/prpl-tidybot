@@ -1,3 +1,5 @@
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
 """Concrete adapter integration and failure paths, without hardware activation."""
 
 import json
@@ -7,15 +9,22 @@ from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
+import cv2
+import kinder
 import numpy as np
 import pytest
 
 from prpl_tidybot.sprout import compliant_backend, live_runtime
 from prpl_tidybot.sprout.compliant_arm import HardwareLimits
 from prpl_tidybot.sprout.compliant_backend import JointSample, MotionLimits
-from prpl_tidybot.sprout.live_config import CHECKS, model_digest, validate_config
+from prpl_tidybot.sprout.live_config import (
+    CHECKS,
+    calibration_digest,
+    model_digest,
+    validate_config,
+)
 from prpl_tidybot.sprout.live_kinematics import LiveKinematics, top_down
-from prpl_tidybot.sprout.live_perception import fresh_time
+from prpl_tidybot.sprout.live_perception import LivePerception, fresh_time
 from prpl_tidybot.sprout.live_runtime import Confirmations, LiveRuntime
 from prpl_tidybot.sprout.sequence import GraspPose, Stopped
 
@@ -88,6 +97,7 @@ def config():
 
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
+    """Provide the rig test fixture or callback."""
     clock = SimpleNamespace(now=100.0)
     timer = SimpleNamespace(
         time=lambda: clock.now,
@@ -100,6 +110,8 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setenv("SPROUT_TIDYBOT_MODEL", "/unused-in-fake.xml")
 
     class Arm:
+        """Test double for Arm."""
+
         controller_name = "joint_compliant"
         q = (0.5, 0, 0.3, 0, 0, 0, 0)
         gripper = 0.0
@@ -108,9 +120,11 @@ def rig(tmp_path, monkeypatch):
         commands = None
 
         def read(self):
+            """Provide the read test fixture or callback."""
             return JointSample(self.q, (0.0,) * 7, self.gripper, clock.now)
 
         def command(self, q, gripper):
+            """Provide the command test fixture or callback."""
             if self.stopped:
                 raise Stopped("test stop")
             self.commands.append((q, gripper))
@@ -118,11 +132,14 @@ def rig(tmp_path, monkeypatch):
                 self.q, self.gripper = q, min(gripper, 0.35)
 
         def stop(self):
+            """Provide the stop test fixture or callback."""
             self.stopped = True
 
         close = stop
 
     class Perception:
+        """Test double for Perception."""
+
         moved = False
         stale = False
         lost = False
@@ -131,48 +148,57 @@ def rig(tmp_path, monkeypatch):
             pass
 
         def target(self):
+            """Provide the target test fixture or callback."""
             if self.lost:
                 raise RuntimeError("tape lost")
             return GraspPose(0.5, 0, 0.1, 0), clock.now
 
         def base(self):
+            """Provide the base test fixture or callback."""
             return np.array([1 if self.moved else 0, 0, 0]), clock.now
 
         def image(self):
+            """Provide the image test fixture or callback."""
             if self.stale:
                 raise RuntimeError("stale camera")
             return None, clock.now
 
         def close(self):
-            pass
+            """Provide the close test fixture or callback."""
 
     class Kinematics:
+        """Test double for Kinematics."""
+
         def __init__(self, *_):
             pass
 
         def pose(self, q):
+            """Provide the pose test fixture or callback."""
             return GraspPose(*q[:4])
 
         def full_pose(self, q):
+            """Provide the full pose test fixture or callback."""
             return np.array(q[:3]), top_down(q[3])
 
         def solve(self, xyz, rotation, seed):
+            """Provide the solve test fixture or callback."""
             return (*map(float, xyz), 0.0, 0.0, 0.0, 0.0)
 
         def check_state(self, *_, **__):
-            pass
+            """Provide the check state test fixture or callback."""
 
         def check_path(self, *_, **__):
-            pass
+            """Provide the check path test fixture or callback."""
 
         def validate_trajectory(self, *_, **__):
-            pass
+            """Provide the validate trajectory test fixture or callback."""
 
     arm = Arm()
     arm.commands = []
     connects = []
 
     def connect(*_, **__):
+        """Provide the connect test fixture or callback."""
         connects.append(True)
         return arm
 
@@ -206,6 +232,7 @@ def rig(tmp_path, monkeypatch):
     original = runtime.confirmations.request
 
     def operator(phase):
+        """Provide the operator test fixture or callback."""
         confirmations.append((phase, arm.q[2], arm.gripper))
         original(phase)
         runtime.confirm(*runtime.confirmations.pending)
@@ -222,6 +249,7 @@ def rig(tmp_path, monkeypatch):
 
 
 def test_concrete_runtime_full_supervised_cycle(rig):
+    """Verify concrete runtime full supervised cycle."""
     assert rig.runtime.observe()["ready"]
     assert not rig.connects and not rig.arm.commands
     result = rig.runtime.execute(rig.report)
@@ -242,6 +270,7 @@ def test_concrete_runtime_full_supervised_cycle(rig):
 
 
 def test_cannot_activate_without_observation_or_after_stop(rig):
+    """Verify cannot activate without observation or after stop."""
     with pytest.raises(RuntimeError, match="observation"):
         rig.runtime.execute(rig.report)
     rig.runtime.observe()
@@ -253,6 +282,7 @@ def test_cannot_activate_without_observation_or_after_stop(rig):
 
 @pytest.mark.parametrize("fault", ["stale", "moved", "lost"])
 def test_scene_faults_stop_before_any_command(rig, fault):
+    """Verify scene faults stop before any command."""
     rig.runtime.observe()
     setattr(rig.runtime.perception, fault, True)
     with pytest.raises(RuntimeError):
@@ -261,10 +291,12 @@ def test_scene_faults_stop_before_any_command(rig, fault):
 
 
 def test_no_support_confirmation_never_releases(rig):
+    """Verify no support confirmation never releases."""
     rig.runtime.observe()
     original = rig.runtime.confirmations.request
 
     def operator(phase):
+        """Provide the operator test fixture or callback."""
         if phase == "support":
             Confirmations.request(rig.runtime.confirmations, phase)
         else:
@@ -278,6 +310,7 @@ def test_no_support_confirmation_never_releases(rig):
 
 
 def test_stop_during_grasp_confirmation_never_lifts(rig):
+    """Verify stop during grasp confirmation never lifts."""
     rig.runtime.observe()
     rig.runtime.confirmations.request = lambda _: rig.runtime.stop()
     with pytest.raises(Stopped):
@@ -287,6 +320,7 @@ def test_stop_during_grasp_confirmation_never_lifts(rig):
 
 
 def test_confirmation_nonce_cannot_be_replayed():
+    """Verify confirmation nonce cannot be replayed."""
     confirmation = Confirmations()
     confirmation.request("grasp")
     old = confirmation.pending
@@ -301,11 +335,13 @@ def test_confirmation_nonce_cannot_be_replayed():
     "stamp", [None, float("nan"), time.time() - 5, time.time() + 5]
 )
 def test_camera_requires_finite_recent_acquisition(stamp):
+    """Verify camera requires finite recent acquisition."""
     with pytest.raises(RuntimeError):
         fresh_time(stamp, 1)
 
 
 def test_config_rejects_uncommissioned_force_limits():
+    """Verify config rejects uncommissioned force limits."""
     cfg = config()
     validate_config(cfg)
     cfg["hardware"]["gripper_force_percent"] = None
@@ -314,7 +350,7 @@ def test_config_rejects_uncommissioned_force_limits():
 
 
 def test_actual_model_ik_and_obstacle_rejection():
-    import kinder
+    """Verify actual model ik and obstacle rejection."""
 
     model = (
         Path(kinder.__file__).parent
@@ -336,10 +372,8 @@ def test_actual_model_ik_and_obstacle_rejection():
 def test_live_camera_projects_selected_patch_and_rejects_stale_or_wrong_calibration(
     tmp_path,
 ):
-    import cv2
-
-    from prpl_tidybot.sprout.live_config import calibration_digest
-    from prpl_tidybot.sprout.live_perception import LivePerception
+    """Verify live camera projects selected patch and rejects stale or wrong
+    calibration."""
 
     frame = np.zeros((256, 128, 3), np.uint8)
     frame[48:64, 48:64] = np.random.default_rng(7).integers(
@@ -380,6 +414,7 @@ def test_live_camera_projects_selected_patch_and_rejects_stale_or_wrong_calibrat
     markers = {"poses": {0: [1, 2, 0.3]}, "pose_captured_at_unix": {0: time.time()}}
 
     def source(host, port):
+        """Provide the source test fixture or callback."""
         return SimpleNamespace(
             get=lambda: images if port == 6003 else markers, close=lambda: None
         )
@@ -398,6 +433,7 @@ def test_live_camera_projects_selected_patch_and_rejects_stale_or_wrong_calibrat
 
 
 def test_reviewed_joint_pregrasp_uses_compliant_commands(rig):
+    """Verify reviewed joint pregrasp uses compliant commands."""
     goal = [0.5, 0, 0.2, 0, 0, 0, 0]
     rig.report["pregrasp_joints_rad"] = goal
     rig.runtime.review["pregrasp_joints_rad"] = goal
@@ -412,8 +448,34 @@ def test_reviewed_joint_pregrasp_uses_compliant_commands(rig):
 
 
 def test_joint_pregrasp_endpoint_must_match_reviewed_trajectory(rig):
+    """Verify joint pregrasp endpoint must match reviewed trajectory."""
     rig.report["pregrasp_joints_rad"] = [0.5, 0, 0.2, 0, 0, 0, 0]
     rig.runtime.review["pregrasp_joints_rad"] = rig.report["pregrasp_joints_rad"]
     with pytest.raises(ValueError, match="pregrasp endpoint"):
         rig.runtime.observe()
     assert not rig.connects
+
+
+@pytest.mark.parametrize("operation", ["move", "align", "close", "confirm"])
+def test_live_backend_rejects_uninitialized_motion(rig, operation):
+    """An out-of-order command must fail before sending any arm target."""
+    backend = live_runtime.LiveBackend(
+        rig.arm,
+        rig.runtime.scene,
+        rig.runtime.geometry,
+        rig.runtime.motion,
+        live_runtime.WristCalibration(
+            (0, 0), ((1, 0), (0, 1)), 0.01, 0.01, 0.1, 1, 1, 2, 10, 0.01, 0.1
+        ),
+    )
+    target = GraspPose(0.5, 0.0, 0.1, 0.0)
+    operations = {
+        "move": lambda: backend.move("descend", target),
+        "align": lambda: backend.align(target),
+        "close": backend.close_gripper,
+        "confirm": lambda: backend._confirmation("grasp"),
+    }
+    with pytest.raises(RuntimeError, match="required"):
+        operations[operation]()
+    assert not rig.arm.commands
+    assert not rig.confirmations

@@ -1,3 +1,5 @@
+# Hardware and optional model imports stay lazy for offline use.
+# pylint: disable=import-outside-toplevel
 """NUC-local owner of the existing JointCompliantController.
 
 No automatic retract, home, gripper open, or fault clearing. Do not run beside
@@ -110,7 +112,8 @@ class LocalCompliantArm:
         """
         if not commissioning_verified:
             raise RuntimeError(
-                "Calibration, scene guards, gripper limits and physical stop must be verified first"
+                "Calibration, scene guards, gripper limits "
+                "and physical stop must be verified first"
             )
         from prpl_tidybot.third_party.arm_controller import JointCompliantController
         from prpl_tidybot.third_party.kinova import TorqueControlledArm
@@ -204,6 +207,7 @@ class LocalCompliantArm:
             return result
 
     def read(self) -> JointSample:
+        """Return the latest measured arm state or reject an expired sample."""
         with self._lock:
             if self._stopped.is_set():
                 raise Stopped(self.stop_reason or "Local compliant session stopped")
@@ -212,6 +216,7 @@ class LocalCompliantArm:
             return self._sample
 
     def command(self, q: tuple[float, ...], gripper: float) -> None:
+        """Queue a bounded target for the compliant control loop."""
         p = self.limits
         if (
             len(q) != 7
@@ -230,6 +235,7 @@ class LocalCompliantArm:
             self._last_command = time.monotonic()
 
     def stop(self) -> None:
+        """Latch stop without opening the gripper or initiating retraction."""
         with self._lock:
             self._stopped.set()
             self.stop_reason = self.stop_reason or "explicit stop"
@@ -238,6 +244,7 @@ class LocalCompliantArm:
         self.arm.stop_cyclic()
 
     def close(self) -> None:
+        """Stop control and release the arm session."""
         try:
             self.stop()
         finally:

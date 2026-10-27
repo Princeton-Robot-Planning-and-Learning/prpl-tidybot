@@ -31,6 +31,7 @@ class GraspPose:
     target: str = "sprout_left_forearm"
 
     def validate(self) -> None:
+        """Reject non-finite coordinates or an unsupported pose frame."""
         if self.frame != "map" or self.target != "sprout_left_forearm":
             raise ValueError("Expected Sprout's left forearm in the map frame")
         if not all(math.isfinite(v) for v in (self.x, self.y, self.z, self.yaw)):
@@ -39,6 +40,7 @@ class GraspPose:
             raise ValueError("Pinch height must be above the floor")
 
     def above(self, height: float) -> GraspPose:
+        """Return a pose translated upward by the requested distance."""
         return replace(self, z=self.z + height)
 
 
@@ -52,6 +54,7 @@ class Recipe:
     sprout_mode: str = "passive"
 
     def validate(self) -> None:
+        """Validate the predefined lift, approach, and passive-arm assumptions."""
         for value in (
             self.pregrasp_height_m,
             self.retreat_height_m,
@@ -67,6 +70,8 @@ class Recipe:
 
 @dataclass(frozen=True)
 class Plan:
+    """Calibrated target poses for each stage of the forearm cycle."""
+
     pregrasp: GraspPose
     grasp: GraspPose
     lifted: GraspPose
@@ -74,6 +79,7 @@ class Plan:
     retreat: GraspPose
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the phase targets for preview and approval."""
         return asdict(self)
 
 
@@ -155,6 +161,7 @@ class ForearmSkill:
         self._motion = threading.Lock()
 
     def stop(self) -> None:
+        """Latch the stop request and prevent subsequent motion commands."""
         self._stopped.set()
         self.backend.stop()
 
@@ -163,6 +170,7 @@ class ForearmSkill:
             raise Stopped("Stop latched; inspect the scene before restarting server")
 
     def cycle(self) -> dict[str, Any]:
+        """Run the guarded grasp, lift, lower, release, and retreat sequence."""
         if not self._motion.acquire(blocking=False):
             raise RuntimeError("Another forearm cycle is running")
         completed: list[str] = []

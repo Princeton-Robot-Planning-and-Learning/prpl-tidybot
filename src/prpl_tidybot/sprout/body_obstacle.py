@@ -16,7 +16,9 @@ from prpl_tidybot.visual_servo.forearm_template import ForearmPatchTracker, ceil
 
 
 def detect_body(reference: np.ndarray, image: np.ndarray, config: dict) -> dict:
-    points, matches = [], []
+    """Track both reference views and project their enclosing body envelope."""
+    points: list[np.ndarray] = []
+    matches = []
     maximum_height = float(config["maximum_height_m"])
     margin = float(config["margin_m"])
     if not 0 < maximum_height < 1 or not 0 < margin < 1:
@@ -72,6 +74,7 @@ def detect_body(reference: np.ndarray, image: np.ndarray, config: dict) -> dict:
 
 
 def check_contained(current: dict, reviewed: dict, tolerance: float = 0.01) -> None:
+    """Reject body motion outside the reviewed obstacle envelope."""
     c, h = np.asarray(current["center"]), np.asarray(current["half_size"])
     rc, rh = np.asarray(reviewed["center"]), np.asarray(reviewed["half_size"])
     if np.any(np.abs(c[:2] - rc[:2]) + h[:2] > rh[:2] + tolerance):
@@ -79,6 +82,7 @@ def check_contained(current: dict, reviewed: dict, tolerance: float = 0.01) -> N
 
 
 def draw_body(image: np.ndarray, body: dict) -> np.ndarray:
+    """Overlay the tracked body envelope on the stacked ceiling images."""
     result = image.copy()
     for view in body["views"]:
         corners = np.array(view["corners_uv"], np.int32)

@@ -1,5 +1,8 @@
 """Offline RPC rehearsal. This module cannot connect to robot hardware."""
 
+# Synthetic callbacks retain the hardware-facing interface signatures.
+# pylint: disable=unused-argument
+
 from __future__ import annotations
 
 import argparse
@@ -39,20 +42,25 @@ class FakeBackend:
             self.events.append(name)
 
     def localize(self) -> GraspPose:
+        """Return the synthetic target without accessing hardware."""
         self._operation("synthetic_localization")
         return self.grasp
 
     def preflight(self, plan: Plan) -> None:
+        """Record the synthetic preflight event."""
         self._operation("synthetic_preflight")
 
     def move(self, phase: str, pose: GraspPose) -> None:
+        """Record a synthetic motion phase without commanding hardware."""
         self._operation(phase)
 
     def align(self, pregrasp: GraspPose) -> GraspPose:
+        """Record synthetic alignment and return the configured target."""
         self._operation("synthetic_alignment")
         return self.grasp
 
     def close_gripper(self) -> None:
+        """Record a synthetic close and mark the simulated grasp."""
         self._operation("close")
         with self.lock:
             if self.cancelled.is_set():
@@ -60,14 +68,17 @@ class FakeBackend:
             self.closed = True
 
     def grasp_confirmed(self) -> bool:
+        """Return the synthetic grasp evidence."""
         self._operation("synthetic_grasp_confirmation")
         return True
 
     def support_confirmed(self) -> bool:
+        """Return the synthetic support evidence."""
         self._operation("synthetic_support_confirmation")
         return True
 
     def open_gripper(self) -> None:
+        """Record a synthetic open and clear the simulated grasp."""
         self._operation("open")
         with self.lock:
             if self.cancelled.is_set():
@@ -75,11 +86,13 @@ class FakeBackend:
             self.closed = False
 
     def stop(self) -> None:
+        """Latch the stop request and prevent subsequent motion commands."""
         with self.lock:
             self.cancelled.set()
             self.events.append("stop")
 
     def status(self) -> dict[str, Any]:
+        """Return synthetic backend state for the rehearsal client."""
         with self.lock:
             return {
                 "mode": "offline_fake",
@@ -97,17 +110,21 @@ class Service:
         self.skill = ForearmSkill(self.backend, Recipe(0.10, 0.10), SYNTHETIC_GEOMETRY)
 
     def cycle(self) -> dict[str, Any]:
+        """Run one synthetic forearm cycle."""
         return {"mode": "offline_fake", **self.skill.cycle()}
 
     def stop(self) -> dict[str, Any]:
+        """Latch the stop request and prevent subsequent motion commands."""
         self.skill.stop()
         return self.status()
 
     def status(self) -> dict[str, Any]:
+        """Return the synthetic service state."""
         return self.backend.status()
 
 
 def main() -> None:
+    """Run the offline server command-line entry point."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=50012)
     parser.add_argument("--authkey-file", type=Path, required=True)
@@ -119,7 +136,7 @@ def main() -> None:
     service = Service(args.phase_delay)
 
     class Manager(BaseManager):
-        pass
+        """RPC manager exposing only the offline rehearsal service."""
 
     Manager.register(
         "Sprout", callable=lambda: service, exposed=("cycle", "stop", "status")

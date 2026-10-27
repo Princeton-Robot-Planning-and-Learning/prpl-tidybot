@@ -1,3 +1,5 @@
+# Hardware and optional model imports stay lazy for offline use.
+# pylint: disable=import-outside-toplevel
 """Supervised high-level Retract action after all motion clients stop.
 
 No fault clearing, gripper opening or cyclic controller activation. Unlike the
@@ -6,10 +8,14 @@ legacy retract test, distinguish ACTION_ABORT and timeout from successful end.
 
 from __future__ import annotations
 
+import os
+import signal
 import threading
+from pathlib import Path
 
 
-def retract(arm, messages, timeout=45.0):
+def retract(arm, messages, timeout: float = 45.0) -> None:
+    """Request supervised retraction and wait for completion or stop."""
     mode = messages.ServoingModeInformation()
     mode.servoing_mode = messages.SINGLE_LEVEL_SERVOING
     arm.base.SetServoingMode(mode)
@@ -48,11 +54,9 @@ def retract(arm, messages, timeout=45.0):
         arm.base.Unsubscribe(handle)
 
 
-def main():
+def main() -> None:
+    """Run the shutdown arm command-line entry point."""
     # Imports here keep all tests/read-only import paths free of hardware access.
-    import os
-    import signal
-    from pathlib import Path
 
     from kortex_api.autogen.messages import Base_pb2
 
@@ -83,11 +87,12 @@ def main():
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupted)
-    arm = TorqueControlledArm()
+    # The vendor driver has no type annotations.
+    arm = TorqueControlledArm()  # type: ignore[no-untyped-call]
     try:
         retract(arm, Base_pb2)
     finally:
-        arm.disconnect()
+        arm.disconnect()  # type: ignore[no-untyped-call]
 
 
 if __name__ == "__main__":

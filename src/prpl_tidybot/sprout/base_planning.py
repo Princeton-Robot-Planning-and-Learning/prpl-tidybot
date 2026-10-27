@@ -12,13 +12,16 @@ import itertools
 import math
 from pathlib import Path
 
+import mujoco
 import numpy as np
 
 from prpl_tidybot.sprout.live_config import model_digest
 from prpl_tidybot.sprout.live_kinematics import LiveKinematics, top_down
+from prpl_tidybot.sprout.sequence import make_plan
 
 
 def transit_radius(model: Path, joints: list[float]) -> float:
+    """Compute a conservative swept base radius for the current arm posture."""
     kin = LiveKinematics(model, [0, 0, 0], {"model_sha256": model_digest(model)})
     kin.set(joints)
     return max(
@@ -28,6 +31,7 @@ def transit_radius(model: Path, joints: list[float]) -> float:
 
 
 def free(point, obstacles, radius, bounds) -> bool:
+    """Check whether a base center clears inflated obstacles and map bounds."""
     p = np.asarray(point)[:2]
     if (
         not np.all(np.isfinite(p))
@@ -46,7 +50,8 @@ def free(point, obstacles, radius, bounds) -> bool:
     return True
 
 
-def segment_free(a, b, obstacles, radius, bounds, resolution=0.02):
+def segment_free(a, b, obstacles, radius, bounds, resolution=0.02) -> bool:
+    """Sample a straight base segment for obstacle and boundary clearance."""
     # Add half a sampling interval to cover every point between samples.
     n = max(
         2,
@@ -60,6 +65,7 @@ def segment_free(a, b, obstacles, radius, bounds, resolution=0.02):
 
 
 def route(start, goal, obstacles, radius, bounds, step=0.05):
+    """Search a bounded grid for a collision-free base route."""
     start, goal = np.asarray(start)[:2], np.asarray(goal)[:2]
     if not free(start, obstacles, radius, bounds) or not free(
         goal, obstacles, radius, bounds
@@ -127,9 +133,6 @@ def route(start, goal, obstacles, radius, bounds, step=0.05):
 
 def probe(sim, grasp, recipe):
     """Test the same Cartesian approach from the measured arm configuration."""
-    import mujoco
-
-    from prpl_tidybot.sprout.sequence import make_plan
 
     plan = make_plan(grasp, recipe)
     saved = sim.data.qpos.copy()
@@ -168,7 +171,7 @@ def probe(sim, grasp, recipe):
 
 
 def plan_base(sim, model, grasp, recipe, obstacles, settings):
-    import mujoco
+    """Find a reachable base pose and route that pass the manipulation preview."""
 
     sim.validate_initial_joints()
     start = np.asarray(sim.scene["tidybot_base_xyyaw"], float)
@@ -237,7 +240,8 @@ def plan_base(sim, model, grasp, recipe, obstacles, settings):
     raise ValueError("No reachable base candidate with a collision-free transit route")
 
 
-def validate_base_plan(plan):
+def validate_base_plan(plan: dict) -> None:
+    """Reject malformed or obstructed routes before base execution."""
     bounds = np.asarray(plan["bounds_xy"], float)
     if (
         bounds.shape != (2, 2)
@@ -245,7 +249,7 @@ def validate_base_plan(plan):
         or np.any(bounds[0] >= bounds[1])
     ):
         raise ValueError("Invalid operating bounds")
-    if type(plan.get("required")) is not bool or not plan.get("obstacles"):
+    if not isinstance(plan.get("required"), bool) or not plan.get("obstacles"):
         raise ValueError("Base plan must declare motion and body obstacles")
     for obstacle in plan["obstacles"]:
         c, h = (

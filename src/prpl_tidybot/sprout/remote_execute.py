@@ -34,18 +34,21 @@ class Session:
         self._lock = threading.Lock()
 
     def bind(self, runtime: Any) -> None:
+        """Attach the execution callbacks to the stop-monitored session."""
         with self._lock:
             self._runtime = runtime
             if self.stopped.is_set():
                 runtime.stop()
 
     def stop(self) -> None:
+        """Latch the stop request and prevent subsequent motion commands."""
         self.stopped.set()
         with self._lock:
             if self._runtime is not None:
                 self._runtime.stop()
 
     def receive(self, message: dict[str, Any]) -> None:
+        """Validate and dispatch one laptop protocol message."""
         if self.stopped.is_set():
             return
         kind = message.get("kind")
@@ -68,6 +71,7 @@ class Session:
         self.last_heartbeat = time.monotonic()
 
     def read(self, stream: TextIO) -> None:
+        """Read protocol messages until EOF, failure, or a latched stop."""
         try:
             while not self.finished.is_set():
                 line = stream.readline(4096)
@@ -84,6 +88,7 @@ class Session:
                 self.stop()
 
     def watch(self) -> None:
+        """Latch stop when the laptop heartbeat expires."""
         while not self.finished.wait(0.1):
             if (
                 self.stopped.is_set()
@@ -92,7 +97,8 @@ class Session:
                 self.stop()
                 return
 
-    def prompt(self, message: str) -> str:
+    def prompt(self, _message: str) -> str:
+        """Request terminal approval while preserving heartbeat monitoring."""
         while not self.approved.wait(0.05):
             if self.stopped.is_set():
                 raise RuntimeError("Laptop approval connection stopped")
@@ -102,6 +108,7 @@ class Session:
 
 
 def main() -> None:
+    """Run the remote execute command-line entry point."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--review", type=Path, required=True)
     parser.add_argument(

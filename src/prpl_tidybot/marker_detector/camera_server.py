@@ -24,7 +24,9 @@ from prpl_tidybot.marker_detector.constants import (
     CAMERA_GAIN,
     CAMERA_TEMPERATURE,
 )
+from prpl_tidybot.marker_detector.extrinsics import load_extrinsics
 from prpl_tidybot.marker_detector.publisher import Publisher
+from prpl_tidybot.sprout.live_config import calibration_digest
 
 
 class CameraServer(Publisher):
@@ -40,9 +42,8 @@ class CameraServer(Publisher):
         self.last_read_time = time.time()
         self.queue: Queue = Queue(maxsize=1)
         self.serial = serial
-        from prpl_tidybot.marker_detector.extrinsics import load_extrinsics
-        from prpl_tidybot.sprout.live_config import calibration_digest
 
+        self.calibration_sha256: str | None
         try:
             rvec, tvec = load_extrinsics(serial)
             self.calibration_sha256 = calibration_digest(

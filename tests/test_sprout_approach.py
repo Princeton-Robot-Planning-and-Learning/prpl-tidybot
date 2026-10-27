@@ -1,9 +1,12 @@
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
 """Failure-oriented geometry and tracking tests; no hardware imports."""
 
 from dataclasses import replace
 
 import numpy as np
 import pytest
+
 from prpl_tidybot.sprout.approach import (
     CameraEstimate,
     TopDownGeometry,
@@ -19,6 +22,7 @@ from prpl_tidybot.visual_servo.forearm_template import ForearmPatchTracker, ceil
 
 
 def test_floor_contact_is_not_the_pinch_height():
+    """Verify floor contact is not the pinch height."""
     geometry = TopDownGeometry(-0.395, 0.0295, 0.012, 0.010)
     assert geometry.minimum_pinch_height_m == pytest.approx(0.0515)
     assert geometry.arm_z(GraspPose(0.5, 0, 0.0515, 0)) == pytest.approx(-0.3435)
@@ -30,6 +34,7 @@ def test_floor_contact_is_not_the_pinch_height():
 
 
 def test_compliance_error_never_overdrives_below_contact():
+    """Verify compliance error never overdrives below contact."""
     goal = GraspPose(0.5, 0, 0.06, 0)
     measured = replace(goal, x=0.46, z=0.09)
     aim = corrected_descent_aim(goal, measured, goal, SYNTHETIC_GEOMETRY, 0.01)
@@ -42,6 +47,7 @@ def test_compliance_error_never_overdrives_below_contact():
 
 
 def test_camera_disagreement_selects_one_view_without_blending():
+    """Verify camera disagreement selects one view without blending."""
     a = CameraEstimate(0, GraspPose(0.5, 0, 0.06, 0), 0.92, True, 0.1, 1)
     b = replace(
         a, camera=1, grasp=replace(a.grasp, x=0.53), quality=0.94, off_nadir_m=0.5
@@ -64,6 +70,7 @@ def test_camera_disagreement_selects_one_view_without_blending():
     ],
 )
 def test_bad_camera_estimates_cannot_start_a_grasp(changes):
+    """Verify bad camera estimates cannot start a grasp."""
     a = CameraEstimate(0, GraspPose(0.5, 0, 0.06, 0), 0.9, True, 0.1, 1)
     with pytest.raises(ValueError, match="No fresh"):
         select_camera(
@@ -76,6 +83,7 @@ def test_bad_camera_estimates_cannot_start_a_grasp(changes):
 
 
 def aligner():
+    """Provide the aligner test fixture or callback."""
     calibration = WristCalibration(
         (100, 100),
         ((0.0003, 0), (0, 0.0003)),
@@ -94,6 +102,7 @@ def aligner():
 
 
 def test_wrist_steps_bounded_and_distinct_frames_required_for_convergence():
+    """Verify wrist steps bounded and distinct frames required for convergence."""
     servo, pose = aligner()
     moved, done = servo.update(WristObservation((200, 100), 1.1), pose, now=1.1)
     assert not done and moved.x - pose.x == pytest.approx(0.01)
@@ -105,6 +114,7 @@ def test_wrist_steps_bounded_and_distinct_frames_required_for_convergence():
 
 
 def test_repeated_frame_does_not_confirm_alignment():
+    """Verify repeated frame does not confirm alignment."""
     servo, pose = aligner()
     servo.update(WristObservation((100, 100), 1.1), pose, now=1.1)
     with pytest.raises(ValueError, match="repeated"):
@@ -112,6 +122,7 @@ def test_repeated_frame_does_not_confirm_alignment():
 
 
 def test_lost_target_and_travel_budget_stop_servo():
+    """Verify lost target and travel budget stop servo."""
     servo, pose = aligner()
     with pytest.raises(ValueError, match="lost"):
         servo.update(None, pose, now=1.1)
@@ -123,6 +134,7 @@ def test_lost_target_and_travel_budget_stop_servo():
 
 
 def test_changed_hover_and_stale_image_rejected():
+    """Verify changed hover and stale image rejected."""
     servo, pose = aligner()
     with pytest.raises(ValueError, match="calibration"):
         servo.update(WristObservation((100, 100), 1.1), replace(pose, z=0.16), now=1.1)
@@ -131,6 +143,7 @@ def test_changed_hover_and_stale_image_rejected():
 
 
 def test_bare_patch_translation_loss_and_duplicate_rejection():
+    """Verify bare patch translation loss and duplicate rejection."""
     rng = np.random.default_rng(1)
     image = np.full((100, 140, 3), 150, np.uint8)
     patch = rng.integers(0, 255, (20, 20, 3), dtype=np.uint8)
@@ -148,6 +161,7 @@ def test_bare_patch_translation_loss_and_duplicate_rejection():
 
 
 def test_separate_camera_coordinates_and_seam_mask():
+    """Verify separate camera coordinates and seam mask."""
     frame = np.full((1440, 1280, 3), 100, np.uint8)
     upper = ceiling_view(frame, 0)
     lower = ceiling_view(frame, 1)
@@ -157,6 +171,7 @@ def test_separate_camera_coordinates_and_seam_mask():
 
 
 def test_featureless_forearm_patch_requires_a_better_initialization():
+    """Verify featureless forearm patch requires a better initialization."""
     with pytest.raises(ValueError, match="texture"):
         ForearmPatchTracker(
             np.full((50, 50, 3), 200, np.uint8),

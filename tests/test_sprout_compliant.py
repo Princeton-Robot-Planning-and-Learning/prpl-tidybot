@@ -1,9 +1,15 @@
+# Hardware and optional model imports stay lazy for offline use.
+# pylint: disable=import-outside-toplevel
+# Test doubles retain production signatures and pytest fixture names.
+# pylint: disable=unused-argument,redefined-outer-name,protected-access
 """Compliant integration tests with synthetic feedback; never connect hardware."""
 
+import importlib.util
 import sys
 from dataclasses import replace
 from itertools import pairwise
-from types import SimpleNamespace
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -23,12 +29,15 @@ from prpl_tidybot.sprout.sequence import ForearmSkill, GraspPose, Recipe, Stoppe
 
 @pytest.fixture
 def rig(monkeypatch):
+    """Provide the rig test fixture or callback."""
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
         compliant_backend, "time", SimpleNamespace(monotonic=lambda: clock.now)
     )
 
     class Arm:
+        """Test double for Arm."""
+
         controller_name = "joint_compliant"
 
         def __init__(self):
@@ -39,49 +48,61 @@ def rig(monkeypatch):
             self.frozen = False
 
         def read(self):
+            """Provide the read test fixture or callback."""
             return JointSample(self.q, (0.0,) * 7, self.grip, clock.now)
 
         def command(self, q, gripper):
+            """Provide the command test fixture or callback."""
             assert not self.stopped
             self.commands.append((q, gripper))
             if not self.frozen:
                 self.q, self.grip = q, gripper
 
         def stop(self):
+            """Provide the stop test fixture or callback."""
             self.stopped = True
 
     class Scene:
+        """Test double for Scene."""
+
         def __init__(self):
             self.support = True
 
         def localize(self):
+            """Provide the localize test fixture or callback."""
             return GraspPose(0.5, 0, 0.1, 0)
 
         def preflight(self, plan, sample):
-            pass
+            """Provide the preflight test fixture or callback."""
 
         def pose(self, sample):
+            """Provide the pose test fixture or callback."""
             return GraspPose(*sample.q[:4])
 
         def solve(self, pose, seed):
+            """Provide the solve test fixture or callback."""
             return (pose.x, pose.y, pose.z, pose.yaw, 0.0, 0.0, 0.0)
 
         def validate_path(self, sample, q):
-            pass
+            """Provide the validate path test fixture or callback."""
 
         def guard(self, sample):
-            pass
+            """Provide the guard test fixture or callback."""
 
         def wrist(self):
+            """Provide the wrist test fixture or callback."""
             return WristObservation((0, 0), clock.now)
 
         def grasp_confirmed(self, sample):
+            """Provide the grasp confirmed test fixture or callback."""
             return sample.gripper >= 0.3
 
         def support_confirmed(self, sample):
+            """Provide the support confirmed test fixture or callback."""
             return self.support
 
         def released(self, sample):
+            """Provide the released test fixture or callback."""
             return sample.gripper <= 0.01
 
     arm, scene = Arm(), Scene()
@@ -94,6 +115,7 @@ def rig(monkeypatch):
     backend = CompliantBackend(arm, scene, SYNTHETIC_GEOMETRY, limits, wrist)
 
     def wait():
+        """Provide the wait test fixture or callback."""
         clock.now += limits.period_s
 
     backend._wait = wait
@@ -104,6 +126,7 @@ def rig(monkeypatch):
 
 
 def test_full_cycle_streams_bounded_steps_and_preserves_contact_height(rig):
+    """Verify full cycle streams bounded steps and preserves contact height."""
     result = rig.skill.cycle()
     assert result["completed"] == [
         "pregrasp",
@@ -125,6 +148,7 @@ def test_full_cycle_streams_bounded_steps_and_preserves_contact_height(rig):
 
 
 def test_blocked_arm_does_not_descend_or_close(rig):
+    """Verify blocked arm does not descend or close."""
     rig.arm.frozen = True
     with pytest.raises(RuntimeError, match="tracking lag"):
         rig.skill.cycle()
@@ -133,6 +157,7 @@ def test_blocked_arm_does_not_descend_or_close(rig):
 
 
 def test_missing_support_never_releases(rig):
+    """Verify missing support never releases."""
     rig.scene.support = False
     with pytest.raises(RuntimeError, match="Support unconfirmed"):
         rig.skill.cycle()
@@ -141,6 +166,7 @@ def test_missing_support_never_releases(rig):
 
 
 def test_stale_feedback_refuses_first_command(rig):
+    """Verify stale feedback refuses first command."""
     original = rig.arm.read
     rig.arm.read = lambda: replace(original(), captured_at=rig.clock.now - 1)
     with pytest.raises(RuntimeError, match="stale"):
@@ -149,9 +175,11 @@ def test_stale_feedback_refuses_first_command(rig):
 
 
 def test_stop_during_ik_drops_late_solution(rig):
+    """Verify stop during ik drops late solution."""
     original = rig.scene.solve
 
     def solve(pose, sample):
+        """Provide the solve test fixture or callback."""
         rig.skill.stop()
         return original(pose, sample)
 
@@ -162,6 +190,7 @@ def test_stop_during_ik_drops_late_solution(rig):
 
 
 def test_repeated_feedback_cannot_establish_arrival(rig):
+    """Verify repeated feedback cannot establish arrival."""
     original = rig.arm.read
     rig.arm.read = lambda: replace(original(), captured_at=100.0)
     with pytest.raises(RuntimeError, match="stale"):
@@ -170,6 +199,7 @@ def test_repeated_feedback_cannot_establish_arrival(rig):
 
 
 def test_angular_backend_rejected(rig):
+    """Verify angular backend rejected."""
     rig.arm.controller_name = "angular"
     with pytest.raises(ValueError, match="compliant"):
         CompliantBackend(
@@ -182,6 +212,7 @@ def test_angular_backend_rejected(rig):
 
 
 def hardware_limits():
+    """Provide the hardware limits test fixture or callback."""
     return HardwareLimits(
         (-7.0,) * 7,
         (7.0,) * 7,
@@ -197,6 +228,7 @@ def hardware_limits():
 
 
 def test_hardware_connection_requires_explicit_commissioning():
+    """Verify hardware connection requires explicit commissioning."""
     with pytest.raises(RuntimeError, match="verified first"):
         LocalCompliantArm.connect(hardware_limits())
 
@@ -205,9 +237,11 @@ def test_hardware_connection_requires_explicit_commissioning():
 def test_reviewed_runtime_binds_target_and_runs_compliant_cycle(
     rig, monkeypatch, moved
 ):
+    """Verify reviewed runtime binds target and runs compliant cycle."""
     connected = []
 
     def connect(*args, **kwargs):
+        """Provide the connect test fixture or callback."""
         connected.append(True)
         return rig.arm
 
@@ -242,13 +276,14 @@ def test_reviewed_runtime_binds_target_and_runs_compliant_cycle(
     if moved:
         with pytest.raises(RuntimeError, match="Target changed"):
             runtime.execute(report)
-        assert connected == []
+        assert not connected
     else:
         assert runtime.execute(report)["completed"][-1] == "retreat"
         assert connected == [True] and rig.arm.stopped
 
 
 def test_local_watchdog_latches_hold_without_open_or_retract(monkeypatch):
+    """Verify local watchdog latches hold without open or retract."""
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
         compliant_arm, "time", SimpleNamespace(monotonic=lambda: clock.now)
@@ -256,11 +291,14 @@ def test_local_watchdog_latches_hold_without_open_or_retract(monkeypatch):
     made = []
 
     class Controller:
+        """Test double for Controller."""
+
         def __init__(self, commands, **kwargs):
             self.commands = commands
             made.append(kwargs)
 
         def control_callback(self, arm):
+            """Provide the control callback test fixture or callback."""
             if self.commands.empty():
                 return np.zeros(7), arm.gripper_pos
             _, grip = self.commands.get_nowait()
@@ -295,39 +333,49 @@ def test_local_watchdog_latches_hold_without_open_or_retract(monkeypatch):
     ],
 )
 def test_invalid_driver_limits(field, value):
+    """Verify invalid driver limits."""
     with pytest.raises(ValueError):
         replace(hardware_limits(), **{field: value})
 
 
 def test_connect_uses_real_compliant_controller_without_retract_or_open(monkeypatch):
+    """Verify connect uses real compliant controller without retract or open."""
     from prpl_tidybot.third_party.arm_controller import JointCompliantController
 
     calls = []
 
     class FakeHardware:
+        """Test double for FakeHardware."""
+
         def __init__(self):
             self.q = np.zeros(7)
             self.dq = np.zeros(7)
             self.tau = np.zeros(7)
             self.gripper_pos = 0.35
             self.actuator_count = 7
+            self.feedback_time = 0.0
 
         def gravity(self):
+            """Provide the gravity test fixture or callback."""
             return np.zeros(7)
 
         def set_joint_limits(self, **kwargs):
+            """Provide the set joint limits test fixture or callback."""
             calls.append(("joint_limits", kwargs))
 
         def init_cyclic(self, callback, **kwargs):
+            """Provide the init cyclic test fixture or callback."""
             calls.append(("start", kwargs))
             self.feedback_time = compliant_arm.time.monotonic()
             _, grip = callback(self)
             assert grip == 0.35
 
         def stop_cyclic(self):
+            """Provide the stop cyclic test fixture or callback."""
             calls.append(("stop", {}))
 
         def disconnect(self):
+            """Provide the disconnect test fixture or callback."""
             calls.append(("disconnect", {}))
 
     monkeypatch.setitem(
@@ -358,9 +406,6 @@ def test_connect_uses_real_compliant_controller_without_retract_or_open(monkeypa
 
 def test_gripper_limit_applied_to_first_cyclic_frame(monkeypatch):
     """Load actual Kortex wrapper with only its unused model import stubbed."""
-    import importlib.util
-    from pathlib import Path
-    from types import ModuleType
 
     monkeypatch.setitem(sys.modules, "pinocchio", ModuleType("pinocchio"))
     path = Path(__file__).parents[1] / "src/prpl_tidybot/third_party/kinova.py"
@@ -381,6 +426,7 @@ def test_gripper_limit_applied_to_first_cyclic_frame(monkeypatch):
     frames = []
 
     def refresh(*args):
+        """Provide the refresh test fixture or callback."""
         frames.append(vars(arm.motor_cmd).copy())
         return feedback
 

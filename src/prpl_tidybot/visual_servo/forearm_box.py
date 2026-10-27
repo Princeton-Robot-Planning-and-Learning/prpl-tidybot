@@ -14,6 +14,7 @@ import numpy as np
 
 
 def project_pixels(pixels, projection: dict, height: float) -> np.ndarray:
+    """Intersect calibrated camera rays with a horizontal map-height plane."""
     rotation, _ = cv2.Rodrigues(np.asarray(projection["rvec"], dtype=float))
     origin = -rotation.T @ np.asarray(projection["tvec"], dtype=float).reshape(3)
     pixels = np.asarray(pixels, dtype=float).reshape(-1, 2)
@@ -66,8 +67,8 @@ def fit_box(image_rgb: np.ndarray, tape_uv, patch_size, search_xywh) -> dict:
     if image.shape[:2] != (rh, rw):
         raise ValueError("Forearm box search region outside image")
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3) / 8
-    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3) / 8
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3).astype(np.float32) / 8
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3).astype(np.float32) / 8
     cx, cy = np.asarray(tape_uv) - [x, y]
     small, large = min(patch_size), max(patch_size)
     widths = range(max(10, round(small * 0.5)), round(small * 1.1) + 1, 2)
@@ -109,7 +110,10 @@ def fit_box(image_rgb: np.ndarray, tape_uv, patch_size, search_xywh) -> dict:
     fine_score, fine_support = _score(refined, gx, gy)
     best = int(np.argmax(fine_score))
     a, b, width, length, angle = map(float, refined[best])
-    corners = cv2.boxPoints(((a, b), (width, length), angle))
+    # OpenCV accepts floating dimensions despite the integer-size stub.
+    corners = cv2.boxPoints(
+        ((a, b), (width, length), angle)  # type: ignore[arg-type]
+    ).astype(np.float32)
     if (
         np.any(corners < 2)
         or np.any(corners[:, 0] > rw - 3)

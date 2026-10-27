@@ -92,6 +92,9 @@ exclude = ["venv/*", ".venv/*"]
 module = [
     "matplotlib.*",
     "spatialmath.*",
+    # Vendor extensions do not ship typing metadata.
+    "mujoco.*",
+    "kortex_api.*",
     "pybullet",
 ]
 ignore_missing_imports = true
