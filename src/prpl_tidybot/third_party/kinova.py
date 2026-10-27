@@ -270,7 +270,16 @@ class TorqueControlledArm:
         )
         self.home()
 
-    def init_cyclic(self, control_callback):
+    def init_cyclic(
+        self, control_callback, *, gripper_force_limit=100, gripper_speed_limit=100
+    ):
+        # Kortex driver units (percent), not calibrated contact force in newtons.
+        if not all(
+            np.isfinite(v) and 0 < v <= 100
+            for v in (gripper_force_limit, gripper_speed_limit)
+        ):
+            raise ValueError("Gripper limits must be in (0, 100]")
+        self.gripper_speed_limit = gripper_speed_limit
         assert not self.cyclic_running, "Cyclic thread is already running"
 
         # Set real-time scheduling policy
@@ -299,7 +308,7 @@ class TorqueControlledArm:
             self.base_feedback.interconnect.gripper_feedback.motor[0].position
         )
         self.motor_cmd.velocity = 0
-        self.motor_cmd.force = 100
+        self.motor_cmd.force = gripper_force_limit
 
         # Set arm to low-level servoing mode
         base_servo_mode = Base_pb2.ServoingModeInformation()
@@ -311,6 +320,7 @@ class TorqueControlledArm:
         self.base_feedback = self.base_cyclic.Refresh(
             self.base_command, 0, self.send_options
         )
+        self.feedback_time = time.monotonic()
 
         # Set actuators to current control mode
         control_mode_message = ActuatorConfig_pb2.ControlModeInformation()
@@ -381,7 +391,9 @@ class TorqueControlledArm:
                 # Update gripper command
                 self.motor_cmd.position = 100 * gripper_command
                 self.motor_cmd.velocity = np.clip(
-                    abs(400 * (gripper_command - self.gripper_pos)), 0, 100
+                    abs(400 * (gripper_command - self.gripper_pos)),
+                    0,
+                    self.gripper_speed_limit,
                 )
 
                 # Send command frame
@@ -390,6 +402,7 @@ class TorqueControlledArm:
                     self.base_feedback = self.base_cyclic.Refresh(
                         self.base_command, 0, self.send_options
                     )
+                    self.feedback_time = time.monotonic()
                 except:
                     failed_cyclic_count += 1
 

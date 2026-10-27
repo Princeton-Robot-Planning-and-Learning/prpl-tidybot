@@ -12,7 +12,9 @@ Clients consume the payload over the publisher socket on
 """
 
 import argparse
+import errno
 import math
+import socket
 import time
 from multiprocessing import Process
 from pathlib import Path
@@ -29,6 +31,7 @@ from prpl_tidybot.marker_detector.ceiling_image_publisher import CeilingImagePub
 from prpl_tidybot.marker_detector.constants import (
     CAMERA_SERIALS,
     CAMERA_SERVER_PORTS,
+    CEILING_IMAGE_PORT,
     DETECTED_MARKER_IDS,
     MARKER_DETECTOR_PORT,
     MARKER_DICT_ID,
@@ -237,7 +240,7 @@ class Detector:
 
     def get_poses(self, debug: bool = False) -> dict:
         """Grab the latest camera frame, detect markers, return fused poses."""
-        image = self.camera_client.get_image()
+        image, metadata = self.camera_client.get_frame()
 
         # pylint: disable=unpacking-non-sequence
         corners, indices, _ = self.detector.detectMarkers(image)
@@ -249,7 +252,9 @@ class Detector:
                 cv.aruco.drawDetectedMarkers(image_copy, corners, indices)
             cv.imshow(f"Detections ({self.serial})", image_copy)  # 0.3 ms
 
-        return self.get_poses_from_markers(corners, indices, debug=debug)
+        data = self.get_poses_from_markers(corners, indices, debug=debug)
+        data["captured_at_unix"] = metadata.get("captured_at_unix")
+        return data
 
 
 class MarkerDetectorServer(Publisher):
@@ -287,7 +292,7 @@ class MarkerDetectorServer(Publisher):
         ]
 
     def get_data(self) -> dict:
-        data: dict[str, Any] = {"poses": {}, "targets": {}}
+        data: dict[str, Any] = {"poses": {}, "targets": {}, "pose_captured_at_unix": {}}
         if self.debug:
             data["debug_data"] = []
         per_camera_targets: list[dict[int, tuple[float, float]]] = []
@@ -303,6 +308,9 @@ class MarkerDetectorServer(Publisher):
                     continue
                 # Bottom detector takes precedence by virtue of being second.
                 data["poses"][robot_idx] = pose
+                data["pose_captured_at_unix"][robot_idx] = new_data.get(
+                    "captured_at_unix"
+                )
             per_camera_targets.append(new_data["targets"])
             if "debug_data" in new_data:
                 data["debug_data"].extend(new_data["debug_data"])
@@ -348,6 +356,34 @@ def _load_lab_camera_serials(lab: str) -> list[str]:
     return cfg["camera_serials"]
 
 
+def check_listener_ports(host: str, top_only: bool = False) -> None:
+    """Refuse duplicate startup before spawning cameras or using old publishers.
+
+    This is an early diagnostic, not a reservation: normal bind errors still
+    protect against another process starting between this check and startup.
+    """
+    camera_ports = CAMERA_SERVER_PORTS[:1] if top_only else CAMERA_SERVER_PORTS
+    endpoints = [("127.0.0.1", port) for port in camera_ports]
+    endpoints += [(host, MARKER_DETECTOR_PORT), (host, CEILING_IMAGE_PORT)]
+    occupied = []
+    for address, port in endpoints:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((address, port))
+            except OSError as error:
+                if error.errno != errno.EADDRINUSE:
+                    raise
+                occupied.append(port)
+    if occupied:
+        raise RuntimeError(
+            f"Perception ports already in use: {occupied}. Stop the existing "
+            "marker-detector/camera server before starting this one. "
+            "On the perception PC inspect: ss -ltnp | grep -E ':600[0-3]\\b'. "
+            "No new camera processes were started."
+        )
+
+
 def main(
     host: str = "0.0.0.0",
     top_only: bool = False,
@@ -367,6 +403,7 @@ def main(
     else:
         camera_serials = list(CAMERA_SERIALS)
 
+    check_listener_ports(host, top_only)
     for serial, port in [
         (camera_serials[0], CAMERA_SERVER_PORTS[0]),
         (camera_serials[1], CAMERA_SERVER_PORTS[1]),

@@ -15,7 +15,6 @@ import numpy as np
 from ruckig import InputParameter, OutputParameter, Result, Ruckig
 
 from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD
-from prpl_tidybot.third_party.kinova import TorqueControlledArm
 
 ALPHA = 0.01
 K_r = np.diag([0.3, 0.3, 0.3, 0.3, 0.18, 0.18, 0.18])
@@ -39,7 +38,15 @@ class LowPassFilter:
 
 
 class JointCompliantController:
-    def __init__(self, command_queue):
+    def __init__(self, command_queue, *, max_velocity=None, max_acceleration=None):
+        # Optional per-joint bounds for commissioned contact tasks. Existing
+        # callers retain their original limits. Units: radians/s and radians/s².
+        self.max_velocity = self._limits(
+            max_velocity, 4 * [math.radians(80)] + 3 * [math.radians(140)]
+        )
+        self.max_acceleration = self._limits(
+            max_acceleration, 4 * [math.radians(240)] + 3 * [math.radians(450)]
+        )
         self.q_s = None
         self.q_d = None
         self.dq_d = None
@@ -55,6 +62,13 @@ class JointCompliantController:
         self.otg_inp = None
         self.otg_out = None
         self.otg_res = None
+
+    @staticmethod
+    def _limits(values, defaults):
+        values = np.asarray(defaults if values is None else values, dtype=float)
+        if values.shape != (7,) or not np.all(np.isfinite(values) & (values > 0)):
+            raise ValueError("Expected seven finite positive joint limits")
+        return values.tolist()
 
     def control_callback(self, arm):
         # Initialize variables on first call
@@ -72,10 +86,8 @@ class JointCompliantController:
             self.otg = Ruckig(arm.actuator_count, DT)
             self.otg_inp = InputParameter(arm.actuator_count)
             self.otg_out = OutputParameter(arm.actuator_count)
-            self.otg_inp.max_velocity = 4 * [math.radians(80)] + 3 * [math.radians(140)]
-            self.otg_inp.max_acceleration = 4 * [math.radians(240)] + 3 * [
-                math.radians(450)
-            ]
+            self.otg_inp.max_velocity = self.max_velocity
+            self.otg_inp.max_acceleration = self.max_acceleration
             self.otg_inp.current_position = arm.q.copy()
             self.otg_inp.current_velocity = arm.dq.copy()
             self.otg_inp.target_position = arm.q.copy()
@@ -165,6 +177,8 @@ def command_loop_circle(arm, command_queue, stop_event):
 if __name__ == "__main__":
     import queue
     import threading
+
+    from prpl_tidybot.third_party.kinova import TorqueControlledArm
 
     arm = TorqueControlledArm()
     command_queue = queue.Queue(1)

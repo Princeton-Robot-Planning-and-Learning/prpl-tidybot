@@ -173,3 +173,7 @@ test_images/
 
 # Overlays and other outputs of the interactive hardware tests
 hardware_tests/artifacts/
+# Local Sprout calibration, credentials and proprietary models
+.local/
+private_sprout/
+.rpc_authkey

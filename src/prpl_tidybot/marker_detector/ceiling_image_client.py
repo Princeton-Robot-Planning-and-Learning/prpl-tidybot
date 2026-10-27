@@ -28,6 +28,7 @@ class CeilingImageClient:
         self._poll_timeout_s = poll_timeout_s
         self._conn.send(None)
         self._last: np.ndarray | None = None
+        self.metadata: dict = {}
 
     def get_image(self) -> np.ndarray | None:
         """Return the most recent decoded frame, or `None` if none has arrived."""
@@ -38,6 +39,7 @@ class CeilingImageClient:
             if jpeg:
                 arr = np.frombuffer(jpeg, dtype=np.uint8)
                 self._last = cv.imdecode(arr, cv.IMREAD_COLOR)
+                self.metadata = {k: v for k, v in payload.items() if k != "jpeg"}
         return self._last
 
     def close(self) -> None:

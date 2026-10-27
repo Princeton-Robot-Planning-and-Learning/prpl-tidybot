@@ -10,6 +10,7 @@ Adapted from `yixuanhuang98/tidybot_server/server/camera_client.py`.
 from multiprocessing import resource_tracker, shared_memory
 from multiprocessing.connection import Client
 
+import cv2 as cv
 import numpy as np
 
 from prpl_tidybot.third_party.constants import CONN_AUTHKEY
@@ -59,6 +60,20 @@ class CameraClient:
         self.conn.recv()
         self.conn.send(None)
         return self.image
+
+    def get_frame(self) -> tuple[np.ndarray, dict]:
+        """Immutable frame paired with camera-read time; legacy mode is explicit."""
+        payload = self.conn.recv()
+        self.conn.send(None)
+        if payload.get("jpeg") is None:
+            return self.image.copy(), {"captured_at_unix": None}
+        frame = cv.imdecode(np.frombuffer(payload["jpeg"], np.uint8), cv.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError("Invalid camera JPEG")
+        return frame, {
+            key: payload.get(key)
+            for key in ("captured_at_unix", "sequence", "serial", "calibration_sha256")
+        }
 
     def close(self) -> None:
         """Release the shared-memory view; the server still owns the block."""

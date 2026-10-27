@@ -14,7 +14,8 @@ APIs unchanged. The published payload is `{"jpeg": <bytes>}` — opaque
 encoded bytes the client decodes on receive.
 """
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import cv2 as cv
 import numpy as np
@@ -72,8 +73,11 @@ class CeilingImagePublisher(Publisher):
         self._jpeg_quality = int(jpeg_quality)
 
     def get_data(self) -> dict[str, Any]:
-        frames = [client.get_image() for client in self._camera_clients]
-        return {"jpeg": _make_composite_jpeg(frames, self._jpeg_quality)}
+        samples = [client.get_frame() for client in self._camera_clients]
+        return {
+            "jpeg": _make_composite_jpeg([s[0] for s in samples], self._jpeg_quality),
+            "cameras": [s[1] for s in samples],
+        }
 
     def clean_up(self) -> None:
         for client in self._camera_clients:

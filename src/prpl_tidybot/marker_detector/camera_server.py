@@ -39,7 +39,23 @@ class CameraServer(Publisher):
         self.cap = utils.get_video_cap(serial, image_width, image_height)  # ~1540 ms
         self.last_read_time = time.time()
         self.queue: Queue = Queue(maxsize=1)
-        Thread(target=self.camera_worker, daemon=True).start()
+        self.serial = serial
+        from prpl_tidybot.marker_detector.extrinsics import load_extrinsics
+        from prpl_tidybot.sprout.live_config import calibration_digest
+
+        try:
+            rvec, tvec = load_extrinsics(serial)
+            self.calibration_sha256 = calibration_digest(
+                {
+                    "camera_matrix": camera_matrix.tolist(),
+                    "rvec": rvec.tolist(),
+                    "tvec": tvec.tolist(),
+                }
+            )
+        except FileNotFoundError:
+            # Calibration tools must be able to start an uncalibrated camera.
+            self.calibration_sha256 = None
+        self.sequence = 0
 
         # cv2 4.6 stubs reject `None` for the rectification matrix, but the
         # underlying C++ accepts it as "identity rectification" — keep it.
@@ -58,12 +74,14 @@ class CameraServer(Publisher):
         self.image_shm: np.ndarray = np.ndarray(
             image.shape, dtype=image.dtype, buffer=self.shm.buf
         )
+        Thread(target=self.camera_worker, daemon=True).start()
 
     def get_image(self) -> np.ndarray:
         """Block on the camera, return one undistorted frame."""
         image = None
         while image is None:
             _, image = self.cap.read()  # 5–17 ms
+        self.frame_acquired_at = time.time()
         image = cv.remap(image, self.map_x, self.map_y, cv.INTER_LINEAR)  # 2–5 ms
         return image
 
@@ -72,7 +90,7 @@ class CameraServer(Publisher):
         while True:
             if self.queue.empty():
                 image = self.get_image()
-                self.queue.put((time.time(), image))
+                self.queue.put((self.frame_acquired_at, image))
                 # Detect silent driver resets that would un-fix our settings.
                 assert self.cap.get(cv.CAP_PROP_FOCUS) == CAMERA_FOCUS
                 assert self.cap.get(cv.CAP_PROP_TEMPERATURE) == CAMERA_TEMPERATURE
@@ -88,10 +106,25 @@ class CameraServer(Publisher):
         capture_time, image = self.queue.get()
         if time.time() - capture_time > 0.1:  # stale frame
             self.queue.get()  # flush camera buffer
-            _, image = self.queue.get()
+            capture_time, image = self.queue.get()
         self.last_read_time = time.time()
         np.copyto(self.image_shm, image)  # 0.2 ms
-        return {"name": self.shm.name, "shape": image.shape, "dtype": image.dtype}
+        self.sequence += 1
+        ok, jpeg = cv.imencode(".jpg", image, [cv.IMWRITE_JPEG_QUALITY, 95])
+        if not ok:
+            raise RuntimeError("Camera frame encoding failed")
+        # JPEG and timestamp describe the SAME immutable frame. Legacy shared
+        # memory readers remain supported, but cannot guarantee that pairing.
+        return {
+            "name": self.shm.name,
+            "shape": image.shape,
+            "dtype": image.dtype,
+            "jpeg": jpeg.tobytes(),
+            "captured_at_unix": capture_time,
+            "sequence": self.sequence,
+            "serial": self.serial,
+            "calibration_sha256": self.calibration_sha256,
+        }
 
     def clean_up(self) -> None:
         self.cap.release()
