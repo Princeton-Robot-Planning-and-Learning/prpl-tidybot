@@ -1,0 +1,13 @@
+# @package _global_
+# The bottle's ceiling localizer, merged after object/bottle.yaml cleared the cube's.
+env:
+  pipelines:
+    real:
+      perceiver:
+        target_source:
+          _target_: prpl_tidybot.bottle_localizer.CeilingBottleSource
+          serials: ${lab.camera_serials}
+          host: ${lab.marker_detector_host}
+          length: 0.20
+          diameter: 0.066
+          label_length: 0.10

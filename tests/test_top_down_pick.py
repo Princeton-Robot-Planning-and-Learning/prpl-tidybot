@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from prpl_tidybot.top_down_pick import (
     TopDownPickGeometry,
     arm_frame_target,
+    cube_closing_yaw,
     forward_kinematics,
     geometry_from_config,
     grasp_search_bounds,
@@ -190,3 +191,34 @@ def test_ik_and_forward_kinematics_are_safe_across_threads():
             t.join()
     assert not bad
     assert results == expected * 5
+
+
+def _axis_gap(a, b):
+    """Angle between two undirected axes, in [0, pi/2]."""
+    return abs((a - b + math.pi / 2) % math.pi - math.pi / 2)
+
+
+@pytest.mark.parametrize("axis_deg", range(-180, 180, 15))
+def test_a_bottle_is_grasped_across_its_axis(axis_deg):
+    """A bottle repeats every 180 degrees and the 2F-85 spans its 66 mm width, not its
+    20 cm length: the fingers close perpendicular to the axis, the wrist turning at
+    most 90 degrees."""
+    geom = TopDownPickGeometry(symmetry=math.pi, wrist_yaw_offset=math.pi / 2)
+    axis = math.radians(axis_deg)
+    closing = cube_closing_yaw(axis, geom)
+    assert _axis_gap(closing, axis) == pytest.approx(math.pi / 2)
+    assert -math.pi / 2 <= closing < math.pi / 2
+
+
+def test_a_cube_still_folds_every_90_degrees():
+    """The default symmetry is the cube's: the nearest face pair to straight ahead."""
+    assert TopDownPickGeometry().symmetry == pytest.approx(math.pi / 2)
+    assert cube_closing_yaw(math.radians(80.0), GEOM) == pytest.approx(
+        math.radians(-10.0)
+    )
+
+
+def test_the_symmetry_is_configured_in_degrees():
+    """``symmetry_deg`` in the pick config sets the fold."""
+    geom = geometry_from_config(OmegaConf.create({"symmetry_deg": 180.0}))
+    assert geom.symmetry == pytest.approx(math.pi)

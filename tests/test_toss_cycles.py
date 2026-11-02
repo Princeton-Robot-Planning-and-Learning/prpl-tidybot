@@ -720,6 +720,30 @@ def test_the_real_cube_source_saves_failed_localizations_in_the_run_log(tmp_path
     assert kwargs["failure_dir"] == str(tmp_path / "localization_failures")
 
 
+def test_object_bottle_swaps_the_source_and_grasps_across_the_axis():
+    """``+object=bottle`` builds the bottle's ceiling localizer (none of the cube
+    source's keys left over) and closes the fingers across the bottle's axis."""
+    from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
+        _cube_source_kwargs,
+    )
+
+    cfg = _compose(**{"+object": "bottle"})
+    source = cfg.env.pipelines.real.perceiver.target_source
+    assert source["_target_"].endswith("bottle_localizer.CeilingBottleSource")
+    assert "side" not in source
+    geom = geometry_from_config(cfg.pick.top_down)
+    assert geom.symmetry == pytest.approx(math.pi)
+    assert geom.wrist_yaw_offset == pytest.approx(math.pi / 2)
+    kwargs = _cube_source_kwargs(cfg, source)
+    assert (
+        kwargs["floor_bounds"]
+        == _cube_source_kwargs(
+            cfg, {"_target_": "prpl_tidybot.cube_localizer.CeilingCubeTargetSource"}
+        )["floor_bounds"]
+    )
+    assert "failure_dir" not in _cube_source_kwargs(cfg, source, Path("/tmp/x"))
+
+
 def test_a_missed_grasp_tries_the_other_cameras_estimate(tmp_path, monkeypatch):
     """Josh, 2026-10-15: when both ceiling cameras see the cube, grasp at the more
     confident estimate first and, if that misses, at the other one, before giving up."""

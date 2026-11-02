@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from prpl_tidybot.bottle_localizer import (
+    BottleFit,
     BottleModel,
     CeilingBottleSource,
     bottle_mask,
@@ -183,3 +184,36 @@ def test_ceiling_bottle_source_raises_without_a_bottle(cameras):
     )
     with pytest.raises(RuntimeError):
         source.get_target()
+
+
+def test_alternates_are_the_other_cameras_estimates(cameras):
+    """After a miss the pick retries at the other camera's estimate, as for the cube,
+    when it differs from the chosen one by over 1 cm."""
+    del cameras
+    source = CeilingBottleSource(
+        SERIALS,
+        image_client=_Images([np.zeros((2 * H, W, 3), np.uint8)]),
+        marker_client=_Markers(),
+        floor_bounds=BOUNDS,
+    )
+    assert not source.alternates()
+    source.last_fit = BottleFit(
+        0.30,
+        0.0,
+        0.4,
+        0.8,
+        ((1, 0.30, 0.0, 0.4, 0.8), (0, 0.33, 0.01, 0.45, 0.7)),
+        0.03,
+        1,
+    )
+    assert source.alternates() == [(0.33, 0.01, 0.45)]
+    source.last_fit = BottleFit(
+        0.30,
+        0.0,
+        0.4,
+        0.8,
+        ((1, 0.30, 0.0, 0.4, 0.8), (0, 0.305, 0.0, 0.4, 0.7)),
+        0.005,
+        1,
+    )
+    assert not source.alternates()

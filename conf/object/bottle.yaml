@@ -1,0 +1,23 @@
+# @package _global_
+# The 20 oz vitaminwater bottle instead of the 5 cm cube: `+object=bottle`.
+# The ceiling localizer finds its red label (prpl_tidybot.bottle_localizer) and the
+# top-down pick closes across the bottle's axis, not along it: the 85 mm 2F-85 spans
+# the 66 mm bottle but not its 20 cm length. A bottle repeats every 180 degrees, so
+# the closing axis is the axis plus 90 degrees, folded every 180.
+#
+# The cube source's node is cleared first (`_self_` before `bottle_source`), since a
+# merge would keep its cube-only keys.
+defaults:
+  - _self_
+  - bottle_source
+
+env:
+  pipelines:
+    real:
+      perceiver:
+        target_source: null
+
+pick:
+  top_down:
+    symmetry_deg: 180.0
+    wrist_yaw_offset_deg: 90.0

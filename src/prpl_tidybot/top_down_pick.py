@@ -60,6 +60,9 @@ class TopDownPickGeometry:
     hover_height: float = 0.10
     # Added to the cube's yaw to align the fingers' closing axis with a pair of faces.
     wrist_yaw_offset: float = 0.0
+    # The object looks the same every `symmetry` radians: pi/2 for the cube, pi for a
+    # bottle (with wrist_yaw_offset pi/2, so the fingers close across its axis).
+    symmetry: float = math.pi / 2
     # Added after the 90-degree fold: pi/2 closes on the cube's other pair of faces
     # (inside the bin, the fingers then spread along the other wall), the wrist still
     # turning at most 90 degrees.
@@ -157,10 +160,12 @@ def _down_quat(closing_yaw: float) -> NDArray[np.float64]:
 
 
 def cube_closing_yaw(cube_yaw_rel: float, geom: TopDownPickGeometry) -> float:
-    """The cube is 90-degree symmetric: pick the equivalent yaw nearest straight
-    ahead, so the wrist turns as little as possible."""
+    """The object repeats every ``geom.symmetry`` (the cube every 90 degrees, a bottle
+    every 180): pick the equivalent yaw nearest straight ahead, so the wrist turns as
+    little as possible."""
     yaw = cube_yaw_rel + geom.wrist_yaw_offset
-    folded = (yaw + math.pi / 4) % (math.pi / 2) - math.pi / 4
+    half = geom.symmetry / 2
+    folded = (yaw + half) % geom.symmetry - half
     if not geom.closing_turn:
         return folded
     # The two fingers are symmetric too: keep the turned grasp within 90 degrees.
@@ -283,4 +288,6 @@ def geometry_from_config(cfg: Any) -> TopDownPickGeometry:
     kwargs = {k: float(cfg[k]) for k in names if cfg is not None and k in cfg}
     if "wrist_yaw_offset_deg" in (cfg or {}):
         kwargs["wrist_yaw_offset"] = math.radians(float(cfg["wrist_yaw_offset_deg"]))
+    if "symmetry_deg" in (cfg or {}):
+        kwargs["symmetry"] = math.radians(float(cfg["symmetry_deg"]))
     return TopDownPickGeometry(**kwargs)

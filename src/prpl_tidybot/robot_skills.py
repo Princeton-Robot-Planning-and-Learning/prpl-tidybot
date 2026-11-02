@@ -296,15 +296,18 @@ def _cube_source_kwargs(
     cfg: DictConfig, target_cfg: Any, log_dir: Path | None = None
 ) -> dict[str, Any]:
     """The ceiling localizer searches everywhere the arm can grasp from inside the
-    drivable box, not just the box itself (a bin just past its edge), and saves the
-    frames of any missed localization beside the run's logs."""
-    if not str(target_cfg["_target_"]).endswith("CeilingCubeTargetSource"):
+    drivable box, not just the box itself (a bin just past its edge); the cube's also
+    saves the frames of any missed localization beside the run's logs (the bottle's
+    keeps none)."""
+    target = str(target_cfg["_target_"])
+    is_cube = target.endswith("CeilingCubeTargetSource")
+    if not is_cube and not target.endswith("CeilingBottleSource"):
         return {}
     bounds = grasp_search_bounds(
         tuple(cfg.preview.floor_bounds), geometry_from_config(cfg.pick.get("top_down"))
     )
     kwargs: dict[str, Any] = {"floor_bounds": list(bounds)}
-    if log_dir is not None:
+    if is_cube and log_dir is not None:
         kwargs["failure_dir"] = str(Path(log_dir) / "localization_failures")
     return kwargs
 
