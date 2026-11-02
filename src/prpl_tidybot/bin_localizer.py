@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import cv2 as cv
@@ -69,12 +69,36 @@ _WINDOW_MARGIN_PX = 20
 @dataclass(frozen=True)
 class BinModel:
     """The bin's outer dimensions (m): ``length`` along its own x axis (its yaw),
-    ``width`` across, ``height`` to the rim; ``wall`` is the cardboard's thickness."""
+    ``width`` across, ``height`` to the rim; ``wall`` is the wall's thickness.
+
+    ``base_length`` / ``base_width`` are the footprint on the floor when the walls
+    taper (a moulded bin is narrower at the base than at the rim); None means straight
+    walls, the rim's own size.
+    """
 
     length: float = 0.40
     width: float = 0.32
     height: float = 0.19
     wall: float = 0.005
+    base_length: float | None = None
+    base_width: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.base_length is None:
+            object.__setattr__(self, "base_length", self.length)
+        if self.base_width is None:
+            object.__setattr__(self, "base_width", self.width)
+
+    def grown(self, band: float) -> "BinModel":
+        """The same bin grown by ``band`` on every side, rim and base alike."""
+        assert self.base_length is not None and self.base_width is not None
+        return replace(
+            self,
+            length=self.length + 2 * band,
+            width=self.width + 2 * band,
+            base_length=self.base_length + 2 * band,
+            base_width=self.base_width + 2 * band,
+        )
 
 
 @dataclass(frozen=True)
@@ -97,11 +121,21 @@ class BinFit:  # pylint: disable=too-many-instance-attributes
     camera_disagreement_m: float = 0.0
     # The camera whose fit was kept (-1 when none was chosen).
     camera: int = -1
+    # The footprint on the floor (None: straight walls, the rim's size).
+    base_length: float | None = None
+    base_width: float | None = None
 
     @property
     def model(self) -> BinModel:
         """The box this fit describes."""
-        return BinModel(self.length, self.width, self.height, self.wall)
+        return BinModel(
+            self.length,
+            self.width,
+            self.height,
+            self.wall,
+            self.base_length,
+            self.base_width,
+        )
 
     def as_dict(self) -> dict[str, float]:
         """The bin as plain floats: the skill server's ``observe()["bin"]``."""
@@ -133,9 +167,13 @@ def cube_in_bin(
 def bin_silhouette(
     camera: CeilingCamera, x: float, y: float, yaw: float, model: BinModel
 ) -> NDArray[np.float64]:
-    """The image polygon (convex hull) of the bin standing on the floor at pose."""
+    """The image polygon (convex hull) of the bin standing on the floor at pose: its
+    base at z = 0 and its rim at ``height``."""
     c, s = math.cos(yaw), math.sin(yaw)
+    rim = _CORNERS[:, 2] > 0
     local = _CORNERS * [model.length, model.width, model.height]
+    local[~rim, 0] = _CORNERS[~rim, 0] * model.base_length
+    local[~rim, 1] = _CORNERS[~rim, 1] * model.base_width
     world = np.c_[
         x + c * local[:, 0] - s * local[:, 1],
         y + s * local[:, 0] + c * local[:, 1],
@@ -146,7 +184,10 @@ def bin_silhouette(
 
 
 def bin_mask(
-    bgr: NDArray[np.uint8], darkness: float = 0.85, min_saturation: float | None = None
+    bgr: NDArray[np.uint8],
+    darkness: float = 0.85,
+    min_saturation: float | None = None,
+    hue_range: Sequence[float] | None = None,
 ) -> NDArray[np.uint8]:
     """1 where a pixel is darker than ``darkness`` times the local floor, holes (a cube
     in the bin, a white label on it) filled.
@@ -156,11 +197,22 @@ def bin_mask(
     2026-10-20 the floor read ~80, the shadow ~80-100, the cardboard ~160-200, and the
     darkness fit sat 2 cm off the marker in the bin's centre).
 
+    With ``hue_range`` (OpenCV hue, 0-180) it is where the hue lies in that range and
+    the saturation exceeds ``min_saturation`` (0 if None): a coloured bin, which a
+    dark carpet, the warm floor and a red bottle all fail (2026-11-02: the blue bin
+    read H ~127, the floor ~10, the bottle label ~178; the floor's saturation, ~92,
+    overlapped the bin's shaded side).
+
     Pass one camera's image: the local floor is estimated within it.
     """
-    if min_saturation is not None:
-        saturation: Any = cv.cvtColor(bgr, cv.COLOR_BGR2HSV)[:, :, 1]
-        card: Any = (saturation.astype(np.float32) > min_saturation).astype(np.uint8)
+    if hue_range is not None or min_saturation is not None:
+        hsv: Any = cv.cvtColor(bgr, cv.COLOR_BGR2HSV)
+        saturation = hsv[:, :, 1].astype(np.float32)
+        card: Any = saturation > (min_saturation or 0.0)
+        if hue_range is not None:
+            hue = hsv[:, :, 0]
+            card &= (hue >= hue_range[0]) & (hue <= hue_range[1])
+        card = card.astype(np.uint8)
         card = cv.morphologyEx(card, cv.MORPH_CLOSE, np.ones((7, 7), np.uint8))
         card = cv.morphologyEx(card, cv.MORPH_OPEN, np.ones((3, 3), np.uint8))
         outlines, _ = cv.findContours(card, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
@@ -235,6 +287,7 @@ def find_bin_candidates(
     exclude: Sequence[Sequence[float]] = (),
     darkness: float = 0.85,
     min_saturation: float | None = None,
+    hue_range: Sequence[float] | None = None,
 ) -> list[tuple[float, float]]:
     """Map-frame (x, y) of each isolated, bin-sized dark region in ``search_bounds``,
     best first: a patch well inside the footprint (whatever the yaw) is dark, and a
@@ -248,7 +301,7 @@ def find_bin_candidates(
     best = np.zeros(gx.shape)
     for i, (cam, img) in enumerate(zip(cameras, _split(frame, len(cameras)))):
         rows, cols = img.shape[:2]
-        mask = bin_mask(img, darkness, min_saturation).astype(np.float64)
+        mask = bin_mask(img, darkness, min_saturation, hue_range).astype(np.float64)
         valid = _valid_rows(rows, cols, i, len(cameras)).astype(np.float64)
         mask *= valid
         integral = cv.integral(mask)
@@ -287,6 +340,7 @@ def fit_bin_pose(  # pylint: disable=too-many-locals
     only: Sequence[int] | None = None,
     darkness: float = 0.85,
     min_saturation: float | None = None,
+    hue_range: Sequence[float] | None = None,
 ) -> BinFit | None:
     """3-DoF silhouette fit around ``guess_xy``; masks are averaged over ``frames``
     first.
@@ -314,7 +368,10 @@ def fit_bin_pose(  # pylint: disable=too-many-locals
         if u1 - u0 < 10 or v1 - v0 < 10:
             continue
         prob = np.mean(
-            [bin_mask(img, darkness, min_saturation)[v0:v1, u0:u1] for img in imgs],
+            [
+                bin_mask(img, darkness, min_saturation, hue_range)[v0:v1, u0:u1]
+                for img in imgs
+            ],
             axis=0,
         )
         valid = _valid_rows(rows, cols, i, len(cameras))[v0:v1, u0:u1]
@@ -324,9 +381,7 @@ def fit_bin_pose(  # pylint: disable=too-many-locals
     if not views:
         return None
 
-    grown = BinModel(
-        model.length + 2 * _BAND_M, model.width + 2 * _BAND_M, model.height
-    )
+    grown = model.grown(_BAND_M)
 
     def score(x: float, y: float, yaw: float) -> float:
         """IoU of the silhouette and the mask within the silhouette grown by a band:
@@ -382,6 +437,8 @@ def fit_bin_pose(  # pylint: disable=too-many-locals
         model.wall,
         best_score,
         len(views),
+        base_length=model.base_length,
+        base_width=model.base_width,
     )
 
 
@@ -400,6 +457,7 @@ def _isolated(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     model: BinModel,
     darkness: float,
     min_saturation: float | None = None,
+    hue_range: Sequence[float] | None = None,
 ) -> bool:
     """Whether the dark region under the fit is the bin alone: at most ``_SPILL_MAX`` of
     the connected dark region containing it lies outside the silhouette grown by twice
@@ -410,7 +468,7 @@ def _isolated(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     and rejected too (move one apart).
     """
     img = _split(frame, len(cameras))[index]
-    mask = bin_mask(img, darkness, min_saturation)
+    mask = bin_mask(img, darkness, min_saturation, hue_range)
     rows, cols = mask.shape
     mask *= _valid_rows(rows, cols, index, len(cameras)).astype(np.uint8)
     _, labels = cv.connectedComponents(mask)
@@ -424,9 +482,7 @@ def _isolated(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     if ids.size == 0:
         return False
     region = np.isin(labels, ids)
-    grown_model = BinModel(
-        model.length + 4 * _BAND_M, model.width + 4 * _BAND_M, model.height
-    )
+    grown_model = model.grown(2 * _BAND_M)
     grown = np.zeros(mask.shape, np.uint8)
     cv.fillConvexPoly(
         grown,
@@ -447,6 +503,7 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
     serials: Sequence[str] | None = None,
     darkness: float = 0.85,
     min_saturation: float | None = None,
+    hue_range: Sequence[float] | None = None,
 ) -> BinFit | None:
     """The best-fitting bin whose centre lies in ``search_bounds``, or None if nothing
     fits well enough.
@@ -457,7 +514,14 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
     """
     best: BinFit | None = None
     for guess in find_bin_candidates(
-        frames[-1], cameras, search_bounds, model, exclude, darkness, min_saturation
+        frames[-1],
+        cameras,
+        search_bounds,
+        model,
+        exclude,
+        darkness,
+        min_saturation,
+        hue_range,
     ):
         fit = fit_bin_pose(
             frames[-2:],
@@ -466,6 +530,7 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
             model,
             darkness=darkness,
             min_saturation=min_saturation,
+            hue_range=hue_range,
         )
         if fit is not None and (best is None or fit.iou > best.iou):
             best = fit
@@ -482,6 +547,7 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
             only=[i],
             darkness=darkness,
             min_saturation=min_saturation,
+            hue_range=hue_range,
         )
         if fit is not None:
             singles.append((i, fit))
@@ -499,7 +565,7 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
     near = [(i, f) for i, f in pool if f.iou >= top_iou - 0.03]
     cam_i, chosen = min(near, key=lambda t: _off_nadir(cameras[t[0]], t[1].x, t[1].y))
     if chosen.iou < min_iou or not _isolated(
-        frames[-1], cameras, cam_i, chosen, model, darkness, min_saturation
+        frames[-1], cameras, cam_i, chosen, model, darkness, min_saturation, hue_range
     ):
         return None
     if not (
@@ -524,6 +590,8 @@ def localize_bin(  # pylint: disable=too-many-arguments,too-many-positional-argu
         tuple((i, f.x, f.y, f.yaw, f.iou) for i, f in singles),
         spread,
         cam_i,
+        model.base_length,
+        model.base_width,
     )
 
 
@@ -585,6 +653,9 @@ class CeilingBinSource(TargetSource):
         darkness: float = 0.85,
         host: str | None = None,
         min_saturation: float | None = None,
+        base_length: float | None = None,
+        base_width: float | None = None,
+        hue_range: Sequence[float] | None = None,
     ) -> None:
         if image_client is None:
             from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
@@ -604,7 +675,14 @@ class CeilingBinSource(TargetSource):
         self._markers = marker_client
         self._serials = list(serials)
         self._cameras = load_ceiling_cameras(self._serials)
-        self._model = BinModel(float(length), float(width), float(height), float(wall))
+        self._model = BinModel(
+            float(length),
+            float(width),
+            float(height),
+            float(wall),
+            None if base_length is None else float(base_length),
+            None if base_width is None else float(base_width),
+        )
         self._search = tuple(float(v) for v in search_bounds)
         self._robot_half = float(robot_exclusion_half)
         self._num_frames = int(num_frames)
@@ -612,6 +690,7 @@ class CeilingBinSource(TargetSource):
         self._min_iou = float(min_iou)
         self._darkness = float(darkness)
         self._min_saturation = None if min_saturation is None else float(min_saturation)
+        self._hue_range = None if hue_range is None else tuple(map(float, hue_range))
         self.last_fit: BinFit | None = None
 
     def _frames(self) -> list[NDArray[np.uint8]]:
@@ -643,6 +722,7 @@ class CeilingBinSource(TargetSource):
             serials=self._serials,
             darkness=self._darkness,
             min_saturation=self._min_saturation,
+            hue_range=self._hue_range,
         )
         if fit is None:
             raise RuntimeError(
