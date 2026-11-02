@@ -1,149 +1,34 @@
-"""Bounded base repositioning with inflated boxes and full-robot transit radius.
-
-A* searches a local XY grid. A circumscribed radius bounds base, arm and fingers
-at the measured transit configuration for all headings. This is geometric
-planning; a verified free operating area/obstacle survey is still required.
-"""
+"""Sprout targets planned with existing PRPL real_sim URDF/RRT machinery."""
 
 from __future__ import annotations
 
-import heapq
 import itertools
 import math
-from pathlib import Path
 
 import mujoco
 import numpy as np
 
-from prpl_tidybot.sprout.live_config import model_digest
-from prpl_tidybot.sprout.live_kinematics import LiveKinematics, top_down
+from prpl_tidybot.sprout.live_kinematics import top_down
 from prpl_tidybot.sprout.sequence import make_plan
+from prpl_tidybot.sprout.transit_geometry import (
+    DEFAULT_NAVIGATION,
+    TransitChecker,
+    build_geometry,
+)
 
 
-def transit_radius(model: Path, joints: list[float]) -> float:
-    """Compute a conservative swept base radius for the current arm posture."""
-    kin = LiveKinematics(model, [0, 0, 0], {"model_sha256": model_digest(model)})
-    kin.set(joints)
-    return max(
-        float(np.linalg.norm(np.abs(c[:2]) + h[:2]))
-        for c, h in (kin.bounds(g) for g in kin.collision_geoms)
-    )
-
-
-def free(point, obstacles, radius, bounds) -> bool:
-    """Check whether a base center clears inflated obstacles and map bounds."""
-    p = np.asarray(point)[:2]
-    if (
-        not np.all(np.isfinite(p))
-        or np.any(p < np.asarray(bounds[0]) + radius)
-        or np.any(p > np.asarray(bounds[1]) - radius)
-    ):
-        return False
-    for box in obstacles:
-        distance = np.maximum(
-            np.abs(p - np.asarray(box["center"])[:2])
-            - np.asarray(box["half_size"])[:2],
-            0,
-        )
-        if np.linalg.norm(distance) <= radius:
-            return False
-    return True
-
-
-def segment_free(a, b, obstacles, radius, bounds, resolution=0.02) -> bool:
-    """Sample a straight base segment for obstacle and boundary clearance."""
-    # Add half a sampling interval to cover every point between samples.
-    n = max(
-        2,
-        int(np.ceil(np.linalg.norm(np.asarray(b)[:2] - np.asarray(a)[:2]) / resolution))
-        + 1,
-    )
-    return all(
-        free(p, obstacles, radius + resolution / 2, bounds)
-        for p in np.linspace(np.asarray(a)[:2], np.asarray(b)[:2], n)
-    )
-
-
-def route(start, goal, obstacles, radius, bounds, step=0.05):
-    """Search a bounded grid for a collision-free base route."""
-    start, goal = np.asarray(start)[:2], np.asarray(goal)[:2]
-    if not free(start, obstacles, radius, bounds) or not free(
-        goal, obstacles, radius, bounds
-    ):
-        raise ValueError(
-            "Base start/goal overlaps inflated keep-out or operating boundary"
-        )
-    if segment_free(start, goal, obstacles, radius, bounds):
-        return [start.tolist(), goal.tolist()]
-    origin = start
-    queue = [(float(np.linalg.norm(goal - start)), 0.0, (0, 0))]
-    costs, parent = {(0, 0): 0.0}, {}
-    found = None
-    while queue and len(costs) < 20000:
-        _, cost, key = heapq.heappop(queue)
-        if cost > costs[key]:
-            continue
-        here = origin + np.asarray(key) * step
-        if np.linalg.norm(here - goal) < 2 * step and segment_free(
-            here, goal, obstacles, radius, bounds
-        ):
-            found = key
-            break
-        for dx, dy in (
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1),
-        ):
-            other = (key[0] + dx, key[1] + dy)
-            there = origin + np.asarray(other) * step
-            new = cost + math.hypot(dx, dy) * step
-            if new >= costs.get(other, math.inf) or not segment_free(
-                here, there, obstacles, radius, bounds
-            ):
-                continue
-            costs[other], parent[other] = new, key
-            heapq.heappush(
-                queue, (new + float(np.linalg.norm(goal - there)), new, other)
-            )
-    if found is None:
-        raise ValueError("No collision-free base route within local search bounds")
-    points = [goal.tolist()]
-    while found != (0, 0):
-        points.append((origin + np.asarray(found) * step).tolist())
-        found = parent[found]
-    points.append(start.tolist())
-    points.reverse()
-    simplified = [points[0]]
-    i = 0
-    while i < len(points) - 1:
-        j = len(points) - 1
-        while j > i + 1 and not segment_free(
-            points[i], points[j], obstacles, radius, bounds
-        ):
-            j -= 1
-        simplified.append(points[j])
-        i = j
-    return simplified
-
-
-def probe(sim, grasp, recipe):
+def probe(sim, grasp, recipe, failures=None):
     """Test the same Cartesian approach from the measured arm configuration."""
 
     plan = make_plan(grasp, recipe)
     saved = sim.data.qpos.copy()
+    phase = "pregrasp"
     try:
         sim.data.qpos[sim.arm_qpos] = sim.pregrasp_joints(plan.pregrasp)
         mujoco.mj_forward(sim.model, sim.data)
-        for pose in (
-            plan.grasp,
-            plan.lifted,
-            plan.put_down,
-            plan.retreat,
+        for phase, pose in zip(
+            ("grasp", "lift", "put_down", "retreat"),
+            (plan.grasp, plan.lifted, plan.put_down, plan.retreat),
         ):
             start = sim.data.site_xpos[sim.pinch].copy()
             qa, qb = np.zeros(4), np.zeros(4)
@@ -163,81 +48,97 @@ def probe(sim, grasp, recipe):
                     rot.reshape(3, 3),
                 )
         return True
-    except ValueError:
+    except ValueError as error:
+        if failures is not None:
+            failures.append(f"{phase}: {error}")
         return False
     finally:
         sim.data.qpos[:] = saved
         mujoco.mj_forward(sim.model, sim.data)
 
 
-def plan_base(sim, model, grasp, recipe, obstacles, settings):
-    """Find a reachable base pose and route that pass the manipulation preview."""
-
+def plan_base(sim, model, grasp, recipe, obstacles, settings, navigation=None):
+    """Find a reachable base pose with model geometry and stopping clearance."""
     sim.validate_initial_joints()
     start = np.asarray(sim.scene["tidybot_base_xyyaw"], float)
     addresses = [
         sim.model.joint("tidy/" + n).qposadr[0]
         for n in ("joint_x", "joint_y", "joint_th")
     ]
-    radius = (
-        transit_radius(model, sim.scene["tidybot_arm_joints_rad"])
-        + settings["clearance_m"]
+    geometry = build_geometry(
+        model,
+        sim.scene["tidybot_arm_joints_rad"],
+        settings["clearance_m"],
+        DEFAULT_NAVIGATION if navigation is None else navigation,
     )
     bounds = settings["bounds_xy"]
-    if not free(start, obstacles, radius, bounds):
-        raise ValueError("Current robot transit envelope overlaps keep-out/boundary")
-    if probe(sim, grasp, recipe):
-        return {
-            "required": False,
-            "path_xyyaw": [start.tolist()],
-            "radius_m": radius,
-            "obstacles": obstacles,
-            "bounds_xy": bounds,
-        }
-    candidates = []
-    goal = np.array([grasp.x, grasp.y])
-    for distance in (0.55, 0.65, 0.75, 0.85):
-        for angle in np.linspace(-math.pi, math.pi, 20, endpoint=False):
-            xy = goal + distance * np.array([math.cos(angle), math.sin(angle)])
-            if not free(xy, obstacles, radius, bounds):
-                continue
-            for yaw in (
-                start[2],
-                angle + math.pi,
-                angle + math.pi / 2,
-                angle - math.pi / 2,
-            ):
-                candidates.append(
-                    (
-                        float(np.linalg.norm(xy - start[:2]))
-                        + 0.08 * abs(math.remainder(yaw - start[2], 2 * math.pi)),
-                        [*xy, float(yaw)],
-                    )
-                )
-    for _, candidate in sorted(candidates, key=lambda c: c[0]):
-        try:
-            path = route(start, candidate, obstacles, radius, bounds)
-        except ValueError:
-            continue
-        sim.data.qpos[addresses] = candidate
-        mujoco.mj_forward(sim.model, sim.data)
+    checker = TransitChecker(geometry, obstacles, bounds)
+    common = {
+        "transit_geometry": geometry,
+        "obstacles": obstacles,
+        "bounds_xy": bounds,
+    }
+    try:
+        if not checker.free(start):
+            raise ValueError(
+                "Current robot model/stopping envelope overlaps keep-out/boundary"
+            )
         if probe(sim, grasp, recipe):
+            return dict(common, required=False, path_xyyaw=[start.tolist()])
+        candidates = []
+        goal = np.array([grasp.x, grasp.y])
+        for distance in (0.55, 0.65, 0.75, 0.85):
+            for angle in np.linspace(-math.pi, math.pi, 20, endpoint=False):
+                xy = goal + distance * np.array([math.cos(angle), math.sin(angle)])
+                for yaw in (
+                    start[2],
+                    angle + math.pi,
+                    angle + math.pi / 2,
+                    angle - math.pi / 2,
+                ):
+                    candidate = [*xy, float(yaw)]
+                    if checker.free(candidate):
+                        candidates.append(
+                            (
+                                float(np.linalg.norm(xy - start[:2]))
+                                + 0.08
+                                * abs(math.remainder(yaw - start[2], 2 * math.pi)),
+                                candidate,
+                            )
+                        )
+        reachable = 0
+        failures = []
+        try:
+            for _, candidate in sorted(candidates, key=lambda c: c[0]):
+                sim.data.qpos[addresses] = candidate
+                mujoco.mj_forward(sim.model, sim.data)
+                if not probe(sim, grasp, recipe, failures):
+                    continue
+                reachable += 1
+                try:
+                    poses = checker.route(start, candidate)
+                except ValueError:
+                    continue
+                result = dict(
+                    common,
+                    required=True,
+                    path_xyyaw=poses,
+                    goal_xyyaw=candidate,
+                    method="PRPL URDF collision + mobile-base BiRRT + Kinova IKFast",
+                )
+                validate_base_plan(result)
+                return result
+        finally:
             sim.data.qpos[addresses] = start
             mujoco.mj_forward(sim.model, sim.data)
-            poses = [[*p, float(start[2])] for p in path]
-            poses.append(candidate)
-            return {
-                "required": True,
-                "path_xyyaw": poses,
-                "radius_m": radius,
-                "obstacles": obstacles,
-                "bounds_xy": bounds,
-                "goal_xyyaw": candidate,
-                "method": "inflated-box A* + joint-space approach and Cartesian lift IK",
-            }
-    sim.data.qpos[addresses] = start
-    mujoco.mj_forward(sim.model, sim.data)
-    raise ValueError("No reachable base candidate with a collision-free transit route")
+        raise ValueError(
+            "No reachable base candidate with a collision-free transit route "
+            f"({len(candidates)} collision-free poses, {reachable} pass arm sequence). "
+            + (failures[0] if failures else "No admissible base route")
+        )
+
+    finally:
+        checker.close()
 
 
 def validate_base_plan(plan: dict) -> None:
@@ -266,16 +167,14 @@ def validate_base_plan(plan: dict) -> None:
     path = np.asarray(plan["path_xyyaw"], float)
     if path.ndim != 2 or path.shape[1] != 3 or not np.all(np.isfinite(path)):
         raise ValueError("Invalid base path")
-    if not math.isfinite(plan["radius_m"]) or plan["radius_m"] <= 0:
-        raise ValueError("Invalid base collision radius")
     if len(path) < (2 if plan["required"] else 1):
         raise ValueError("Missing base waypoints")
-    if not all(
-        free(p, plan["obstacles"], plan["radius_m"], plan["bounds_xy"]) for p in path
-    ):
-        raise ValueError("Base waypoint overlaps keep-out")
-    for a, b in itertools.pairwise(path):
-        if not segment_free(
-            a, b, plan["obstacles"], plan["radius_m"], plan["bounds_xy"]
-        ):
-            raise ValueError("Reviewed base route intersects keep-out/boundary")
+    geometry = plan.get("transit_geometry")
+    if not geometry:
+        raise ValueError("Regenerate preview: PRPL URDF collision review required")
+    with TransitChecker(geometry, plan["obstacles"], plan["bounds_xy"]) as checker:
+        if not all(checker.free(p) for p in path):
+            raise ValueError("Base URDF waypoint intersects keep-out/boundary")
+        for a, b in itertools.pairwise(path):
+            if not checker.segment(a, b):
+                raise ValueError("Reviewed URDF sweep intersects keep-out/boundary")

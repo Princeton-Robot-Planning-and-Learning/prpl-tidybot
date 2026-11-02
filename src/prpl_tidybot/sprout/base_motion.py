@@ -15,8 +15,9 @@ import time
 
 import numpy as np
 
-from prpl_tidybot.sprout.base_planning import segment_free, validate_base_plan
+from prpl_tidybot.sprout.base_planning import validate_base_plan
 from prpl_tidybot.sprout.live_perception import fresh_time
+from prpl_tidybot.sprout.transit_geometry import TransitChecker, validate_budget
 
 
 def validate_navigation(config: dict) -> None:
@@ -81,6 +82,14 @@ class BaseMotion:
         validate_navigation(self.config)
         validate_base_plan(plan)
         p = self.config
+        geometry = plan["transit_geometry"]
+        validate_budget(geometry, p)
+        with TransitChecker(geometry, plan["obstacles"], plan["bounds_xy"]) as checker:
+            self._execute_checked(plan, start_joints, checker)
+
+    def _execute_checked(self, plan, start_joints, checker):
+        """Track the approved PRPL path with live camera/joint and mesh checks."""
+        p = self.config
         if self.stop_event.is_set():
             raise RuntimeError("Base stop latched")
         if self.factory is None:
@@ -143,20 +152,15 @@ class BaseMotion:
                         > p["path_tolerance_m"]
                     ):
                         raise RuntimeError("Base left reviewed route corridor")
-                    # Includes stopping-distance reserve, tracking tolerance,
-                    # and latency.
-                    reserve = (
-                        p["path_tolerance_m"]
-                        + p["speed_m_s"] ** 2 / (2 * p["acceleration_m_s2"])
-                        + p["speed_m_s"] * (p["camera_max_age_s"] + 0.3)
-                    )
-                    if not segment_free(
-                        pose,
-                        b,
-                        plan["obstacles"],
-                        plan["radius_m"] + reserve,
-                        plan["bounds_xy"],
+                    yaw_start = a[2] + f * math.remainder(b[2] - a[2], 2 * math.pi)
+                    if (
+                        np.linalg.norm(direction) > 1e-8
+                        and abs(math.remainder(pose[2] - yaw_start, 2 * math.pi))
+                        > p["yaw_tolerance_rad"]
                     ):
+                        raise RuntimeError("Base left reviewed yaw corridor")
+                    safe = checker.segment(pose, b)
+                    if not safe:
                         raise RuntimeError(
                             "Live base stopping envelope intersects keep-out"
                         )
@@ -171,9 +175,13 @@ class BaseMotion:
                     if stable >= 5:
                         break
                     velocity = error * 1.0
-                    velocity *= min(
-                        1.0, p["speed_m_s"] / max(np.linalg.norm(velocity), 1e-9)
+                    scale = min(
+                        1.0,
+                        p["speed_m_s"] / max(np.linalg.norm(velocity), 1e-9),
+                        p["yaw_speed_rad_s"] / max(abs(angle), 1e-9),
                     )
+                    velocity *= scale
+                    angle *= scale
                     if arrived:
                         velocity[:] = 0
                         angle = 0

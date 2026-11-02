@@ -10,8 +10,10 @@ import kinder
 import numpy as np
 import pytest
 
+from prpl_tidybot.sprout.base_planning import probe
 from prpl_tidybot.sprout.pad_geometry import box_grasp_geometry
 from prpl_tidybot.sprout.rehearsal import Rehearsal
+from prpl_tidybot.sprout.sequence import GraspPose, Recipe
 from prpl_tidybot.visual_servo.forearm_box import box_in_map, fit_box
 
 
@@ -123,3 +125,41 @@ def test_measured_joint_outside_model_is_not_silently_clamped():
     with pytest.raises(ValueError, match="joint_4=-2.6725"):
         sim.validate_initial_joints()
     assert np.array_equal(before, sim.data.qpos)
+
+
+def test_shared_prpl_planners_complete_predefined_box_sequence():
+    """Real URDF IK/path planning handles approach and the 15 cm lift cycle."""
+    scene = {
+        "representation": "forearm_box",
+        "body_pose_source": "synthetic regression",
+        "forearm_box": {
+            "center_xyz": [0.4, 0, 0.08],
+            "height_m": 0.08,
+            "width_m": 0.06,
+            "length_m": 0.1,
+            "short_axis_yaw_rad": 0,
+        },
+        "grasp": {"z": 0.08},
+        "tidybot_base_xyyaw": [0, 0, 0],
+        "tidybot_arm_joints_rad": [
+            0,
+            0.26,
+            math.pi - 0.001,
+            -2.27,
+            0,
+            0.96,
+            math.pi / 2,
+        ],
+    }
+    sim = Rehearsal(model_path(), None, scene)
+    failures = []
+    try:
+        assert probe(
+            sim,
+            GraspPose(0.4, 0, 0.08, 0),
+            Recipe(lift_height_m=0.15, pregrasp_height_m=0.1, retreat_height_m=0.1),
+            failures,
+        ), failures
+        assert len(sim.pregrasp_path) >= 2
+    finally:
+        sim.urdf.close()

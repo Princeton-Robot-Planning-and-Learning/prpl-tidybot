@@ -1,4 +1,4 @@
-"""Full TidyBot model FK/IK, floor clearance and conservative box checks.
+"""PRPL URDF robot collision/IK, verified render FK and object-box checks.
 
 Obstacle boxes bound all non-target body parts; the configured held-forearm box
 bounds the moving limb in the pinch frame. They must be verified in the lab.
@@ -8,14 +8,17 @@ this is not a continuous collision proof or a prediction of contact forces.
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
 import mujoco
 import numpy as np
+import pybullet as bullet
 
 from prpl_tidybot.sprout.live_config import model_digest
 from prpl_tidybot.sprout.sequence import GraspPose
+from prpl_tidybot.sprout.urdf_collision import PRPLCollisionScene
 
 
 def top_down(yaw: float) -> np.ndarray:
@@ -47,32 +50,19 @@ class LiveKinematics:
         if model_digest(model_path) != config["model_sha256"]:
             raise ValueError("NUC TidyBot model/assets differ from the reviewed model")
         self.config = config
+        self.base_xyyaw = base_xyyaw
+        self._urdf_scene: PRPLCollisionScene | None = None
+        self._obstacle_signature: str | None = None
+        self._urdf_obstacles: set[int] = set()
+        self._urdf_floor: int | None = None
+        self._urdf_body: int | None = None
         self.model = mujoco.MjModel.from_xml_path(str(model_path))
         self.data = mujoco.MjData(self.model)
         self.site = self.model.site("pinch_site").id
         self.joints = [self.model.joint(f"joint_{i}").id for i in range(1, 8)]
         self.addresses = [self.model.jnt_qposadr[j] for j in self.joints]
-        self.dofs = [self.model.jnt_dofadr[j] for j in self.joints]
         for name, value in zip(("joint_x", "joint_y", "joint_th"), base_xyyaw):
             self.data.qpos[self.model.joint(name).qposadr[0]] = value
-        self.collision_geoms = [
-            i
-            for i in range(self.model.ngeom)
-            if self.model.geom_contype[i] or self.model.geom_conaffinity[i]
-        ]
-        self.mesh_bounds = {}
-        for g in self.collision_geoms:
-            if self.model.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH:
-                mesh = self.model.geom_dataid[g]
-                start, count = (
-                    self.model.mesh_vertadr[mesh],
-                    self.model.mesh_vertnum[mesh],
-                )
-                points = self.model.mesh_vert[start : start + count]
-                self.mesh_bounds[g] = (
-                    (points.min(0) + points.max(0)) / 2,
-                    (points.max(0) - points.min(0)) / 2,
-                )
 
     def set(self, q, gripper: float = 0.0) -> None:
         """Set model joints and gripper linkage before forward kinematics."""
@@ -112,58 +102,27 @@ class LiveKinematics:
             math.atan2(rotation[1, 0], rotation[0, 0]),
         )
 
-    def solve(self, xyz: np.ndarray, rotation: np.ndarray, seed) -> tuple[float, ...]:
-        """Solve the target pinch pose from a measured joint seed."""
-        self.set(seed)
-        p = self.config["servo"]
-        jp, jr = np.zeros((3, self.model.nv)), np.zeros((3, self.model.nv))
-        for _ in range(160):
-            mujoco.mj_forward(self.model, self.data)
-            dp = xyz - self.data.site_xpos[self.site]
-            dr = rotation_error(rotation, self.data.site_xmat[self.site].reshape(3, 3))
-            if (
-                np.linalg.norm(dp) <= min(0.001, p["tolerance_m"] / 2)
-                and np.linalg.norm(dr) <= p["orientation_tolerance_rad"] / 2
-            ):
-                q = self.data.qpos[self.addresses].copy()
-                q = (q + np.pi) % (2 * np.pi) - np.pi
-                return tuple(float(v) for v in q)
-            mujoco.mj_jacSite(self.model, self.data, jp, jr, self.site)
-            jac = np.vstack([jp[:, self.dofs], jr[:, self.dofs]])
-            delta = np.asarray(
-                jac.T @ np.linalg.solve(jac @ jac.T + np.eye(6) * 0.001, np.r_[dp, dr]),
-                dtype=float,
-            )
-            delta *= min(1.0, 0.05 / max(float(np.max(np.abs(delta))), 1e-9))
-            self.data.qpos[self.addresses] += delta
-            for joint, address in zip(self.joints, self.addresses):
-                if self.model.jnt_limited[joint]:
-                    self.data.qpos[address] = np.clip(
-                        self.data.qpos[address], *self.model.jnt_range[joint]
-                    )
-        raise RuntimeError("Live IK did not converge; no command issued")
+    @property
+    def urdf(self) -> PRPLCollisionScene:
+        """Lazy shared PRPL URDF scene for IK and live collision guards."""
+        if self._urdf_scene is None:
+            self._urdf_scene = PRPLCollisionScene()
+        return self._urdf_scene
 
-    def bounds(self, geom: int) -> tuple[np.ndarray, np.ndarray]:
-        """Return a world-axis-aligned bound for a collision geometry."""
-        size = self.model.geom_size[geom].copy()
-        center = np.zeros(3)
-        kind = self.model.geom_type[geom]
-        if geom in self.mesh_bounds:
-            center, size = self.mesh_bounds[geom]
-        elif kind == mujoco.mjtGeom.mjGEOM_SPHERE:
-            size[:] = size[0]
-        elif kind in (mujoco.mjtGeom.mjGEOM_CAPSULE, mujoco.mjtGeom.mjGEOM_CYLINDER):
-            size = np.array(
-                [
-                    size[0],
-                    size[0],
-                    size[1] + (size[0] if kind == mujoco.mjtGeom.mjGEOM_CAPSULE else 0),
-                ]
-            )
-        elif kind != mujoco.mjtGeom.mjGEOM_BOX:
-            raise ValueError("Unsupported collision primitive")
-        rotation = self.data.geom_xmat[geom].reshape(3, 3)
-        return self.data.geom_xpos[geom] + rotation @ center, np.abs(rotation) @ size
+    def solve(self, xyz: np.ndarray, rotation: np.ndarray, seed) -> tuple[float, ...]:
+        """Reuse PRPL seeded IK for short servo steps and verify tool frames."""
+        self.urdf.set(self.base_xyyaw, seed)
+        try:
+            q = self.urdf.solve(xyz, rotation, seed, local=True)
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+        actual, orientation = self.full_pose(q)
+        if (
+            np.linalg.norm(actual - xyz) > 0.002
+            or np.linalg.norm(rotation_error(rotation, orientation)) > 0.025
+        ):
+            raise RuntimeError("URDF/MuJoCo tool frames disagree; no command issued")
+        return tuple(q)
 
     def check_state(self, q, *, held: bool = False, on_support: bool = False) -> None:
         """Check joint limits, link collisions, and floor clearance."""
@@ -182,58 +141,60 @@ class LiveKinematics:
                 <= self.model.jnt_range[joint, 1]
             ):
                 raise RuntimeError("Joint target outside model range")
-        # Conservative envelope across the entire finger linkage travel.
-        for closure in (0.0, 0.4, 0.8):
-            self.set(q, closure)
-            for contact in self.data.contact:
-                bodies = {
-                    self.model.body(self.model.geom_bodyid[g]).name
-                    for g in (contact.geom1, contact.geom2)
-                }
-                # Opposing pads intentionally meet at empty full closure.
-                if contact.dist < -1e-5 and bodies != {"left_pad", "right_pad"}:
-                    raise RuntimeError("TidyBot model self-collision")
-            for geom in self.collision_geoms:
-                center, half = self.bounds(geom)
-                body = self.model.body(self.model.geom_bodyid[geom]).name
-                # Mobile-base shell/wheels normally touch the ground; arm and
-                # fingers may not. Determine membership by arm joint subtree.
-                ancestor = int(self.model.geom_bodyid[geom])
-                arm_body = int(self.model.jnt_bodyid[self.joints[0]])
-                in_arm = False
-                while ancestor:
-                    if ancestor == arm_body:
-                        in_arm = True
-                    ancestor = int(self.model.body_parentid[ancestor])
-                if in_arm and center[2] - half[2] < p["collision_margin_m"]:
-                    raise RuntimeError(f"Floor clearance violation: {body}")
-                body_box = (
-                    self.config.get("detection", {})
-                    .get("body_obstacle", {})
-                    .get("reviewed_box")
+        scene = self.urdf
+        signature = json.dumps(
+            [self.config["obstacles"], self.config.get("detection", {})],
+            sort_keys=True,
+        )
+        if signature != self._obstacle_signature:
+            for body_id in self._urdf_obstacles:
+                bullet.removeBody(body_id, physicsClientId=scene.client)
+            for name in ("_urdf_floor", "_urdf_body"):
+                optional_body_id = getattr(self, name, None)
+                if optional_body_id is not None:
+                    bullet.removeBody(optional_body_id, physicsClientId=scene.client)
+            self._obstacle_signature = signature
+            self._urdf_obstacles = {
+                scene.box(box["center"], box["half_size"])
+                for box in self.config["obstacles"]
+            }
+            self._urdf_floor = scene.box([0, 0, -0.1], [20, 20, 0.1])
+            body_box = (
+                self.config.get("detection", {})
+                .get("body_obstacle", {})
+                .get("reviewed_box")
+            )
+            self._urdf_body = (
+                None
+                if body_box is None
+                else scene.box(body_box["center"], body_box["half_size"])
+            )
+        from pybullet_helpers.inverse_kinematics import (  # pylint: disable=import-outside-toplevel
+            check_body_collisions,
+        )
+
+        assert self._urdf_floor is not None
+        for closure in scene.fingers:
+            self.set(q, float(closure))
+            scene.set(self.base_xyyaw, q, float(closure))
+            if scene.collision(self._urdf_obstacles, p["collision_margin_m"]):
+                raise RuntimeError(
+                    "TidyBot URDF intersects collision envelope or itself"
                 )
-                if (
-                    not in_arm
-                    and body_box is not None
-                    and np.all(
-                        np.abs(center[:2] - np.asarray(body_box["center"])[:2])
-                        < half[:2] + np.asarray(body_box["half_size"])[:2]
-                    )
-                ):
-                    raise RuntimeError(
-                        "TidyBot base overlaps Sprout whole-body keep-out"
-                    )
-                for obstacle in self.config["obstacles"]:
-                    if np.all(
-                        np.abs(center - obstacle["center"])
-                        < half
-                        + np.asarray(obstacle["half_size"])
-                        + p["collision_margin_m"]
-                    ):
-                        raise RuntimeError(
-                            "Robot collision envelope intersects "
-                            f"{obstacle.get('name', 'obstacle')}: {body}"
-                        )
+            if check_body_collisions(
+                scene.robot.arm.robot_id,
+                self._urdf_floor,
+                scene.client,
+                distance_threshold=p["collision_margin_m"],
+            ):
+                raise RuntimeError("Floor clearance violation: TidyBot URDF")
+            if self._urdf_body is not None and check_body_collisions(
+                scene.robot.base.robot_id,
+                self._urdf_body,
+                scene.client,
+                distance_threshold=p["collision_margin_m"],
+            ):
+                raise RuntimeError("TidyBot base overlaps Sprout whole-body keep-out")
             if held:
                 box = self.config["held_forearm"]
                 rotation = self.data.site_xmat[self.site].reshape(3, 3)

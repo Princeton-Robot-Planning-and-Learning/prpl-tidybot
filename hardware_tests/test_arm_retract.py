@@ -1,40 +1,27 @@
-"""Hardware integration test: command the real arm to a target joint configuration.
+"""Retract the real arm and verify completion before allowing shutdown.
 
-Run on the robot (the arm server must already be up). Connects via RealArmInterface,
-prints the current joint angles, then commands the arm to the retract configuration for
-N_STEPS steps at policy rate, printing the per-step state.
-
-python hardware_tests/test_arm_retract.py
+Default: use the running arm RPC server. With --shutdown, a refused RPC
+connection selects the stored Kinova Retract action instead. Neither path
+opens the gripper or runs an implicit reset/home action.
 """
 
-import sys
-import time
+import argparse
 
-import numpy as np
-
-from prpl_tidybot.interfaces.real_arm_interface import RealArmInterface
-from prpl_tidybot.third_party.constants import POLICY_CONTROL_PERIOD, RETRACT_ARM_CONF
-
-N_STEPS = 20
+from prpl_tidybot.sprout.shutdown_arm import main as retract_main
 
 
 def main() -> int:
-    """Move the arm to the retract configuration over N_STEPS steps."""
-    target = RETRACT_ARM_CONF.tolist()
-    print("Connecting to the real arm interface...")
-    arm = RealArmInterface()
-    try:
-        for i in range(N_STEPS):
-            joints = arm.get_arm_state()
-            joints_str = "  ".join(f"{j:+.3f}" for j in joints)
-            err = np.linalg.norm(np.array(joints) - np.array(target))
-            print(f"step {i + 1:02d}/{N_STEPS}  joints=[{joints_str}]  err={err:.4f}")
-            arm.execute_action(target, arm.get_gripper_state())
-            time.sleep(POLICY_CONTROL_PERIOD)
-        return 0
-    finally:
-        arm.close()
+    """Run verified retraction using the selected control connection."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--shutdown",
+        action="store_true",
+        help="Allow direct Retract when the arm server is not running",
+    )
+    args = parser.parse_args()
+    retract_main(server=True, auto=args.shutdown)
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

@@ -2,16 +2,21 @@
 # pylint: disable=import-outside-toplevel
 """Supervised high-level Retract action after all motion clients stop.
 
-No fault clearing, gripper opening or cyclic controller activation. Unlike the
-legacy retract test, distinguish ACTION_ABORT and timeout from successful end.
+No fault clearing or gripper opening. Require stable joint feedback through the
+server, or ACTION_END for direct Kortex control. Failures prevent server teardown
+and poweroff.
 """
 
 from __future__ import annotations
 
 import os
 import signal
+import socket
 import threading
+import time
 from pathlib import Path
+
+import numpy as np
 
 
 def retract(arm, messages, timeout: float = 45.0) -> None:
@@ -54,15 +59,68 @@ def retract(arm, messages, timeout: float = 45.0) -> None:
         arm.base.Unsubscribe(handle)
 
 
-def main() -> None:
-    """Run the shutdown arm command-line entry point."""
-    # Imports here keep all tests/read-only import paths free of hardware access.
+def retract_via_server(
+    arm, target, *, timeout: float = 45.0, period: float = 0.1
+) -> None:
+    """Hold the existing gripper state and verify stable retract joint feedback."""
+    target = np.asarray(target, float)
+    stable = 0
+    previous = None
+    deadline = time.monotonic() + timeout
+    try:
+        # Do not reset(), which opens the gripper and invokes an implicit retract.
+        arm.resume()
+        gripper = arm.get_gripper_position()
+        if not np.isfinite(gripper):
+            raise RuntimeError("Invalid gripper feedback; retract refused")
+        while time.monotonic() < deadline:
+            joints = np.asarray(arm.get_joint_angles(), float)
+            if joints.shape != (7,) or not np.all(np.isfinite(joints)):
+                raise RuntimeError("Invalid arm feedback; retract refused")
+            error = (joints - target + np.pi) % (2 * np.pi) - np.pi
+            movement = (
+                math_delta(joints, previous) if previous is not None else float("inf")
+            )
+            settled = np.max(np.abs(error)) < 0.02 and movement < 0.002
+            stable = stable + 1 if settled else 0
+            print(
+                f"RETRACT max joint error={np.max(np.abs(error)):.4f} rad, "
+                f"stable={stable}/5",
+                flush=True,
+            )
+            if stable >= 5:
+                print("Retract reached and stable; servers may now stop", flush=True)
+                return
+            arm.execute_action_angular(target.tolist(), gripper)
+            previous = joints.copy()
+            time.sleep(period)
+        raise TimeoutError(
+            "Retract did not settle; not stopping servers or powering off"
+        )
+    finally:
+        arm.close()
 
-    from kortex_api.autogen.messages import Base_pb2
 
-    from prpl_tidybot.third_party.kinova import TorqueControlledArm
+def math_delta(current: np.ndarray, previous: np.ndarray) -> float:
+    """Maximum wrapped joint change between consecutive feedback samples."""
+    return float(np.max(np.abs((current - previous + np.pi) % (2 * np.pi) - np.pi)))
 
-    # This module is copied standalone; do not depend on deployed Sprout modules.
+
+def server_available() -> bool:
+    """Only a refused local connection permits fallback to direct Kortex control."""
+    from prpl_tidybot.third_party.constants import ARM_RPC_HOST, ARM_RPC_PORT
+
+    try:
+        with socket.create_connection((ARM_RPC_HOST, ARM_RPC_PORT), timeout=2):
+            return True
+    except ConnectionRefusedError:
+        return False
+
+
+def main(*, server: bool = False, auto: bool = False) -> None:
+    """Retract using the running arm server, or direct Kortex when none is running."""
+    if auto:
+        server = server_available()
     for process in Path("/proc").iterdir():
         if not process.name.isdigit() or int(process.name) == os.getpid():
             continue
@@ -71,15 +129,10 @@ def main() -> None:
             comm = (process / "comm").read_text()
         except OSError:
             continue
-        if comm.startswith("python") and any(
-            name in command
-            for name in (
-                b"third_party.arm_server",
-                b"sprout.remote_execute",
-                b"test_arm_",
-                b"test_gamepad_teleop",
-            )
-        ):
+        conflicts = [b"sprout.remote_execute", b"test_arm_", b"test_gamepad_teleop"]
+        if not server:
+            conflicts.append(b"third_party.arm_server")
+        if comm.startswith("python") and any(name in command for name in conflicts):
             raise RuntimeError("Competing motion process; retract refused")
 
     def interrupted(*_):
@@ -87,7 +140,28 @@ def main() -> None:
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupted)
-    # The vendor driver has no type annotations.
+    if server:
+        from prpl_tidybot.third_party.arm_server import ArmManager
+        from prpl_tidybot.third_party.constants import (
+            ARM_RPC_HOST,
+            ARM_RPC_PORT,
+            POLICY_CONTROL_PERIOD,
+            RETRACT_ARM_CONF,
+            RPC_AUTHKEY,
+        )
+
+        manager = ArmManager(address=(ARM_RPC_HOST, ARM_RPC_PORT), authkey=RPC_AUTHKEY)
+        manager.connect()
+        print("Retracting via running arm server", flush=True)
+        arm = manager.Arm()  # type: ignore[attr-defined] # pylint: disable=no-member
+        retract_via_server(arm, RETRACT_ARM_CONF, period=POLICY_CONTROL_PERIOD)
+        return
+
+    from kortex_api.autogen.messages import Base_pb2
+
+    from prpl_tidybot.third_party.kinova import TorqueControlledArm
+
+    print("No arm RPC server: using stored Kinova Retract action", flush=True)
     arm = TorqueControlledArm()  # type: ignore[no-untyped-call]
     try:
         retract(arm, Base_pb2)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ import numpy as np
 
 from prpl_tidybot.sprout.live_kinematics import top_down
 from prpl_tidybot.sprout.sequence import GraspPose, Recipe, make_plan
+from prpl_tidybot.sprout.urdf_collision import PRPLCollisionScene
 from prpl_tidybot.video import write_mp4
 
 
@@ -160,6 +162,13 @@ class Rehearsal:
         self.data.qpos[self.arm_qpos] = joints
         mujoco.mj_forward(self.model, self.data)
         self.scene = scene
+        self.urdf = PRPLCollisionScene()
+        self.arm_obstacles = {self.urdf.box([0, 0, -0.1], [20, 20, 0.1])}
+        self.arm_obstacles.update(
+            self.urdf.box(box["center"], box["half_size"])
+            for box in scene.get("arm_obstacles", [])
+        )
+        self.pregrasp_path: list[list[float]] = []
 
     def ik(
         self,
@@ -168,7 +177,23 @@ class Rehearsal:
         target: np.ndarray,
         rotation: np.ndarray | None = None,
     ) -> float:
-        """Damped Jacobian IK, joint-limited; fail rather than display a teleport."""
+        """Use shared PRPL robot IK, with optional private-limb visualization IK."""
+        if site == self.pinch:
+            self.urdf.set(self.base_pose(), self.data.qpos[self.arm_qpos])
+            if rotation is None:
+                rotation = self.data.site_xmat[site].reshape(3, 3).copy()
+            q = self.urdf.solve(
+                target, rotation, self.data.qpos[self.arm_qpos], local=True
+            )
+            self.data.qpos[self.arm_qpos] = q
+            mujoco.mj_forward(self.model, self.data)
+            error = float(np.linalg.norm(self.data.site_xpos[site] - target))
+            if error > 0.002:
+                raise ValueError("URDF/MuJoCo tool frames disagree")
+            self.urdf.set(self.base_pose(), q)
+            if self.urdf.collision(self.arm_obstacles, 0.005, arm_only=True):
+                raise ValueError("PRPL URDF arm/floor/obstacle collision")
+            return error
         m, d = self.model, self.data
         dofs = [m.jnt_dofadr[i] for i in joints]
         qpos = [m.jnt_qposadr[i] for i in joints]
@@ -223,52 +248,21 @@ class Rehearsal:
                     "reconcile feedback/model before motion"
                 )
 
-    def pregrasp_joints(self, pose: GraspPose) -> np.ndarray:
-        """Solve a top-down endpoint; render its continuous joint-space approach."""
+    def base_pose(self) -> list[float]:
+        """Read the current preview base, including candidate poses during planning."""
+        return [
+            float(self.data.qpos[self.model.joint("tidy/" + name).qposadr[0]])
+            for name in ("joint_x", "joint_y", "joint_th")
+        ]
 
+    def pregrasp_joints(self, pose: GraspPose) -> np.ndarray:
+        """Use PRPL Kinova IKFast and joint BiRRT for the complete approach path."""
         self.validate_initial_joints()
-        original = self.data.qpos.copy()
-        try:
-            self.ik(
-                self.pinch,
-                self.arm_joints,
-                np.array([pose.x, pose.y, pose.z]),
-                top_down(pose.yaw),
-            )
-            goal = self.data.qpos[self.arm_qpos].copy()
-            delta = self.joint_delta(original[self.arm_qpos], goal)
-            for f in np.linspace(0, 1, 80):
-                q = original[self.arm_qpos] + f * delta
-                for joint, value in zip(self.arm_joints, q):
-                    if (
-                        self.model.jnt_limited[joint]
-                        and not self.model.jnt_range[joint, 0]
-                        <= value
-                        <= self.model.jnt_range[joint, 1]
-                    ):
-                        raise ValueError(
-                            "Joint-space pregrasp crosses model joint limit"
-                        )
-                self.data.qpos[self.arm_qpos] = q
-                mujoco.mj_forward(self.model, self.data)
-                for contact in self.data.contact:
-                    if contact.dist >= -1e-5:
-                        continue
-                    names = [
-                        self.model.body(self.model.geom_bodyid[g]).name
-                        for g in (contact.geom1, contact.geom2)
-                    ]
-                    if all(n.startswith("tidy/") for n in names) and set(names) != {
-                        "tidy/left_pad",
-                        "tidy/right_pad",
-                    }:
-                        raise ValueError(
-                            "Joint-space pregrasp has model self-collision"
-                        )
-            return goal
-        finally:
-            self.data.qpos[:] = original
-            mujoco.mj_forward(self.model, self.data)
+        origin = self.data.qpos[self.arm_qpos].copy()
+        self.urdf.set(self.base_pose(), origin)
+        goal = self.urdf.solve([pose.x, pose.y, pose.z], top_down(pose.yaw), origin)
+        self.pregrasp_path = self.urdf.arm_path(origin, goal, self.arm_obstacles)
+        return np.asarray(goal)
 
     def grip(self, closed: bool) -> None:
         """Set the preview gripper linkage configuration."""
@@ -293,6 +287,7 @@ class Rehearsal:
         *,
         fps: int = 12,
         steps: int = 20,
+        blocked_reason: str | None = None,
     ) -> dict[str, Any]:
         """Render the proposed sequence and return its feasibility report."""
         if fps < 1 or steps < 2:
@@ -338,10 +333,10 @@ class Rehearsal:
         option = mujoco.MjvOption()
         option.geomgroup[1] = option.geomgroup[3] = 0
         renderer = mujoco.Renderer(self.model, height=720, width=960)
-        failure = None
+        failure = blocked_reason
         try:
             base_plan = self.scene.get("base_plan")
-            if base_plan and base_plan["required"]:
+            if not failure and base_plan and base_plan["required"]:
                 from prpl_tidybot.sprout.base_planning import validate_base_plan
 
                 validate_base_plan(base_plan)
@@ -390,19 +385,23 @@ class Rehearsal:
                 if start_quat @ final_quat < 0:
                     final_quat *= -1
                 joint_origin = self.data.qpos[self.arm_qpos].copy()
-                joint_delta = None
-                if phase == "pregrasp":
+                joint_frames = None
+                if phase == "pregrasp" and not failure:
                     try:
-                        joint_goal = self.pregrasp_joints(pose)
-                        joint_delta = self.joint_delta(joint_origin, joint_goal)
+                        self.pregrasp_joints(pose)
+                        joint_frames = [joint_origin]
+                        for end in self.pregrasp_path:
+                            start_q = np.asarray(joint_frames[-1])
+                            delta = self.joint_delta(start_q, np.asarray(end))
+                            count = max(2, int(np.ceil(max(abs(delta)) / 0.02)) + 1)
+                            joint_frames.extend(
+                                start_q + f * delta
+                                for f in np.linspace(0, 1, count)[1:]
+                            )
                     except ValueError as error:
                         failure = f"pregrasp: {error}"
-                phase_steps = (
-                    steps
-                    if joint_delta is None
-                    else max(steps, int(np.ceil(max(abs(joint_delta)) / 0.04)) + 1)
-                )
-                for fraction in np.linspace(0, 1, phase_steps):
+                phase_steps = steps if joint_frames is None else len(joint_frames)
+                for frame_index, fraction in enumerate(np.linspace(0, 1, phase_steps)):
                     aim = start + fraction * (xyz - start)
                     quat = start_quat * (1 - fraction) + final_quat * fraction
                     quat /= np.linalg.norm(quat)
@@ -412,10 +411,8 @@ class Rehearsal:
                     try:
                         if failure:
                             raise ValueError(failure)
-                        if joint_delta is not None:
-                            self.data.qpos[self.arm_qpos] = (
-                                joint_origin + fraction * joint_delta
-                            )
+                        if joint_frames is not None:
+                            self.data.qpos[self.arm_qpos] = joint_frames[frame_index]
                         else:
                             self.ik(
                                 self.pinch,
@@ -435,7 +432,7 @@ class Rehearsal:
                                 )
                     except ValueError as error:
                         self.data.qpos[:] = previous
-                        failure = f"{phase}: {error}"
+                        failure = failure or f"{phase}: {error}"
                     mujoco.mj_forward(self.model, self.data)
                     for contact in self.data.contact:
                         a, b = (
@@ -523,16 +520,19 @@ class Rehearsal:
                     )
                     if failure:
                         cv2.rectangle(frame, (0, 625), (960, 720), (140, 0, 0), -1)
-                        cv2.putText(
-                            frame,
-                            "PLAN BLOCKED: " + failure[:102],
-                            (12, 660),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.48,
-                            (255, 255, 255),
-                            1,
-                            cv2.LINE_AA,
-                        )
+                        for row, line in enumerate(
+                            textwrap.wrap("PLAN BLOCKED: " + failure, 110)[:2]
+                        ):
+                            cv2.putText(
+                                frame,
+                                line,
+                                (12, 660 + row * 26),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.48,
+                                (255, 255, 255),
+                                1,
+                                cv2.LINE_AA,
+                            )
                     frames.append(frame)
                     if failure:
                         frames.extend([frame] * fps * 2)

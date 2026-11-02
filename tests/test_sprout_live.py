@@ -27,6 +27,7 @@ from prpl_tidybot.sprout.live_kinematics import LiveKinematics, top_down
 from prpl_tidybot.sprout.live_perception import LivePerception, fresh_time
 from prpl_tidybot.sprout.live_runtime import Confirmations, LiveRuntime
 from prpl_tidybot.sprout.sequence import GraspPose, Stopped
+from prpl_tidybot.sprout.urdf_collision import urdf_digest
 
 
 def config():
@@ -203,6 +204,8 @@ def rig(tmp_path, monkeypatch):
         return arm
 
     report = {
+        "planner_backend": "prpl_urdf",
+        "collision_model_sha256": urdf_digest(),
         "execution_ready": True,
         "observed": {
             "grasp_xyz": [0.5, 0, 0.1],
@@ -218,7 +221,9 @@ def rig(tmp_path, monkeypatch):
         "revalidation_tolerances": {"grasp_xyz": 0.01},
         "artifact_sha256": {"live.json": "test", "reference.jpg": "test"},
     }
-    (tmp_path / "live.json").write_text(json.dumps(config()))
+    (tmp_path / "live.json").write_text(
+        json.dumps(dict(config(), collision_model_sha256=urdf_digest()))
+    )
     (tmp_path / "review.json").write_text(json.dumps(report))
     (tmp_path / "trajectory.json").write_text("[]")
     runtime = LiveRuntime(
@@ -479,3 +484,50 @@ def test_live_backend_rejects_uninitialized_motion(rig, operation):
         operations[operation]()
     assert not rig.arm.commands
     assert not rig.confirmations
+
+
+def test_pregrasp_executes_reviewed_detour_not_endpoint_shortcut(rig):
+    """Intermediate turns in the reviewed path must reach the compliant driver."""
+    origin = list(rig.arm.q)
+    via = [0.5, 0.05, 0.25, 0, 0, 0, 0]
+    goal = [0.5, 0, 0.2, 0, 0, 0, 0]
+    path = [origin, via, goal]
+    for report in (rig.report, rig.runtime.review):
+        report["pregrasp_joints_rad"] = goal
+        report["pregrasp_path_rad"] = path
+    rig.runtime.kinematics.joints = []
+    (rig.runtime.review_path.parent / "trajectory.json").write_text(
+        json.dumps([{"phase": "pregrasp", "arm_joints_rad": q} for q in path])
+    )
+    rig.runtime.observe()
+    rig.runtime.execute(rig.report)
+    assert max(q[1] for q, _ in rig.arm.commands) == pytest.approx(0.05)
+    assert rig.arm.stopped
+
+
+def test_pregrasp_detour_must_match_reviewed_trajectory(rig):
+    """Changing only an intermediate waypoint is rejected before connecting."""
+    goal = [0.5, 0, 0.2, 0, 0, 0, 0]
+    rig.runtime.review["pregrasp_joints_rad"] = goal
+    rig.runtime.review["pregrasp_path_rad"] = [list(rig.arm.q), goal]
+    (rig.runtime.review_path.parent / "trajectory.json").write_text(
+        json.dumps(
+            [
+                {"phase": "pregrasp", "arm_joints_rad": [0.5, 0.05, 0.3, 0, 0, 0, 0]},
+                {"phase": "pregrasp", "arm_joints_rad": goal},
+            ]
+        )
+    )
+    with pytest.raises(ValueError, match="pregrasp path"):
+        rig.runtime.observe()
+    assert not rig.connects and not rig.arm.commands
+
+
+def test_old_collision_review_is_rejected_before_hardware(rig):
+    """Old circle/robot-box previews cannot authorize the new runtime."""
+    review = dict(rig.report)
+    review.pop("planner_backend")
+    rig.runtime.review_path.write_text(json.dumps(review))
+    with pytest.raises(ValueError, match="Regenerate preview"):
+        LiveRuntime(rig.runtime.review_path)
+    assert not rig.connects and not rig.arm.commands

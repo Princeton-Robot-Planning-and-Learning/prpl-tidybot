@@ -30,7 +30,6 @@ from prpl_tidybot.sprout.approach import (
 )
 from prpl_tidybot.sprout.base_motion import BaseMotion, validate_navigation
 from prpl_tidybot.sprout.base_planning import (
-    transit_radius,
     validate_base_plan,
 )
 from prpl_tidybot.sprout.compliant_arm import HardwareLimits, LocalCompliantArm
@@ -45,6 +44,8 @@ from prpl_tidybot.sprout.live_perception import LivePerception
 from prpl_tidybot.sprout.process_guard import require_exclusive_motion
 from prpl_tidybot.sprout.read_robot_state import read_arm
 from prpl_tidybot.sprout.sequence import ForearmSkill, GraspPose, Recipe, Stopped
+from prpl_tidybot.sprout.transit_geometry import validate_model_geometry
+from prpl_tidybot.sprout.urdf_collision import urdf_digest
 
 
 class Confirmations:
@@ -228,39 +229,71 @@ class LiveBackend(CompliantBackend):
                 np.array([pose.x, pose.y, pose.z]), top_down(pose.yaw), seed
             )
         )
-        delta = (goal - origin + np.pi) % (2 * np.pi) - np.pi
-        for i, joint in enumerate(self.scene.kinematics.joints):
-            if self.scene.kinematics.model.jnt_limited[joint]:
-                delta[i] = goal[i] - origin[i]
-        velocity = np.asarray(self.scene.config["hardware"]["velocity_rad_s"]) * 0.5
-        duration = max(float(np.max(np.abs(delta) / velocity)), p.period_s)
-        # Check entire joint path before sending its first command. Partition it
-        # to preserve the per-command branch-jump guard.
-        previous = origin
-        for f in np.linspace(
-            0,
-            1,
-            max(2, int(np.ceil(max(abs(delta)) / settings["max_joint_step_rad"])) + 1),
+        reviewed = self.scene.review.get("pregrasp_path_rad")
+        waypoints = (
+            [np.asarray(q, float) for q in reviewed] if reviewed else [origin, goal]
+        )
+        if any(q.shape != (7,) or not np.all(np.isfinite(q)) for q in waypoints):
+            raise RuntimeError("Invalid reviewed pregrasp path")
+        if (
+            max(abs((goal - waypoints[-1] + np.pi) % (2 * np.pi) - np.pi))
+            > settings["max_joint_step_rad"]
         ):
-            q = (origin + f * delta + np.pi) % (2 * np.pi) - np.pi
-            self.scene.kinematics.check_path(previous, q)
-            previous = q
-        fraction, stable = 0.0, 0
+            raise RuntimeError("Live pregrasp correction left reviewed IK branch")
+        waypoints[-1] = goal
+        velocity = np.asarray(self.scene.config["hardware"]["velocity_rad_s"]) * 0.5
+        segments = []
+        previous = origin
+        for waypoint in waypoints:
+            delta = (waypoint - previous + np.pi) % (2 * np.pi) - np.pi
+            for i, joint in enumerate(self.scene.kinematics.joints):
+                if self.scene.kinematics.model.jnt_limited[joint]:
+                    delta[i] = waypoint[i] - previous[i]
+            # Validate all reviewed turns, not a shortcut from start to end.
+            last = previous
+            for f in np.linspace(
+                0,
+                1,
+                max(
+                    2,
+                    int(np.ceil(max(abs(delta)) / settings["max_joint_step_rad"])) + 1,
+                ),
+            ):
+                q = previous + f * delta
+                self.scene.kinematics.check_path(last, q)
+                last = q
+            if np.max(np.abs(delta)) > 1e-9:
+                segments.append(
+                    (
+                        previous.copy(),
+                        delta,
+                        max(float(np.max(np.abs(delta) / velocity)), p.period_s),
+                    )
+                )
+            previous = waypoint
         deadline = time.monotonic() + p.timeout_s
         print(
-            "REAL pregrasp: reviewed joint-space approach with compliant controller",
+            "REAL pregrasp: following reviewed PRPL joint path "
+            "with compliant controller",
             flush=True,
         )
+        for start, delta, duration in segments:
+            fraction = 0.0
+            while fraction < 1:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("Joint-space pregrasp timed out")
+                sample = self._sample()
+                fraction = min(1.0, fraction + p.period_s / duration)
+                q = (start + fraction * delta + np.pi) % (2 * np.pi) - np.pi
+                self._send(sample, tuple(q), self._gripper)
+                self._wait()
+        stable = 0
         while time.monotonic() < deadline:
             sample = self._sample()
-            fraction = min(1.0, fraction + p.period_s / duration)
-            q = (origin + fraction * delta + np.pi) % (2 * np.pi) - np.pi
-            self._send(sample, tuple(q), self._gripper)
+            self._send(sample, tuple(goal), self._gripper)
             xyz, rot = self.scene.kinematics.full_pose(sample.q)
             arrived = (
-                fraction == 1
-                and np.linalg.norm(xyz - [pose.x, pose.y, pose.z])
-                <= p.position_tolerance_m
+                np.linalg.norm(xyz - [pose.x, pose.y, pose.z]) <= p.position_tolerance_m
                 and np.linalg.norm(rotation_error(top_down(pose.yaw), rot))
                 <= settings["orientation_tolerance_rad"]
                 and max(abs(v) for v in sample.dq) <= p.settled_speed_rad_s
@@ -485,6 +518,13 @@ class LiveRuntime:
             raise ValueError("Review must bind live configuration and reference image")
         self.config = json.loads((review_path.parent / "live.json").read_text())
         validate_config(self.config)
+        if self.review.get("planner_backend") != "prpl_urdf":
+            raise ValueError("Regenerate preview with the PRPL URDF planning backend")
+        if (
+            self.review.get("collision_model_sha256") != urdf_digest()
+            or self.config.get("collision_model_sha256") != urdf_digest()
+        ):
+            raise ValueError("Preview/runtime URDF models differ")
         self.geometry = TopDownGeometry(**self.config["geometry"])
         self.motion = MotionLimits(**self.config["motion"])
         self.hardware = HardwareLimits(**self.config["hardware"])
@@ -510,13 +550,12 @@ class LiveRuntime:
                 atol=1e-8,
             ):
                 raise ValueError("Base path must start at reviewed measured pose")
-            minimum_radius = transit_radius(
-                path, self.review["observed"]["arm_joints_rad"]
+            validate_model_geometry(
+                self.base_plan["transit_geometry"],
+                path,
+                self.review["observed"]["arm_joints_rad"],
+                self.config.get("navigation", {}),
             )
-            if self.base_plan["radius_m"] < minimum_radius + 0.04:
-                raise ValueError(
-                    "Base plan does not bound measured robot transit posture"
-                )
         base_pose = self.review["observed"]["base_xyyaw"]
         if self.base_plan and self.base_plan["required"]:
 
@@ -571,6 +610,12 @@ class LiveRuntime:
                 endpoints[-1], self.review["pregrasp_joints_rad"], atol=1e-8
             ):
                 raise ValueError("Reviewed pregrasp endpoint differs from trajectory")
+            reviewed_path = self.review.get("pregrasp_path_rad")
+            if reviewed_path is not None and (
+                np.asarray(reviewed_path).shape != np.asarray(endpoints).shape
+                or not np.allclose(reviewed_path, endpoints, atol=1e-8)
+            ):
+                raise ValueError("Reviewed pregrasp path differs from trajectory")
         # Planning may take seconds. Reacquire, rather than returning old data.
         grasp, captured = self.perception.target()
         base, base_time = self.perception.base()

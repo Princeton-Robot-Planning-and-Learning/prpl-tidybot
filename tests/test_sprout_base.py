@@ -2,80 +2,28 @@
 # pylint: disable=unused-argument,redefined-outer-name,protected-access
 """Base path, body-envelope and shutdown failure checks without hardware."""
 
-import copy
-import itertools
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
+import kinder
 import numpy as np
 import pytest
 
 from prpl_tidybot.sprout import base_motion
 from prpl_tidybot.sprout.base_motion import validate_navigation
-from prpl_tidybot.sprout.base_planning import (
-    free,
-    route,
-    segment_free,
-    validate_base_plan,
-)
 from prpl_tidybot.sprout.body_obstacle import check_contained, detect_body
 from prpl_tidybot.sprout.shutdown_arm import retract
+from prpl_tidybot.sprout.transit_geometry import build_geometry
 
 BOX = {"center": [0, 0, 0.2], "half_size": [0.3, 0.4, 0.2]}
 BOUNDS = [[-2, -2], [2, 2]]
 
 
-def test_route_avoids_box_along_entire_transit():
-    """Verify route avoids box along entire transit."""
-    path = route([-1, 0], [1, 0], [BOX], 0.2, BOUNDS)
-    assert len(path) > 2
-    for a, b in itertools.pairwise(path):
-        assert segment_free(a, b, [BOX], 0.2, BOUNDS)
-    assert not segment_free([-1, 0], [1, 0], [BOX], 0.2, BOUNDS)
-
-
-def test_unreachable_and_boundary_paths_rejected():
-    """Verify unreachable and boundary paths rejected."""
-    assert not free([1.9, 0], [BOX], 0.2, BOUNDS)
-    with pytest.raises(ValueError):
-        route([0, 0], [1, 1], [BOX], 0.2, BOUNDS)
-    wall = {"center": [0, 0, 0.1], "half_size": [0.1, 2, 0.1]}
-    with pytest.raises(ValueError, match="No collision-free"):
-        route([-1, 0], [1, 0], [wall], 0.2, [[-1.5, -1], [1.5, 1]])
-
-
-def test_swept_check_catches_thin_obstacle_between_samples():
-    """Verify swept check catches thin obstacle between samples."""
-    tiny = {"center": [0.005, 0, 0.1], "half_size": [0.001, 0.001, 0.1]}
-    assert not segment_free([0, 0], [0.02, 0], [tiny], 0.001, BOUNDS)
-
-
-def test_validation_rejects_corrupt_or_incomplete_plans():
-    """Verify validation rejects corrupt or incomplete plans."""
-    plan = {
-        "required": True,
-        "path_xyyaw": [[-1, 1, 0], [1, 1, 0]],
-        "radius_m": 0.2,
-        "bounds_xy": BOUNDS,
-        "obstacles": [BOX],
-    }
-    validate_base_plan(plan)
-    for key, value in [
-        ("radius_m", float("nan")),
-        ("bounds_xy", [[0, 0], [0, 0]]),
-        ("path_xyyaw", [[0, 0, 0]]),
-        ("obstacles", []),
-    ]:
-        bad = copy.deepcopy(plan)
-        bad[key] = value
-        with pytest.raises(ValueError):
-            validate_base_plan(bad)
-
-
 def test_body_cannot_shrink_to_hide_a_moved_limb():
     """Verify body cannot shrink to hide a moved limb."""
     check_contained(BOX, BOX)
-    moved = copy.deepcopy(BOX)
+    moved = {key: list(value) for key, value in BOX.items()}
     moved["center"][0] += 0.1
     with pytest.raises(RuntimeError):
         check_contained(moved, BOX)
@@ -236,6 +184,11 @@ def test_base_driver_stops_on_arrival_and_faults(monkeypatch, fault):
         "bounds_xy": BOUNDS,
         "obstacles": [BOX],
     }
+    model = (
+        Path(kinder.__file__).parent
+        / "envs/dynamic3d/models/stanford_tidybot/tidybot.xml"
+    )
+    plan["transit_geometry"] = build_geometry(model, [0] * 7, 0.05, config)
     motion = base_motion.BaseMotion(
         config, Perception(), reader, latch, vehicle_factory=lambda **kwargs: vehicle
     )
