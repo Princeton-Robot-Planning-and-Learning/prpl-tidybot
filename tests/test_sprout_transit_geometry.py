@@ -187,3 +187,18 @@ def test_floor_is_arm_obstacle_but_support_for_base():
         floor = scene.box([0, 0, -0.1], [20, 20, 0.1])
         assert scene.collision({floor}, 0.005)
         assert not scene.collision({floor}, 0.005, arm_only=True)
+
+
+def test_urdf_digest_is_identical_through_deployment_symlink(tmp_path, monkeypatch):
+    """The linked deployment environment must hash exactly like the original."""
+    assets = urdf_collision.get_assets_path()
+    alias = tmp_path / "linked-environment-assets"
+    alias.symlink_to(assets, target_is_directory=True)
+    urdf_collision.urdf_digest.cache_clear()
+    try:
+        expected = urdf_collision.urdf_digest()
+        monkeypatch.setattr(urdf_collision, "get_assets_path", lambda: alias)
+        urdf_collision.urdf_digest.cache_clear()
+        assert urdf_collision.urdf_digest() == expected
+    finally:
+        urdf_collision.urdf_digest.cache_clear()

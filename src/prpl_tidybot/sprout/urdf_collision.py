@@ -39,7 +39,9 @@ from pybullet_helpers.utils import get_assets_path
 @lru_cache(maxsize=1)
 def urdf_digest() -> str:
     """Bind the same public URDFs and their referenced meshes on both machines."""
-    root = get_assets_path() / "urdf"
+    # Deployment links .venv to the machine's existing environment. Resolve
+    # the root as well as its meshes so relative names stay installation-independent.
+    root = (get_assets_path() / "urdf").resolve()
     files = set()
     for name in ("tidybot/tidybot_base.urdf", "kortex_description/gen3_7dof.urdf"):
         path = root / name
