@@ -11,10 +11,38 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+INITIAL_OBSERVATION_MAX_AGE_S = 2.0
+
 
 def digest(path: Path) -> str:
     """Return a stable SHA-256 digest of the serialized review data."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def validate_observation(fresh: dict[str, Any], maximum_age: float) -> None:
+    """Report the failing source without relaxing acquisition freshness limits."""
+    if not math.isfinite(maximum_age) or maximum_age <= 0:
+        raise ValueError("Invalid observation age bound")
+    if fresh.get("ready") is not True:
+        raise RuntimeError(
+            "Runtime not ready: stop request latched during observation; "
+            "check the laptop connection/heartbeat and start a new approved session"
+        )
+    timestamps = dict(fresh.get("observation_timestamps", {}))
+    timestamps["snapshot"] = fresh["captured_at_unix"]
+    now = time.time()
+    ages = {name: now - float(stamp) for name, stamp in timestamps.items()}
+    if any(
+        not math.isfinite(age) or not 0 <= age <= maximum_age for age in ages.values()
+    ):
+        details = ", ".join(f"{name}={age:.3f}s" for name, age in ages.items())
+        raise RuntimeError(
+            f"Fresh observation rejected: ages [{details}], "
+            f"required 0..{maximum_age:.3f}s. "
+            "Check perception streaming and NUC/perception-PC clock synchronization. "
+            "Positive ages include network/processing delay; negative ages indicate "
+            "a future timestamp/clock mismatch. No motion started."
+        )
 
 
 def approve_and_execute(
@@ -77,12 +105,7 @@ def approve_and_execute(
         raise RuntimeError("Approval declined")
     check_artifacts()
     fresh = observe()
-    maximum_age = float(review["maximum_observation_age_s"])
-    if not math.isfinite(maximum_age) or maximum_age <= 0:
-        raise ValueError("Invalid observation age bound")
-    age = time.time() - float(fresh["captured_at_unix"])
-    if fresh.get("ready") is not True or not 0 <= age <= maximum_age:
-        raise RuntimeError("Hardware or fresh camera/proprioception is not ready")
+    validate_observation(fresh, float(review["maximum_observation_age_s"]))
     for key in ("grasp_xyz", "base_xyyaw", "arm_joints_rad"):
         old, new = review["observed"][key], fresh[key]
         expected_size = 7 if key == "arm_joints_rad" else 3

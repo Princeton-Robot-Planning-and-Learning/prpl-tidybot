@@ -160,3 +160,39 @@ def test_eof_cancels(review):
     with pytest.raises(RuntimeError, match="cancelled"):
         approve_and_execute(path, observe, execute, prompt=eof, interactive=True)
     assert events == []
+
+
+@pytest.mark.parametrize("age", [2.0, -2.0, float("nan")])
+def test_readiness_reports_source_ages_and_never_executes(review, monkeypatch, age):
+    """Distinguish stale/future source clocks without accepting a fresh aggregate."""
+    path, _, observe, execute, events = review
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+
+    def observed():
+        fresh = observe()
+        fresh["observation_timestamps"] = {
+            "forearm_camera": 100.0 - age,
+            "base_markers": 100.0,
+            "arm_feedback": 100.0,
+        }
+        return fresh
+
+    with pytest.raises(RuntimeError, match="forearm_camera=.*required 0..1.000s"):
+        approve_and_execute(
+            path, observed, execute, prompt=lambda _: "yes", interactive=True
+        )
+    assert events == ["observe"]
+
+
+def test_readiness_reports_latched_stop_separately(review):
+    """A stopped runtime is not misreported as expired camera data."""
+    path, _, observe, execute, events = review
+
+    def stopped():
+        return {**observe(), "ready": False}
+
+    with pytest.raises(RuntimeError, match="stop request latched"):
+        approve_and_execute(
+            path, stopped, execute, prompt=lambda _: "yes", interactive=True
+        )
+    assert events == ["observe"]

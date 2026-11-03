@@ -108,6 +108,7 @@ def rig(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(live_runtime, "time", timer)
     monkeypatch.setattr(compliant_backend, "time", timer)
+    monkeypatch.setattr("prpl_tidybot.sprout.review.time", timer)
     monkeypatch.setattr(live_runtime.LiveBackend, "_wait", lambda _: timer.sleep(0.01))
     monkeypatch.setenv("SPROUT_TIDYBOT_MODEL", "/unused-in-fake.xml")
 
@@ -252,6 +253,68 @@ def rig(tmp_path, monkeypatch):
         confirmations=confirmations,
         clock=clock,
     )
+
+
+def test_observation_reacquires_after_slow_body_check(rig, monkeypatch):
+    """Body processing time must not age the final camera/feedback snapshot."""
+    rig.runtime.config["detection"] = {"body_obstacle": {"enabled": True}}
+
+    def slow_body():
+        rig.clock.now += 10
+
+    monkeypatch.setattr(rig.runtime.perception, "body", slow_body, raising=False)
+    snapshot = rig.runtime.observe()
+    assert snapshot["captured_at_unix"] == rig.clock.now == 110.0
+    assert all(t == 110.0 for t in snapshot["observation_timestamps"].values())
+    assert not rig.connects and not rig.arm.commands
+
+
+def test_observation_retries_transient_stale_feedback(rig):
+    """Wait for a new sample instead of raising the permitted data age."""
+    calls = []
+
+    def read(_):
+        calls.append(True)
+        return {
+            "joints_rad": list(rig.arm.q),
+            "received_at_unix": rig.clock.now - (2 if len(calls) == 2 else 0),
+        }
+
+    rig.runtime._reader = read
+    snapshot = rig.runtime.observe()
+    assert len(calls) == 3
+    assert snapshot["captured_at_unix"] == rig.clock.now
+    assert not rig.connects and not rig.arm.commands
+
+
+def test_observation_rejects_persistently_stale_feedback(rig):
+    """A longer wait must never turn old feedback into permission to move."""
+    rig.runtime._reader = lambda _: {
+        "joints_rad": list(rig.arm.q),
+        "received_at_unix": rig.clock.now - 2,
+    }
+    with pytest.raises(RuntimeError, match="arm_feedback=2.000s"):
+        rig.runtime.observe()
+    assert rig.clock.now >= 101.0
+    assert not rig.runtime._observed
+    assert not rig.connects and not rig.arm.commands
+
+
+def test_initial_observation_has_separate_reviewed_age_budget(rig, monkeypatch):
+    """Stationary approval may allow processing delay without changing motion guards."""
+    rig.runtime.review["maximum_observation_age_s"] = 2.0
+    original_target = rig.runtime.perception.target
+
+    def slow_target():
+        target = original_target()
+        rig.clock.now += 1.5
+        return target
+
+    monkeypatch.setattr(rig.runtime.perception, "target", slow_target)
+    snapshot = rig.runtime.observe()
+    assert rig.clock.now - snapshot["captured_at_unix"] == 1.5
+    assert rig.runtime.config["servo"]["camera_max_age_s"] == 1.0
+    assert not rig.connects and not rig.arm.commands
 
 
 def test_concrete_runtime_full_supervised_cycle(rig):
