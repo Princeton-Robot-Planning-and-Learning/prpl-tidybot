@@ -1,5 +1,3 @@
-# Room assets are loaded only when a scene needs them.
-# pylint: disable=import-outside-toplevel
 """Use the existing PRPL real_sim robot, IK and PyBullet collision machinery.
 
 Robot geometry comes from TidyBotKinova's URDF collision elements, never from
@@ -39,26 +37,6 @@ from pybullet_helpers.utils import get_assets_path
 
 
 @lru_cache(maxsize=1)
-def room_digest() -> str:
-    """Bind main's static PRPL room collision asset, not only the robot."""
-    from kinder.envs.kinematic3d.prpl3d import _PRPL_LAB_URDF, PrplLab3DEnvConfig
-
-    root = _PRPL_LAB_URDF.parent.parent.resolve()
-    files = {_PRPL_LAB_URDF.resolve()}
-    for mesh in ET.parse(_PRPL_LAB_URDF).getroot().findall(".//mesh"):
-        files.add((_PRPL_LAB_URDF.parent / mesh.attrib["filename"]).resolve())
-    digest = hashlib.sha256()
-    for path in sorted(files):
-        digest.update(str(path.relative_to(root)).encode())
-        digest.update(path.read_bytes())
-    pose = PrplLab3DEnvConfig().lab_pose
-    digest.update(
-        np.asarray([*pose.position, *pose.orientation], dtype="<f8").tobytes()
-    )
-    return digest.hexdigest()
-
-
-@lru_cache(maxsize=1)
 def urdf_digest() -> str:
     """Bind the same public URDFs and their referenced meshes on both machines."""
     # Deployment links .venv to the machine's existing environment. Resolve
@@ -80,7 +58,7 @@ def urdf_digest() -> str:
     for path in sorted(files):
         digest.update(str(path.relative_to(root)).encode())
         digest.update(path.read_bytes())
-    digest.update(room_digest().encode())
+    digest.update(b"sprout-perceived-obstacles-only-v1")
     return digest.hexdigest()
 
 
@@ -90,7 +68,6 @@ class PRPLCollisionScene:
     def __init__(self, bounds=((-2, -2), (2, 2))) -> None:
         self.client = p.connect(p.DIRECT)
         self.closed = False
-        self._room: int | None = None
         try:
             self.robot = create_pybullet_mobile_robot(
                 "tidybot-kinova",
@@ -146,27 +123,6 @@ class PRPLCollisionScene:
             physicsClientId=self.client,
         )
 
-    @property
-    def room(self) -> int:
-        """Main's room asset and unchanged configured placement."""
-        if self._room is None:
-            from kinder.envs.kinematic3d.prpl3d import (
-                _PRPL_LAB_URDF,
-                PrplLab3DEnvConfig,
-                _suppress_urdf_warnings,
-            )
-
-            pose = PrplLab3DEnvConfig().lab_pose
-            with _suppress_urdf_warnings():
-                self._room = p.loadURDF(
-                    str(_PRPL_LAB_URDF),
-                    basePosition=pose.position,
-                    baseOrientation=pose.orientation,
-                    useFixedBase=True,
-                    physicsClientId=self.client,
-                )
-        return self._room
-
     def collision(
         self,
         bodies: builtins.set[int],
@@ -176,7 +132,6 @@ class PRPLCollisionScene:
         arm_only: bool = False,
     ) -> bool:
         """Run PRPL's model collision helpers, including base/arm interference."""
-        bodies = set(bodies) | {self.room}
         robot = self.robot
         if not base_only and check_collisions_with_held_object(
             robot.arm,
@@ -240,7 +195,6 @@ class PRPLCollisionScene:
         self, start, goal, bodies: builtins.set[int], *, clearance: float = 0.005
     ) -> list[list[float]]:
         """Use PRPL's joint-space BiRRT instead of assuming a straight approach."""
-        bodies = set(bodies) | {self.room}
         arm = self.arm
         fingers = arm.finger_state_to_joints(0.0)
         path = run_motion_planning(
@@ -264,7 +218,6 @@ class PRPLCollisionScene:
 
     def base_path(self, start, goal, bodies: builtins.set[int]) -> list[list[float]]:
         """Call the existing mobile-manipulator RRT/BiRRT entry point directly."""
-        bodies = set(bodies) | {self.room}
         self.robot.set_base(
             SE2Pose(start[0], start[1], math.remainder(start[2], 2 * math.pi))
         )

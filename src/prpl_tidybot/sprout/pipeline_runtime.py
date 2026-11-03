@@ -32,7 +32,7 @@ def real_interface(config: dict):
     if model_digest(Path(os.environ["SPROUT_TIDYBOT_MODEL"])) != config["model_sha256"]:
         raise ValueError("NUC TidyBot model/assets differ from the reviewed model")
     if urdf_digest() != config["collision_model_sha256"]:
-        raise ValueError("NUC PRPL robot/room assets differ from the reviewed model")
+        raise ValueError("NUC PRPL collision model differs from the reviewed model")
 
     from prpl_tidybot.interfaces.base_interface import RealBaseInterface
     from prpl_tidybot.interfaces.camera_interface import FakeCameraInterface

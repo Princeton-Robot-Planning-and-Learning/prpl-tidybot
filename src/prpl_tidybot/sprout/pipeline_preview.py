@@ -87,7 +87,9 @@ def render_pipeline_preview(
         "kinder/PrplLab3D-o1-v0",
         num_cubes=0,
         allow_state_access=True,
-        config=PrplLab3DEnvConfig(render_image_width=960, render_image_height=720),
+        config=PrplLab3DEnvConfig(
+            render_image_width=960, render_image_height=720, realistic_bg=False
+        ),
     )
     frames_rgb = []
     try:
@@ -95,6 +97,10 @@ def render_pipeline_preview(
         # Same inner shadow world used by main's preview/recording layer.
         inner = shadow._inner_env  # pylint: disable=protected-access
         client = inner.physics_client_id
+        # Only set_state/render is used after reset, with no cubes or physics steps.
+        # Remove the unregistered kitchen fixture. Keep the floor and robot.
+        lab_id = inner._lab_id  # pylint: disable=protected-access
+        p.removeBody(lab_id, physicsClientId=client)
         body = scene.get("body_obstacle")
         if body:
             center, half = np.asarray(body["center"]), np.asarray(body["half_size"])

@@ -4,12 +4,9 @@
 
 import json
 import threading
-from types import SimpleNamespace
 
-import kinder.envs.kinematic3d.prpl3d as prpl_lab
 import numpy as np
 import pytest
-from pybullet_helpers.geometry import Pose
 
 from prpl_tidybot.real_env import RealTidyBotEnv
 from prpl_tidybot.real_sim.plan_executors.arm_motion3d import (
@@ -26,7 +23,7 @@ from prpl_tidybot.sprout.pipeline import (
 )
 from prpl_tidybot.sprout.pipeline_runtime import PipelineRuntime, real_interface
 from prpl_tidybot.sprout.sequence import GraspPose, Stopped
-from prpl_tidybot.sprout.urdf_collision import PRPLCollisionScene, room_digest
+from prpl_tidybot.sprout.urdf_collision import PRPLCollisionScene
 
 
 @pytest.fixture(name="controls")
@@ -45,30 +42,14 @@ def fixture_controls():
     }
 
 
-def test_main_room_is_collision_geometry_not_only_a_background():
-    """An occupied cabinet pose must be rejected even without Sprout boxes."""
+def test_only_supplied_obstacles_block_the_robot():
+    """Unregistered cabinets are absent, but a perceived Sprout box still blocks."""
     q = [0, 0.2487, np.pi, -2.29235, -0.0247, 0.87245, np.pi / 2]
     with PRPLCollisionScene() as world:
-        world.set([0, -0.7, 0], q)
-        assert not world.collision(set())
         world.set([-0.5, 1.5, 0], q)
-        assert world.collision(set())
-
-
-def test_review_hash_binds_room_placement_not_only_meshes(monkeypatch):
-    """Different room placement must not pass as the same reviewed model."""
-    original = room_digest()
-    try:
-        with monkeypatch.context() as patch:
-            patch.setattr(
-                prpl_lab,
-                "PrplLab3DEnvConfig",
-                lambda: SimpleNamespace(lab_pose=Pose((0, -2, 0))),
-            )
-            room_digest.cache_clear()
-            assert room_digest() != original
-    finally:
-        room_digest.cache_clear()
+        assert not world.collision(set())
+        sprout = world.box([-0.5, 1.5, 0.15], [0.3, 0.3, 0.15])
+        assert world.collision({sprout}, base_only=True)
 
 
 @pytest.mark.parametrize("model_matches", [False, True])
