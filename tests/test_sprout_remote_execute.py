@@ -103,7 +103,6 @@ def test_real_process_approval_transport_with_fake_runtime(tmp_path):
         "completed": True,
         "source": "live_camera",
         "observed": observed,
-        "maximum_observation_age_s": 1,
         "revalidation_tolerances": {key: 0.01 for key in observed},
         "artifact_sha256": {name: digest(tmp_path / name) for name in artifacts},
     }

@@ -43,7 +43,6 @@ from prpl_tidybot.sprout.live_kinematics import LiveKinematics, rotation_error, 
 from prpl_tidybot.sprout.live_perception import LivePerception
 from prpl_tidybot.sprout.process_guard import require_exclusive_motion
 from prpl_tidybot.sprout.read_robot_state import read_arm
-from prpl_tidybot.sprout.review import validate_observation
 from prpl_tidybot.sprout.sequence import ForearmSkill, GraspPose, Recipe, Stopped
 from prpl_tidybot.sprout.transit_geometry import validate_model_geometry
 from prpl_tidybot.sprout.urdf_collision import urdf_digest
@@ -618,41 +617,22 @@ class LiveRuntime:
             ):
                 raise ValueError("Reviewed pregrasp path differs from trajectory")
         # Planning/body tracking may take seconds. Finish these checks BEFORE
-        # reacquiring the state used by the final approval freshness gate.
+        # reacquiring the state compared with the approved preview.
         if self.config.get("detection", {}).get("body_obstacle", {}).get("enabled"):
             self.perception.body()
-        deadline = time.monotonic() + self.config["servo"]["startup_timeout_s"]
-        maximum_age = self.review.get(
-            "maximum_observation_age_s", self.config["servo"]["camera_max_age_s"]
-        )
-        while True:
-            if self._stop.is_set():
-                raise Stopped("Stopped during observation")
-            try:
-                observation = self._current_observation()
-                validate_observation(observation, maximum_age)
-                self._observed = True
-                return observation
-            except RuntimeError:
-                if self._stop.is_set() or time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.02)
+        observation = self._current_observation()
+        if self._stop.is_set():
+            raise Stopped("Stopped during observation")
+        self._observed = True
+        return observation
 
     def _current_observation(self) -> dict:
-        """Read current samples after slow preflight work, keeping true timestamps."""
-        # Opening/closing the telemetry session can delay the camera sample.
-        # Read it first, retaining its real feedback timestamp in the gate.
+        """Read current robot/target state without an initial sample-age gate."""
         arm = self._reader(self.config.get("arm_host", "192.168.1.10"))
-        grasp, captured = self.perception.target()
-        base, base_time = self.perception.base()
+        grasp, _ = self.perception.target()
+        base, _ = self.perception.base()
         return {
             "ready": not self._stop.is_set(),
-            "captured_at_unix": min(captured, base_time, arm["received_at_unix"]),
-            "observation_timestamps": {
-                "forearm_camera": captured,
-                "base_markers": base_time,
-                "arm_feedback": arm["received_at_unix"],
-            },
             "grasp_xyz": [grasp.x, grasp.y, grasp.z],
             "base_xyyaw": list(base),
             "arm_joints_rad": arm["joints_rad"],

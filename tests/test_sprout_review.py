@@ -29,7 +29,6 @@ def review(tmp_path):
             for name in ("preview.mp4", "trajectory.json", "scene.json")
         },
         "observed": observed,
-        "maximum_observation_age_s": 1,
         "revalidation_tolerances": {
             "grasp_xyz": 0.005,
             "base_xyyaw": 0.005,
@@ -115,20 +114,15 @@ def test_video_changed_while_waiting_requires_new_preview(review):
     assert events == []
 
 
-@pytest.mark.parametrize(
-    "key", ["grasp_xyz", "base_xyyaw", "arm_joints_rad", "captured_at_unix"]
-)
-def test_scene_change_or_staleness_blocks_motion(review, key):
-    """Verify scene change or staleness blocks motion."""
+@pytest.mark.parametrize("key", ["grasp_xyz", "base_xyyaw", "arm_joints_rad"])
+def test_scene_change_blocks_motion(review, key):
+    """Measured scene changes still require a new preview."""
     path, _, observe, execute, events = review
 
     def changed():
         """Provide the changed test fixture or callback."""
         fresh = observe()
-        if key == "captured_at_unix":
-            fresh[key] -= 2
-        else:
-            fresh[key] = [value + 0.1 for value in fresh[key]]
+        fresh[key] = [value + 0.1 for value in fresh[key]]
         return fresh
 
     with pytest.raises(RuntimeError):
@@ -162,26 +156,21 @@ def test_eof_cancels(review):
     assert events == []
 
 
-@pytest.mark.parametrize("age", [2.0, -2.0, float("nan")])
-def test_readiness_reports_source_ages_and_never_executes(review, monkeypatch, age):
-    """Distinguish stale/future source clocks without accepting a fresh aggregate."""
+@pytest.mark.parametrize("timestamp", [None, -1000.0, 10000.0])
+def test_initial_approval_uses_measured_state_without_timestamp_gate(review, timestamp):
+    """Old/missing/future wall-clock metadata must not block the startup handoff."""
     path, _, observe, execute, events = review
-    monkeypatch.setattr(time, "time", lambda: 100.0)
 
     def observed():
-        fresh = observe()
-        fresh["observation_timestamps"] = {
-            "forearm_camera": 100.0 - age,
-            "base_markers": 100.0,
-            "arm_feedback": 100.0,
-        }
-        return fresh
+        return {**observe(), "captured_at_unix": timestamp}
 
-    with pytest.raises(RuntimeError, match="forearm_camera=.*required 0..1.000s"):
+    assert (
         approve_and_execute(
             path, observed, execute, prompt=lambda _: "yes", interactive=True
         )
-    assert events == ["observe"]
+        == "done"
+    )
+    assert events == ["observe", "execute"]
 
 
 def test_readiness_reports_latched_stop_separately(review):
@@ -191,7 +180,7 @@ def test_readiness_reports_latched_stop_separately(review):
     def stopped():
         return {**observe(), "ready": False}
 
-    with pytest.raises(RuntimeError, match="stop request latched"):
+    with pytest.raises(RuntimeError, match="Runtime stopped"):
         approve_and_execute(
             path, stopped, execute, prompt=lambda _: "yes", interactive=True
         )
