@@ -1,3 +1,5 @@
+# Hardware imports remain lazy for workstation simulation.
+# pylint: disable=import-outside-toplevel
 """Base interface."""
 
 import abc
@@ -7,7 +9,6 @@ import numpy as np
 from spatialmath import SE2
 
 from prpl_tidybot.marker_detector.client import MarkerDetectorClient
-from prpl_tidybot.third_party.base_server import BaseManager
 from prpl_tidybot.third_party.constants import (
     BASE_RPC_HOST,
     BASE_RPC_PORT,
@@ -73,12 +74,23 @@ class RealBaseInterface(BaseInterface):
     controller (odom frame) and the marker detector (map frame).
     Action execution is not yet implemented."""
 
-    def __init__(self, marker_detector_host: str = SERVER_HOSTNAME) -> None:
+    def __init__(
+        self,
+        marker_detector_host: str = SERVER_HOSTNAME,
+        *,
+        control_limits: dict | None = None,
+    ) -> None:
+        from prpl_tidybot.third_party.base_server import BaseManager
+
         self.base_manager = BaseManager(
             address=(BASE_RPC_HOST, BASE_RPC_PORT), authkey=RPC_AUTHKEY
         )
         self.base_manager.connect()
-        self.base = self.base_manager.Base()  # type: ignore # pylint: disable=no-member
+        self.base = (
+            getattr(self.base_manager, "Base")()
+            if control_limits is None
+            else getattr(self.base_manager, "Base")(control_limits=control_limits)
+        )
         self.base.reset()
 
         self.marker_detector_client = MarkerDetectorClient(host=marker_detector_host)

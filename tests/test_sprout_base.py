@@ -127,7 +127,8 @@ def test_base_driver_stops_on_arrival_and_faults(monkeypatch, fault):
         def __init__(self, **kwargs):
             self.control_loop_running = False
             self.dx = np.zeros(3)
-            self.pose = np.array([0.0, 1.0, 0.0])
+            # Keep this driver test in open floor, away from the room cabinets.
+            self.pose = np.array([0.0, -1.0, 0.0])
             self.stopped = False
 
         def start_control(self):
@@ -188,7 +189,7 @@ def test_base_driver_stops_on_arrival_and_faults(monkeypatch, fault):
     monkeypatch.setattr(base_motion.time, "sleep", sleep)
     plan = {
         "required": True,
-        "path_xyyaw": [[0, 1, 0], [0.02, 1, 0]],
+        "path_xyyaw": [[0, -1, 0], [0.02, -1, 0]],
         "radius_m": 0.2,
         "bounds_xy": BOUNDS,
         "obstacles": [BOX],

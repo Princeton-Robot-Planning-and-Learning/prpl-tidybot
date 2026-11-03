@@ -23,18 +23,23 @@ class _FakeKortexArm:
     def __init__(self) -> None:
         self.cyclic_running = False
         self.q = np.zeros(7)
+        self.speed_limits = self.acceleration_limits = None
+        self.controller = None
+        self.gripper_limits: dict[str, float] = {}
         _FakeKortexArm.sessions.append(self)
 
     def set_joint_limits(self, speed_limits, acceleration_limits):
-        """No-op."""
-        del speed_limits, acceleration_limits
+        """Record firmware speed and acceleration units."""
+        self.speed_limits = speed_limits
+        self.acceleration_limits = acceleration_limits
 
     def clear_faults(self):
         """No-op."""
 
-    def init_cyclic(self, control_callback):
+    def init_cyclic(self, control_callback, **limits):
         """Start the torque loop; asserts as the real one does."""
-        del control_callback
+        self.controller = control_callback.__self__
+        self.gripper_limits = limits
         assert not self.cyclic_running, "Cyclic thread is already running"
         self.cyclic_running = True
 
@@ -69,10 +74,10 @@ def _arm_rpc(monkeypatch):
     server.stop_event = threading.Event()
     threading.Thread(target=server.accepter, daemon=True).start()
 
-    def client():
+    def client(**kwargs):
         connection = arm_server.ArmManager(address=server.address, authkey=b"test")
         connection.connect()
-        return connection.Arm()  # pylint: disable=no-member
+        return connection.Arm(**kwargs)  # pylint: disable=no-member
 
     return client
 
@@ -93,3 +98,23 @@ def test_a_client_after_one_that_closed_gets_one_torque_loop(arm_rpc):
     assert _live_loops() == 0
     arm_rpc().reset(reset_arm=False)
     assert _live_loops() == 1
+
+
+def test_rpc_applies_joint_and_gripper_limits(arm_rpc):
+    """Slow settings reach firmware, original compliant OTG and gripper driver."""
+    client = arm_rpc(
+        control_limits={
+            "velocity_rad_s": np.deg2rad([5] * 7).tolist(),
+            "acceleration_rad_s2": np.deg2rad([10] * 7).tolist(),
+            "gripper_force_percent": 10,
+            "gripper_speed_percent": 10,
+        }
+    )
+    client.reset(reset_arm=False)
+    arm = _FakeKortexArm.sessions[-1]
+    assert arm.speed_limits == pytest.approx([5] * 7)
+    assert arm.acceleration_limits == pytest.approx([10] * 7)
+    assert arm.controller.max_velocity == pytest.approx(np.deg2rad([5] * 7))
+    assert arm.controller.max_acceleration == pytest.approx(np.deg2rad([10] * 7))
+    assert arm.gripper_limits == {"gripper_force_limit": 10, "gripper_speed_limit": 10}
+    client.close()

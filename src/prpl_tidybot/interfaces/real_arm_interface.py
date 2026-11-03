@@ -1,19 +1,28 @@
+# Hardware imports remain lazy for workstation simulation.
+# pylint: disable=import-outside-toplevel
 """Real arm interface backed by the Kinova arm RPC server."""
 
 from prpl_tidybot.interfaces.arm_interface import ArmInterface
-from prpl_tidybot.third_party.arm_server import ArmManager
 from prpl_tidybot.third_party.constants import ARM_RPC_HOST, ARM_RPC_PORT, RPC_AUTHKEY
 
 
 class RealArmInterface(ArmInterface):
     """Real arm interface backed by the Kinova arm RPC server."""
 
-    def __init__(self, reset_arm: bool = True) -> None:
+    def __init__(
+        self, reset_arm: bool = True, *, control_limits: dict | None = None
+    ) -> None:
+        from prpl_tidybot.third_party.arm_server import ArmManager
+
         self.manager = ArmManager(
             address=(ARM_RPC_HOST, ARM_RPC_PORT), authkey=RPC_AUTHKEY
         )
         self.manager.connect()
-        self.arm = self.manager.Arm()  # type: ignore # pylint: disable=no-member
+        self.arm = (
+            getattr(self.manager, "Arm")()
+            if control_limits is None
+            else getattr(self.manager, "Arm")(control_limits=control_limits)
+        )
         self.arm.reset(reset_arm=reset_arm)
 
     def get_arm_state(self) -> list[float]:

@@ -24,10 +24,15 @@ from prpl_tidybot.third_party.kinova import TorqueControlledArm
 
 
 class Arm:
-    def __init__(self):
+    def __init__(self, control_limits=None):
+        self.control_limits = control_limits
         self.arm = TorqueControlledArm()
+        p = control_limits
         self.arm.set_joint_limits(
-            speed_limits=(7 * (30,)), acceleration_limits=(7 * (80,))
+            speed_limits=tuple(np.rad2deg(p["velocity_rad_s"])) if p else (7 * (30,)),
+            acceleration_limits=(
+                tuple(np.rad2deg(p["acceleration_rad_s2"])) if p else (7 * (80,))
+            ),
         )
         self.command_queue = queue.Queue(1)
         self.controller = None
@@ -71,10 +76,31 @@ class Arm:
 
         # Create new instance of controller; it initialises at the arm's
         # current configuration, so the arm holds wherever it is.
-        self.controller = JointCompliantController(self.command_queue)
+        p = self.control_limits
+        self.controller = JointCompliantController(
+            self.command_queue,
+            **(
+                {
+                    "max_velocity": p["velocity_rad_s"],
+                    "max_acceleration": p["acceleration_rad_s2"],
+                }
+                if p
+                else {}
+            ),
+        )
 
         # Start low-level control
-        self.arm.init_cyclic(self.controller.control_callback)
+        self.arm.init_cyclic(
+            self.controller.control_callback,
+            **(
+                {
+                    "gripper_force_limit": p["gripper_force_percent"],
+                    "gripper_speed_limit": p["gripper_speed_percent"],
+                }
+                if p
+                else {}
+            ),
+        )
         while not self.arm.cyclic_running:
             time.sleep(0.01)
 
@@ -118,14 +144,14 @@ class ArmManager(MPBaseManager):
 _arm = None
 
 
-def _new_arm():
+def _new_arm(control_limits=None):
     # Stop the previous client's torque loop before the next one starts: a client that
     # never called close() (e.g. Ctrl-C) otherwise leaves its loop commanding the arm
     # beside the new one's.
     global _arm
     if _arm is not None:
         _arm.release()
-    _arm = Arm()
+    _arm = Arm(control_limits=control_limits)
     return _arm
 
 

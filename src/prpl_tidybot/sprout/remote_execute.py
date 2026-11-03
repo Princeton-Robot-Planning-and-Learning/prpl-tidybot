@@ -113,7 +113,7 @@ def main() -> None:
     parser.add_argument("--review", type=Path, required=True)
     parser.add_argument(
         "--runtime",
-        default="prpl_tidybot.sprout.live_runtime:create_runtime",
+        default="prpl_tidybot.sprout.pipeline_runtime:create_runtime",
         help="Read-only module:factory(review_path) on the NUC",
     )
     args = parser.parse_args()

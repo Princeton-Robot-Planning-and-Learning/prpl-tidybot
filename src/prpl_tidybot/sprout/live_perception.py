@@ -78,9 +78,15 @@ class LivePerception:
     """Same operator-selected tape template and calibrated projection as preview."""
 
     def __init__(
-        self, config: dict, reference: Path, *, source_factory=LatestPublisher
+        self,
+        config: dict,
+        reference: Path,
+        *,
+        source_factory=LatestPublisher,
+        check_acquisition_age: bool = True,
     ) -> None:
         self.config = config
+        self.check_acquisition_age = check_acquisition_age
         detection = config["detection"]
         reference_bgr = cv2.imread(str(reference))
         if reference_bgr is None:
@@ -99,6 +105,18 @@ class LivePerception:
         self.markers = source_factory(config["perception_host"], 6002)
         self.last_capture = -float("inf")
 
+    def _timestamp(self, stamp: Any) -> float:
+        """Optional acquisition metadata, with age checks disabled by request."""
+        if self.check_acquisition_age:
+            return fresh_time(stamp, self.config["servo"]["camera_max_age_s"])
+        # The new main-pipeline adapter does not use this optional value to
+        # authorize motion. Zero means unknown, not a fabricated capture time.
+        return (
+            float(stamp)
+            if isinstance(stamp, (int, float)) and np.isfinite(stamp)
+            else 0.0
+        )
+
     def image(self) -> tuple[np.ndarray, float]:
         """Read a fresh image paired with its acquisition metadata."""
         data = self.images.get()
@@ -109,9 +127,7 @@ class LivePerception:
                 "Ceiling publisher lacks per-camera metadata; update the perception PC"
             )
         camera = cameras[index]
-        timestamp = fresh_time(
-            camera.get("captured_at_unix"), self.config["servo"]["camera_max_age_s"]
-        )
+        timestamp = self._timestamp(camera.get("captured_at_unix"))
         if (
             camera.get("serial")
             != self.config["detection"]["camera_calibration"]["serial"]
@@ -149,9 +165,7 @@ class LivePerception:
             raise RuntimeError("Body tracking needs both timestamped camera views")
         for view in config["views"]:
             camera = cameras[view["camera_index"]]
-            fresh_time(
-                camera.get("captured_at_unix"), self.config["servo"]["camera_max_age_s"]
-            )
+            self._timestamp(camera.get("captured_at_unix"))
             if camera.get("serial") != view["serial"] or camera.get(
                 "calibration_sha256"
             ) != calibration_digest(view["projection"]):
@@ -163,7 +177,9 @@ class LivePerception:
             self.reference_composite, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), config
         )
         check_contained(body, config["reviewed_box"])
-        body["captured_at_unix"] = min(camera["captured_at_unix"] for camera in cameras)
+        body["captured_at_unix"] = min(
+            self._timestamp(camera.get("captured_at_unix")) for camera in cameras
+        )
         return body
 
     def base(self) -> tuple[np.ndarray, float]:
@@ -172,10 +188,7 @@ class LivePerception:
         robot = self.config.get("robot_id", 0)
         if robot not in data.get("poses", {}):
             raise RuntimeError("TidyBot chassis markers are missing")
-        timestamp = fresh_time(
-            data.get("pose_captured_at_unix", {}).get(robot),
-            self.config["servo"]["camera_max_age_s"],
-        )
+        timestamp = self._timestamp(data.get("pose_captured_at_unix", {}).get(robot))
         pose = np.asarray(data["poses"][robot], dtype=float)
         if pose.shape != (3,) or not np.all(np.isfinite(pose)):
             raise RuntimeError("Invalid chassis map pose")

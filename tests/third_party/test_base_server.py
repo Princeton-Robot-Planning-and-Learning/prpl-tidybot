@@ -1,6 +1,7 @@
 """Tests for third_party/base_server.py: however many clients connect, at most one
 `Vehicle` control loop drives the base."""
 
+import math
 import threading
 
 import pytest
@@ -14,7 +15,7 @@ class _FakeVehicle:
     vehicles: list["_FakeVehicle"] = []
 
     def __init__(self, max_vel, max_accel) -> None:
-        del max_vel, max_accel
+        self.max_vel, self.max_accel = max_vel, max_accel
         self.control_loop_running = False
         _FakeVehicle.vehicles.append(self)
 
@@ -47,10 +48,10 @@ def _base_rpc(monkeypatch):
     server.stop_event = threading.Event()
     threading.Thread(target=server.accepter, daemon=True).start()
 
-    def client():
+    def client(**kwargs):
         connection = base_server.BaseManager(address=server.address, authkey=b"test")
         connection.connect()
-        return connection.Base()  # pylint: disable=no-member
+        return connection.Base(**kwargs)  # pylint: disable=no-member
 
     return client
 
@@ -71,3 +72,21 @@ def test_a_client_after_one_that_closed_gets_one_control_loop(base_rpc):
     assert _live_loops() == 0
     base_rpc().reset()
     assert _live_loops() == 1
+
+
+def test_configured_speed_caps_diagonal_translation(base_rpc):
+    """The slow speed is a planar bound, including simultaneous X/Y motion."""
+    client = base_rpc(
+        control_limits={
+            "speed_m_s": 0.02,
+            "yaw_speed_rad_s": 0.05,
+            "acceleration_m_s2": 0.04,
+            "yaw_acceleration_rad_s2": 0.075,
+        }
+    )
+    client.reset()
+    vehicle = _FakeVehicle.vehicles[-1]
+    assert math.hypot(*vehicle.max_vel[:2]) == pytest.approx(0.02)
+    assert math.hypot(*vehicle.max_accel[:2]) == pytest.approx(0.04)
+    assert vehicle.max_vel[2] == 0.05
+    client.close()

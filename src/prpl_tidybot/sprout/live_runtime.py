@@ -749,6 +749,8 @@ class LiveRuntime:
         self.perception.close()
 
 
-def create_runtime(review_path: Path) -> LiveRuntime:
-    """Construct the runtime from its reviewed bundle."""
-    return LiveRuntime(review_path)
+def create_runtime(review_path: Path) -> Any:
+    """Compatibility entry point: use the original PRPL pipeline adapter."""
+    from prpl_tidybot.sprout.pipeline_runtime import create_runtime as create_pipeline
+
+    return create_pipeline(review_path)

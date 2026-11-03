@@ -11,6 +11,7 @@
 # mypy: ignore-errors
 # pylint: disable=all
 
+import math
 import time
 from multiprocessing.managers import BaseManager as MPBaseManager
 
@@ -58,14 +59,30 @@ class BaseManager(MPBaseManager):
 _base = None
 
 
-def _new_base():
+def _new_base(control_limits=None):
     # Stop the previous client's control loop before the next one starts: a client that
     # never called close() otherwise leaves its loop driving the base beside the new
     # one's.
     global _base
     if _base is not None:
         _base.close()
-    _base = Base()
+    if control_limits is None:
+        _base = Base()
+    else:
+        p = control_limits
+        _base = Base(
+            # Axis-wise OTG bounds must also bound diagonal translation speed.
+            max_vel=(
+                p["speed_m_s"] / math.sqrt(2),
+                p["speed_m_s"] / math.sqrt(2),
+                p["yaw_speed_rad_s"],
+            ),
+            max_accel=(
+                p["acceleration_m_s2"] / math.sqrt(2),
+                p["acceleration_m_s2"] / math.sqrt(2),
+                p["yaw_acceleration_rad_s2"],
+            ),
+        )
     return _base
 
 

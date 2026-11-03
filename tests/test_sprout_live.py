@@ -401,8 +401,10 @@ def test_actual_model_ik_and_obstacle_rejection():
         kin.check_state(q)
 
 
+@pytest.mark.parametrize("check_age", [True, False])
 def test_live_camera_projects_selected_patch_and_rejects_stale_or_wrong_calibration(
     tmp_path,
+    check_age,
 ):
     """Verify live camera projects selected patch and rejects stale or wrong
     calibration."""
@@ -451,17 +453,30 @@ def test_live_camera_projects_selected_patch_and_rejects_stale_or_wrong_calibrat
             get=lambda: images if port == 6003 else markers, close=lambda: None
         )
 
-    perception = LivePerception(cfg, reference, source_factory=source)
+    perception = LivePerception(
+        cfg, reference, source_factory=source, check_acquisition_age=check_age
+    )
     target, stamp = perception.target()
     assert [target.x, target.y, target.z] == pytest.approx([-0.062, 0.072, 0.08])
     assert stamp == meta["captured_at_unix"]
     assert perception.base()[0] == pytest.approx([1, 2, 0.3])
+    if not check_age:
+        for timestamp in (None, float("nan"), time.time() - 1000, time.time() + 1000):
+            meta["captured_at_unix"] = timestamp
+            markers["pose_captured_at_unix"][0] = timestamp
+            assert perception.target()[0] == target
+            assert perception.base()[0] == pytest.approx([1, 2, 0.3])
     meta["calibration_sha256"] = "changed"
     with pytest.raises(RuntimeError, match="calibration differs"):
         perception.image()
-    meta["captured_at_unix"] -= 10
-    with pytest.raises(RuntimeError, match="stale"):
-        perception.image()
+    meta["calibration_sha256"] = calibration_digest(projection)
+    meta["captured_at_unix"] = time.time() - 10
+    if check_age:
+        with pytest.raises(RuntimeError, match="stale"):
+            perception.image()
+    else:
+        assert perception.target()[0] == target
+    perception.close()
 
 
 def test_reviewed_joint_pregrasp_uses_compliant_commands(rig):

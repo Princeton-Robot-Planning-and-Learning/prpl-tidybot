@@ -1,3 +1,5 @@
+# Hardware imports remain lazy for workstation simulation.
+# pylint: disable=import-outside-toplevel
 """The top-level interface composing arm, base, and camera.
 
 Keep all real-world code behind this abstraction so that the rest of the package
@@ -20,7 +22,6 @@ from prpl_tidybot.interfaces.camera_interface import (
     FakeCameraInterface,
 )
 from prpl_tidybot.interfaces.real_arm_interface import RealArmInterface
-from prpl_tidybot.interfaces.real_camera_interface import RealCameraInterface
 from prpl_tidybot.structs import TidyBotObservation
 
 
@@ -139,7 +140,13 @@ class RealInterface(Interface):
     ) -> None:
         self.arm_interface = arm_interface or RealArmInterface()
         self.base_interface = base_interface or RealBaseInterface()
-        self.camera_interface = camera_interface or RealCameraInterface()
+        if camera_interface is None:
+            from prpl_tidybot.interfaces.real_camera_interface import (
+                RealCameraInterface,
+            )
+
+            camera_interface = RealCameraInterface()
+        self.camera_interface = camera_interface
 
     def get_base_state(self) -> spatialmath.SE2:
         return self.base_interface.get_base_state()
