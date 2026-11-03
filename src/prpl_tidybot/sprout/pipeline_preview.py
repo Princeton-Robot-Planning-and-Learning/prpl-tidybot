@@ -87,9 +87,7 @@ def render_pipeline_preview(
         "kinder/PrplLab3D-o1-v0",
         num_cubes=0,
         allow_state_access=True,
-        config=PrplLab3DEnvConfig(
-            realistic_bg=False, render_image_width=960, render_image_height=720
-        ),
+        config=PrplLab3DEnvConfig(render_image_width=960, render_image_height=720),
     )
     frames_rgb = []
     try:

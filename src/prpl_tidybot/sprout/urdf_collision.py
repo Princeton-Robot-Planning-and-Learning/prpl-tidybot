@@ -41,7 +41,7 @@ from pybullet_helpers.utils import get_assets_path
 @lru_cache(maxsize=1)
 def room_digest() -> str:
     """Bind main's static PRPL room collision asset, not only the robot."""
-    from kinder.envs.kinematic3d.prpl3d import _PRPL_LAB_URDF
+    from kinder.envs.kinematic3d.prpl3d import _PRPL_LAB_URDF, PrplLab3DEnvConfig
 
     root = _PRPL_LAB_URDF.parent.parent.resolve()
     files = {_PRPL_LAB_URDF.resolve()}
@@ -51,6 +51,10 @@ def room_digest() -> str:
     for path in sorted(files):
         digest.update(str(path.relative_to(root)).encode())
         digest.update(path.read_bytes())
+    pose = PrplLab3DEnvConfig().lab_pose
+    digest.update(
+        np.asarray([*pose.position, *pose.orientation], dtype="<f8").tobytes()
+    )
     return digest.hexdigest()
 
 
