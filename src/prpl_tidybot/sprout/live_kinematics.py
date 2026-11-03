@@ -1,7 +1,8 @@
 """PRPL URDF robot collision/IK, verified render FK and object-box checks.
 
-Obstacle boxes bound all non-target body parts; the configured held-forearm box
-bounds the moving limb in the pinch frame. They must be verified in the lab.
+Optional obstacle boxes bound configured non-target body parts; an optional
+held-forearm box bounds the moving limb in the pinch frame. If omitted, no
+arm-to-body or held-limb collision claim is made. Self/floor checks remain active.
 Checks sample the joint path at an explicit resolution with a clearance margin;
 this is not a continuous collision proof or a prediction of contact forces.
 """
@@ -16,7 +17,7 @@ import mujoco
 import numpy as np
 import pybullet as bullet
 
-from prpl_tidybot.sprout.live_config import model_digest
+from prpl_tidybot.sprout.live_config import collision_boxes, model_digest
 from prpl_tidybot.sprout.sequence import GraspPose
 from prpl_tidybot.sprout.urdf_collision import PRPLCollisionScene
 
@@ -142,8 +143,9 @@ class LiveKinematics:
             ):
                 raise RuntimeError("Joint target outside model range")
         scene = self.urdf
+        obstacles, held_box = collision_boxes(self.config)
         signature = json.dumps(
-            [self.config["obstacles"], self.config.get("detection", {})],
+            [obstacles, self.config.get("detection", {})],
             sort_keys=True,
         )
         if signature != self._obstacle_signature:
@@ -155,8 +157,7 @@ class LiveKinematics:
                     bullet.removeBody(optional_body_id, physicsClientId=scene.client)
             self._obstacle_signature = signature
             self._urdf_obstacles = {
-                scene.box(box["center"], box["half_size"])
-                for box in self.config["obstacles"]
+                scene.box(box["center"], box["half_size"]) for box in obstacles
             }
             self._urdf_floor = scene.box([0, 0, -0.1], [20, 20, 0.1])
             body_box = (
@@ -195,14 +196,14 @@ class LiveKinematics:
                 distance_threshold=p["collision_margin_m"],
             ):
                 raise RuntimeError("TidyBot base overlaps Sprout whole-body keep-out")
-            if held:
-                box = self.config["held_forearm"]
+            if held and held_box is not None:
+                box = held_box
                 rotation = self.data.site_xmat[self.site].reshape(3, 3)
                 center = self.data.site_xpos[self.site] + rotation @ box["center"]
                 half = np.abs(rotation) @ box["half_size"]
                 if center[2] - half[2] < -p["collision_margin_m"]:
                     raise RuntimeError("Held forearm below floor")
-                for obstacle in self.config["obstacles"]:
+                for obstacle in obstacles:
                     if np.all(
                         np.abs(center - obstacle["center"])
                         < half

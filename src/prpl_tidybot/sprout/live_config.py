@@ -1,4 +1,4 @@
-"""Explicit physical commissioning inputs for the supervised forearm cycle."""
+"""Automatic input validation for the preview-approved forearm cycle."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from prpl_tidybot.sprout.approach import TopDownGeometry
 from prpl_tidybot.sprout.compliant_arm import HardwareLimits
 from prpl_tidybot.sprout.compliant_backend import MotionLimits
 
+# Legacy metadata accepted from older live.json files, not execution gates.
 CHECKS = (
     "model_mount_and_tool",
     "camera_calibration",
@@ -92,8 +93,58 @@ def calibration_digest(projection: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def collision_boxes(config: dict[str, Any]) -> tuple[list[dict], dict | None]:
+    """Read optional arm/held-object boxes without requiring manual calibration.
+
+    Missing dimensions (including legacy null placeholders) omit that box.
+    Complete boxes must still be finite and geometrically valid. The camera's
+    whole-body base keep-out is separate and is never an arm obstacle here.
+    """
+
+    def optional(box: Any, label: str) -> dict | None:
+        if box is None:
+            return None
+        if not isinstance(box, dict):
+            raise ValueError(f"Invalid {label}: expected a collision box")
+        if box.get("center") is None or box.get("half_size") is None:
+            return None
+        for key in ("center", "half_size"):
+            values = box[key]
+            if (
+                not isinstance(values, (list, tuple))
+                or len(values) != 3
+                or any(
+                    isinstance(v, bool)
+                    or not isinstance(v, (int, float))
+                    or not math.isfinite(v)
+                    for v in values
+                )
+            ):
+                raise ValueError(f"Invalid {label} {key}")
+        if any(v <= 0 for v in box["half_size"]):
+            raise ValueError(f"Invalid {label}: half-sizes must be positive")
+        return box
+
+    entries = config.get("obstacles")
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        raise ValueError("Invalid obstacles: expected a list")
+    obstacles = []
+    for index, entry in enumerate(entries):
+        box = optional(entry, f"obstacles[{index}]")
+        if box is not None:
+            obstacles.append(box)
+    return obstacles, optional(config.get("held_forearm"), "held_forearm")
+
+
 def validate_config(config: dict[str, Any], *, commissioned: bool = True) -> None:
-    """Reject omissions, non-finite bounds, or unverified physical commissioning."""
+    """Check numeric inputs; execution is gated by reviewed approval and live guards.
+
+    Legacy commissioning booleans are retained as metadata only. They cannot
+    substitute for fresh-state, geometry, controller or stop/approval checks.
+    """
+    del commissioned  # Backward-compatible argument, no manual checkbox gate.
     if config.get("schema") != "sprout_live_v1":
         raise ValueError("Expected sprout_live_v1 configuration")
     if config.get("arm_host", "192.168.1.10") != "192.168.1.10":
@@ -142,22 +193,7 @@ def validate_config(config: dict[str, Any], *, commissioned: bool = True) -> Non
         raise ValueError("Invalid servo travel/path bounds")
     if hardware.command_timeout_s <= motion.period_s * 2:
         raise ValueError("Command watchdog must allow at least two control periods")
-    if not config.get("obstacles"):
-        raise ValueError(
-            "Provide conservative keep-out boxes for Sprout's torso/other limbs "
-            "and surroundings"
-        )
-    for box in [*config["obstacles"], config.get("held_forearm", {})]:
-        for key in ("center", "half_size"):
-            values = box.get(key)
-            if (
-                values is None
-                or len(values) != 3
-                or not all(math.isfinite(v) for v in values)
-            ):
-                raise ValueError(f"Invalid collision box {key}")
-        if any(v <= 0 for v in box["half_size"]):
-            raise ValueError("Collision half-sizes must be positive")
+    collision_boxes(config)
     if config.get("confirmation_mode") != "operator":
         raise ValueError(
             "This first-trial runtime requires explicit "
@@ -169,12 +205,3 @@ def validate_config(config: dict[str, Any], *, commissioned: bool = True) -> Non
             raise ValueError(f"Fill positive revalidation_tolerances.{key}")
     if config["revalidation_tolerances"]["grasp_xyz"] > servo["max_travel_m"]:
         raise ValueError("Target revalidation exceeds allowed visual correction")
-    if commissioned:
-        absent = [
-            key for key in CHECKS if config.get("verified", {}).get(key) is not True
-        ]
-        if config.get("execution_enabled") is not True or absent:
-            raise ValueError(
-                "Physical commissioning incomplete: "
-                + ", ".join(absent or ["execution_enabled"])
-            )

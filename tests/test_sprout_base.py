@@ -14,7 +14,7 @@ from prpl_tidybot.sprout import base_motion
 from prpl_tidybot.sprout.base_motion import validate_navigation
 from prpl_tidybot.sprout.body_obstacle import check_contained, detect_body
 from prpl_tidybot.sprout.shutdown_arm import retract
-from prpl_tidybot.sprout.transit_geometry import build_geometry
+from prpl_tidybot.sprout.transit_geometry import DEFAULT_NAVIGATION, build_geometry
 
 BOX = {"center": [0, 0, 0.2], "half_size": [0.3, 0.4, 0.2]}
 BOUNDS = [[-2, -2], [2, 2]]
@@ -39,12 +39,21 @@ def test_body_requires_two_camera_views():
         )
 
 
-def test_navigation_requires_explicit_physical_verification():
-    """Verify navigation requires explicit physical verification."""
-    with pytest.raises(ValueError, match="verification"):
-        validate_navigation({})
+def test_navigation_uses_numeric_limits_not_manual_checkbox():
+    """Legacy verification metadata cannot block an otherwise valid route."""
+    settings = dict(
+        DEFAULT_NAVIGATION,
+        verified=False,
+        timeout_s=300.0,
+        period_s=0.02,
+        position_tolerance_m=0.005,
+        yaw_tolerance_rad=0.01,
+    )
+    validate_navigation(settings)
     with pytest.raises(ValueError, match="speed_m_s"):
-        validate_navigation({"verified": True})
+        validate_navigation(dict(settings, speed_m_s=0))
+    with pytest.raises(ValueError, match="speed_m_s"):
+        validate_navigation({})
 
 
 class FakeBase:

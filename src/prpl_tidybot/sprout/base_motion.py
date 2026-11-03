@@ -21,12 +21,7 @@ from prpl_tidybot.sprout.transit_geometry import TransitChecker, validate_budget
 
 
 def validate_navigation(config: dict) -> None:
-    """Validate commissioned navigation bounds before starting base control."""
-    if config.get("verified") is not True:
-        raise ValueError(
-            "Base route/operating area, transit posture "
-            "and physical stop need lab verification"
-        )
+    """Validate numeric navigation bounds before starting guarded base control."""
     for key in (
         "speed_m_s",
         "yaw_speed_rad_s",

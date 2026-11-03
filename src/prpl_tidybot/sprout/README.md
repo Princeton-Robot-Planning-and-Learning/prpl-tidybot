@@ -13,3 +13,8 @@ assets belong in this repository.
 
 No module should activate hardware merely by being imported. Use the documented
 Mac workflow for preview and explicit execution approval.
+
+Manual arm-obstacle and held-forearm boxes are optional. Empty legacy placeholders
+and verification checkbox fields do not block the current camera workflow.
+The camera whole-body box protects base transit, not arm-to-Sprout contact.
+Robot self/floor, joint/torque, freshness, approval and stop checks remain active.

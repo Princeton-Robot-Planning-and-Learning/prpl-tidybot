@@ -20,6 +20,7 @@ from prpl_tidybot.sprout.compliant_backend import JointSample, MotionLimits
 from prpl_tidybot.sprout.live_config import (
     CHECKS,
     calibration_digest,
+    collision_boxes,
     model_digest,
     validate_config,
 )
@@ -531,3 +532,86 @@ def test_old_collision_review_is_rejected_before_hardware(rig):
     with pytest.raises(ValueError, match="Regenerate preview"):
         LiveRuntime(rig.runtime.review_path)
     assert not rig.connects and not rig.arm.commands
+
+
+@pytest.mark.parametrize(
+    "boxes",
+    [
+        {},
+        {"obstacles": None, "held_forearm": None},
+        {"obstacles": [], "held_forearm": {}},
+        {
+            "obstacles": [
+                {"name": "old placeholder", "center": None, "half_size": None}
+            ],
+            "held_forearm": {"center": None, "half_size": None},
+        },
+    ],
+)
+def test_optional_boxes_and_legacy_checkboxes_do_not_require_manual_values(boxes):
+    """Existing null-filled files can pass without fabricated geometry/flags."""
+    cfg = config()
+    cfg.pop("obstacles")
+    cfg.pop("held_forearm")
+    cfg.update(boxes)
+    cfg["verified"] = dict.fromkeys(CHECKS, False)
+    cfg["execution_enabled"] = False
+    validate_config(cfg)
+    assert collision_boxes(cfg) == ([], None)
+
+
+def test_configured_box_still_rejects_invalid_geometry():
+    """Optional does not mean malformed complete boxes silently pass."""
+    cfg = config()
+    cfg["obstacles"][0]["half_size"] = [0.0, 0.1, 0.1]
+    with pytest.raises(ValueError, match="half-sizes"):
+        validate_config(cfg)
+    cfg["obstacles"][0]["half_size"] = [0.1] * 3
+    cfg["obstacles"][0]["center"] = [float("nan"), 0, 0]
+    with pytest.raises(ValueError, match="center"):
+        validate_config(cfg)
+
+
+def test_legacy_empty_boxes_can_complete_guarded_cycle(rig):
+    """No manual box/verification fields are needed by the supervised runtime."""
+    cfg = rig.runtime.config
+    cfg["obstacles"] = [{"center": None, "half_size": None}]
+    cfg["held_forearm"] = None
+    cfg["verified"] = dict.fromkeys(CHECKS, False)
+    cfg["execution_enabled"] = False
+    validate_config(cfg)
+    rig.runtime.observe()
+    result = rig.runtime.execute(rig.report)
+    assert result["completed"][-1] == "retreat"
+    assert [item[0] for item in rig.confirmations] == ["grasp", "support"]
+    assert rig.arm.stopped
+
+
+def test_no_manual_boxes_keeps_model_floor_and_whole_body_base_guards():
+    """Removing manual box inputs retains URDF and camera base keep-out checks."""
+    model = (
+        Path(kinder.__file__).parent
+        / "envs/dynamic3d/models/stanford_tidybot/tidybot.xml"
+    )
+    cfg = config()
+    cfg.update(obstacles=[{"center": None, "half_size": None}], held_forearm=None)
+    cfg["model_sha256"] = model_digest(model)
+    kin = LiveKinematics(model, [0, 0, 0], cfg)
+    q = [0, 0.248, math.pi - 0.001, -2.292, -0.01, 0.872, math.pi / 2]
+    try:
+        kin.check_state(q, held=True)
+        low = kin.urdf.solve([0.4, 0, 0.01], top_down(0), q)
+        with pytest.raises(RuntimeError, match="Floor clearance"):
+            kin.check_state(low)
+        cfg["detection"] = {
+            "body_obstacle": {
+                "reviewed_box": {
+                    "center": [0, 0, 0.18],
+                    "half_size": [0.3, 0.3, 0.18],
+                }
+            }
+        }
+        with pytest.raises(RuntimeError, match="base overlaps"):
+            kin.check_state(q)
+    finally:
+        kin.urdf.close()

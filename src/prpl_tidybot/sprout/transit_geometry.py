@@ -16,10 +16,10 @@ from prpl_tidybot.sprout.live_config import model_digest
 from prpl_tidybot.sprout.urdf_collision import PRPLCollisionScene, urdf_digest
 
 DEFAULT_NAVIGATION = {
-    "speed_m_s": 0.04,
-    "yaw_speed_rad_s": 0.1,
-    "acceleration_m_s2": 0.08,
-    "yaw_acceleration_rad_s2": 0.15,
+    "speed_m_s": 0.02,
+    "yaw_speed_rad_s": 0.05,
+    "acceleration_m_s2": 0.04,
+    "yaw_acceleration_rad_s2": 0.075,
     "path_tolerance_m": 0.015,
     "yaw_tolerance_rad": 0.01,
     "arm_tolerance_rad": 0.01,
